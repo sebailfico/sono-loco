@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Wraps `pio device monitor` so bench runs can be compared between firmware
-    changes — the counters in the status lines only mean something relative to a
+    changes -- the counters in the status lines only mean something relative to a
     previous run. See docs/bench-test.md.
 
     Output goes to logs/<environment>-<timestamp>.log and to the console at the
