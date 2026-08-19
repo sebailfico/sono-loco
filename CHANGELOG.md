@@ -43,6 +43,11 @@ zero. The 23 unit tests also pass on-device.
 - Ports confirmed: COM8 is a WROOM (ESP32-D0WD-V3, no PSRAM), COM9 an ESP32-S3
   with 8 MB embedded PSRAM. The previous `platformio.ini` mapping had the S3 and
   the WROVER the wrong way round.
+- **600 s drift baseline taken.** 132,069 packets, zero lost, zero overflow,
+  zero underrun, zero duplicates, zero resyncs. Client buffer drains at
+  1.34 B/s = -30.5 ppm, ~18 minutes to exhaustion. The estimate converged across
+  45/120/600 s runs, and the log-derived clock measure — usable at this run
+  length, +8.1 +/- 1.2 ppm for the WROOM — agrees in sign and magnitude.
 - **D3 amended.** The WROOM's exclusion from the mesh is narrower than recorded:
   it cannot be a *server*, because that needs BT and WiFi together, but it runs
   ESP-NOW fine as a *client* with BT off. It sourced the entire test.
