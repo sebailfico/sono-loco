@@ -70,8 +70,15 @@ Phone ──BT A2DP──► ESP32 ──I2S──► PCM5102 ──► TPA3116 
 
 **CLIENT mode:**
 ```
-ESP-NOW RX ──► jitter buffer (~185ms) ──► I2S ──► PCM5102 ──► TPA3116 ──► Speaker
+ESP-NOW RX ──► jitter buffer ──► I2S DMA ──► PCM5102 ──► TPA3116 ──► Speaker
+                (~91ms prefill)   (~46ms)
 ```
+
+Client-side latency is about **137 ms**: playback starts once `JITTER_PREFILL`
+(4000 bytes ≈ 91 ms) has accumulated, and the I2S DMA ring holds a further
+1024 frames ≈ 46 ms. The ring itself is 8192 bytes ≈ 185 ms, which is its
+capacity, not its latency — the prefill must stay above the DMA capacity, see
+the gotchas.
 
 The 4x reduction is 2x from halving the sample rate and 2x from stereo → mono. The
 server plays the full 44.1 kHz stereo stream locally, so rooms do not currently sound
@@ -83,16 +90,17 @@ The Bluetooth speaker half works on hardware: A2DP sink, I2S output to the
 PCM5102, notification sounds, volume.
 
 **The ESP-NOW mesh works**, as of 2026-08-19: a WROOM sourcing and an ESP32-S3
-playing, 26,279 packets over 120 s with zero lost, overflowed, underrun,
-duplicated or resynced. Run it yourself with `./tools/bench-mesh.ps1 -Flash`.
+playing, **132,069 packets over 600 s with zero lost, overflowed, underrun,
+duplicated or resynced**. Run it yourself with `./tools/bench-mesh.ps1 -Flash`.
 
 **The Bluetooth server path is still unproven** — audio taken from a phone and
 forwarded to clients. No board on the bench can do it: the WROOM has no PSRAM and
 the S3 has no BT Classic, so that needs a WROVER.
 
-Also still open: the clocks drift (measured at roughly 25-45 ppm between these
-two boards, enough to empty a client's jitter buffer in about half an hour) and
-nothing corrects for it yet.
+Also still open: the clocks drift. Measured over 600 s at **−30.5 ppm** between
+these two boards, which drains a client's jitter buffer in about 18 minutes.
+Nothing corrects for it yet — see `TODO.md`, which carries the numbers and what
+the fix needs to look like.
 
 Where things are written down, so they stay in one place each:
 
@@ -101,7 +109,7 @@ Where things are written down, so they stay in one place each:
 | `TODO.md` | everything still open, including the known timing and bandwidth problems |
 | `CHANGELOG.md` | what has already been done and when |
 | `docs/decisions.md` | why the architecture is what it is, and what would change it |
-| `docs/bench-test.md` | the two-board bring-up procedure and its pass criteria |
+| `docs/bench-test.md` | how to test on hardware — the automated harness, and the manual walkthrough for the Bluetooth path |
 
 ## Hardware
 
@@ -207,13 +215,17 @@ node — most importantly `ESPNOW_CHANNEL`, which **must** match across the mesh
 ### Build & Upload
 
 There are **two builds**, because there are only two instruction sets — and three
-environment names, because there are three boards with three COM ports:
+environment names, one per board that might be plugged in:
 
 | Environment   | Board        | Port | Build | Role |
 |---------------|--------------|------|-------|------|
-| `esp32dev`    | ESP32 WROOM  | COM7 | `esp32_classic` | Local BT playback only (no PSRAM → no mesh) |
-| `esp32wrover` | ESP32 WROVER | COM9 | `esp32_classic` | SERVER or CLIENT — the reference node |
-| `esp32s3`     | ESP32-S3     | COM8 | `esp32s3_client` | CLIENT only (no BT Classic) |
+| `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker. No PSRAM, so no mesh while BT runs — but a full mesh node in bench mode, where BT stays off |
+| `esp32wrover` | ESP32 WROVER | COM7 | `esp32_classic` | SERVER or CLIENT — the reference node. **None attached yet**, so the port is a placeholder |
+| `esp32s3`     | ESP32-S3     | COM9 | `esp32s3_client` | CLIENT only (no BT Classic) |
+
+Ports confirmed 2026-08-19 with `pio device list` and `esptool chip_id`.
+`tools/bench-mesh.ps1` does not depend on them — it discovers ports and
+identifies each chip at run time, so a new board needs no edit here.
 
 `esp32dev` and `esp32wrover` compile **the same binary**; they exist as separate names
 only so each board keeps its port. The Arduino core ships `CONFIG_SPIRAM=y` with
@@ -230,7 +242,7 @@ cd esp32-code
 
 pio run -e esp32dev --target upload
 pio device monitor -e esp32dev
-pio device list                      # verify the ports — COM8/COM9 are guesses
+pio device list                      # re-check the ports after plugging a board in
 ```
 
 PlatformIO is not on `PATH` on the dev machine; use the full path:
@@ -252,6 +264,34 @@ on the dev machine — see `TODO.md`. Until it is, the same tests run on a
 connected board with `pio test -e esp32dev`, using the cross-toolchain
 PlatformIO already has.
 
+To test the **mesh** — real boards, real radio:
+
+```powershell
+./tools/bench-mesh.ps1 -Flash -Duration 600
+```
+
+It discovers every attached ESP32, identifies each by chip, flashes the matching
+firmware, streams a synthetic 22.05 kHz tone between them and reports packet loss
+and clock drift. No board limit. Full detail in `docs/bench-test.md`.
+
+### Bench mode
+
+Any node can be driven by hand over the serial monitor, in any build:
+
+| Key | Effect |
+|-----|--------|
+| `?` | identify — chip, PSRAM, MAC, whether BT and ESP-NOW are active |
+| `b` | reboot into bench mode (Bluetooth stays off) |
+| `n` | reboot into normal mode |
+| `s` | start generating the synthetic test stream |
+| `x` | stop generating it |
+| `r` | print a telemetry line now |
+
+Bench mode exists because the normal SERVER role needs a phone to connect over
+A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs
+on a board with no PSRAM — which is how a WROOM can be tested on the mesh at all.
+See D9 in `docs/decisions.md`.
+
 ## Code Layout
 
 Deliberately small. `main.cpp` is one file on purpose — resist splitting it
@@ -267,8 +307,10 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   lived.
 - `esp32-code/test/test_jitter/` — host tests for the above. Each one
   corresponds to a real bug or a real invariant.
-- `tools/capture-serial.ps1` — timestamped serial capture, so two bench runs can
-  be compared.
+- `tools/bench-mesh.ps1` — the automated multi-board mesh test: discover, flash,
+  stream, measure drift, report. Scales to any number of boards.
+- `tools/capture-serial.ps1` — timestamped serial capture of a single node, so
+  two manual runs can be compared.
 
 Comments in the code explain *why*, particularly where a line looks wrong but isn't.
 

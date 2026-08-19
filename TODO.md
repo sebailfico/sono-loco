@@ -7,9 +7,9 @@ file previously carried all of it and the open list got lost inside the done one
 ## Current state (2026-08-19)
 
 **The ESP-NOW mesh path is proven on hardware.** A WROOM sourcing and an
-ESP32-S3 playing: 26,279 packets over 120 s, zero lost, zero overflow, zero
+ESP32-S3 playing: 132,069 packets over 600 s, zero lost, zero overflow, zero
 underrun, zero duplicates, zero resyncs, source rate exactly 220.5 pkt/s.
-Reproduce with `./tools/bench-mesh.ps1 -Flash -Duration 120`.
+Reproduce with `./tools/bench-mesh.ps1 -Flash -Duration 600`.
 
 The 23 host tests also pass on-device (`pio test -e esp32dev`).
 
@@ -44,7 +44,8 @@ forwarded to clients. That needs hardware nobody here has yet.
 ### Timing / sync
 
 - [ ] **Server and clients are not time-aligned.** The server plays through A2DP
-      with tens of ms latency; clients play after a ~185 ms jitter buffer.
+      with tens of ms latency; clients play after ~137 ms (91 ms prefill plus
+      46 ms of I2S DMA).
       Adjacent rooms will slap-echo. The server needs to delay its own local
       playback to match.
 - [ ] **No clock-drift correction.** Measured, not predicted. 600 s baseline
@@ -83,7 +84,7 @@ forwarded to clients. That needs hardware nobody here has yet.
 
 - [ ] **Expose a client-only runtime mode**, so a WROOM can be a real client
       node. Bench mode already proves a WROOM runs ESP-NOW fine as long as
-      Bluetooth is never started — it sourced the whole 120 s test. The firmware
+      Bluetooth is never started — it sourced the whole 600 s test. The firmware
       just has no way to say "be a client, never a server" outside bench mode.
       See the D3 amendment in `docs/decisions.md`.
 
