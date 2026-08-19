@@ -27,6 +27,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+// Hardware-independent parts of the CLIENT receive path, tested on the host
+// with `pio test -e native` — see test/test_jitter.
+#include "jitter.h"
+#include "seqtracker.h"
+
 #ifdef ENABLE_BLUETOOTH
 #include "BluetoothA2DPSink.h"
 #endif
@@ -73,9 +78,9 @@ static size_t i2sWriteAll(const void *src, size_t bytes, TickType_t timeout) {
 #define NOTE_A5  880
 
 void playTone(uint16_t freq, uint16_t durationMs, uint16_t amp = TONE_AMPLITUDE) {
-    const int total = (TONE_SAMPLE_RATE * durationMs) / 1000;
+    const int total = (BT_SAMPLE_RATE * durationMs) / 1000;
     const int chunk = 512;
-    const int fade  = TONE_SAMPLE_RATE * TONE_FADE_MS / 1000;
+    const int fade  = BT_SAMPLE_RATE * TONE_FADE_MS / 1000;
     int16_t buf[chunk * 2];
     int written = 0;
 
@@ -83,7 +88,7 @@ void playTone(uint16_t freq, uint16_t durationMs, uint16_t amp = TONE_AMPLITUDE)
         int n = min(chunk, total - written);
 
         for (int i = 0; i < n; i++) {
-            float t = (float)(written + i) / TONE_SAMPLE_RATE;
+            float t = (float)(written + i) / BT_SAMPLE_RATE;
             int16_t s = (int16_t)(amp * sinf(2.0f * M_PI * freq * t));
             int pos = written + i;
             if (pos < fade)              s = s * pos / fade;
@@ -99,7 +104,7 @@ void playTone(uint16_t freq, uint16_t durationMs, uint16_t amp = TONE_AMPLITUDE)
 }
 
 void playSilence(uint16_t durationMs) {
-    const int total = (TONE_SAMPLE_RATE * durationMs) / 1000;
+    const int total = (BT_SAMPLE_RATE * durationMs) / 1000;
     const int chunk = 512;
     int16_t buf[chunk * 2] = {0};
     int written = 0;
@@ -132,7 +137,7 @@ void playDisconnectedSound() {
 void initI2SForTones() {
     i2s_config_t cfg = {
         .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-        .sample_rate          = TONE_SAMPLE_RATE,
+        .sample_rate          = BT_SAMPLE_RATE,
         .bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
@@ -202,83 +207,29 @@ static volatile uint32_t txSendErr    = 0;
 static volatile uint32_t txRadioFail  = 0;
 
 // --- RX (CLIENT mode) ---
+// The ring buffer and the packet sequence accounting live in lib/jitter: they
+// are pure logic, they are where the nastiest bugs in this project came from,
+// and there they can be tested on this PC instead of only on a board. What
+// stays here is the part that genuinely needs a radio and an I2S peripheral.
 static_assert((JITTER_BUF_SIZE & (JITTER_BUF_SIZE - 1)) == 0,
               "JITTER_BUF_SIZE must be a power of two");
-#define JITTER_MASK (JITTER_BUF_SIZE - 1)
 
-static uint8_t          jBuf[JITTER_BUF_SIZE];
-static volatile int     jWrite   = 0;
-static volatile int     jRead    = 0;
-static volatile bool    jReady   = false;   // true once prefill threshold is met
-static volatile bool    rxActive = false;   // set by recv callback, triggers mode switch
+static uint8_t      jStorage[JITTER_BUF_SIZE];
+static JitterBuffer jbuf;
+static SeqTracker   seqTracker(SEQ_RESYNC_THRESHOLD, MAX_GAP_FILL_PKTS);
+
+static volatile bool jReady   = false;   // true once prefill threshold is met
+static volatile bool rxActive = false;   // set by recv callback, triggers mode switch
 static volatile unsigned long lastRxMs = 0;
-static volatile uint32_t rxCount   = 0;
-static volatile uint32_t rxDropped = 0;     // packets lost per sequence numbers
-static volatile uint32_t rxOverflow = 0;    // packets dropped, jitter buffer full
-static volatile uint32_t rxUnderrun = 0;    // times playback outran the buffer
-static volatile uint32_t rxDupe     = 0;    // exact retransmits, discarded
-static volatile uint32_t rxResync   = 0;    // sequence jumped — stream restarted
-static uint16_t         lastSeq  = 0;
-static bool             firstPkt = true;
+static volatile uint32_t rxCount    = 0;
+static volatile uint32_t rxOverflow = 0;   // packets dropped, jitter buffer full
+static volatile uint32_t rxUnderrun = 0;   // times playback outran the buffer
+// lost / dupe / resync counters live on seqTracker.
 
 // Lock onto the first node we hear so two simultaneous servers can never
 // interleave their streams into one jitter buffer.
 static uint8_t          lockedSender[6] = {0};
 static volatile bool    senderLocked    = false;
-
-static inline int jFill() {
-    int f = jWrite - jRead;
-    return f < 0 ? f + JITTER_BUF_SIZE : f;
-}
-
-static inline int jFree() {
-    return JITTER_BUF_SIZE - 1 - jFill();
-}
-
-/**
- * Push a whole block or nothing.
- *
- * The previous implementation copied byte-by-byte and skipped individual bytes
- * once the ring was full. Dropping an odd number of bytes shifts every later
- * 16-bit sample by one byte — L/R swap plus each sample assembled from two
- * different sample halves — and it never re-aligns. All-or-nothing keeps the
- * framing intact; a dropped packet is a 4.5 ms glitch, a shifted stream is noise.
- */
-static bool jPushBlock(const uint8_t *data, int len) {
-    if (len <= 0) return true;
-    if (jFree() < len) return false;
-    int w = jWrite;
-    int first = min(len, JITTER_BUF_SIZE - w);
-    memcpy(jBuf + w, data, first);
-    if (len > first) memcpy(jBuf, data + first, len - first);
-    jWrite = (w + len) & JITTER_MASK;
-    return true;
-}
-
-static bool jPushSilence(int len) {
-    if (len <= 0) return true;
-    if (jFree() < len) return false;
-    int w = jWrite;
-    int first = min(len, JITTER_BUF_SIZE - w);
-    memset(jBuf + w, 0, first);
-    if (len > first) memset(jBuf, 0, len - first);
-    jWrite = (w + len) & JITTER_MASK;
-    return true;
-}
-
-/** Copy out without consuming — the caller advances only what I2S accepted. */
-static bool jPeek(uint8_t *out, int len) {
-    if (jFill() < len) return false;
-    int r = jRead;
-    int first = min(len, JITTER_BUF_SIZE - r);
-    memcpy(out, jBuf + r, first);
-    if (len > first) memcpy(out + first, jBuf, len - first);
-    return true;
-}
-
-static inline void jAdvance(int len) {
-    jRead = (jRead + len) & JITTER_MASK;
-}
 
 static void espnowTxTask(void *) {
     AudioPacket pkt;
@@ -349,31 +300,19 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
 
     if (currentMode != MODE_CLIENT) return;
 
-    if (firstPkt) {
-        firstPkt = false;
-    } else if (seq == lastSeq) {
-        rxDupe++;
-        return;   // exact retransmit — playing it twice is an audible stutter
-    } else {
-        uint16_t gap = (uint16_t)(seq - lastSeq - 1);
-        if (gap >= SEQ_RESYNC_THRESHOLD) {
-            // `gap` is unsigned, so any packet *behind* lastSeq — a reordered
-            // frame, or a server that rebooted and restarted its counter at 0 —
-            // computes as ~65535. Treating that as loss used to add 65535 to
-            // `lost` and splice MAX_GAP_FILL_PKTS of silence into the stream.
-            // Just re-baseline on the new sequence and play the payload.
-            rxResync++;
-        } else if (gap > 0) {
-            rxDropped += gap;
-            // Substitute silence for the lost packets so playback keeps its
-            // timing instead of splicing the stream shorter on every loss.
-            int fillPkts = min((int)gap, MAX_GAP_FILL_PKTS);
-            if (!jPushSilence(fillPkts * ESPNOW_PAYLOAD_SIZE)) rxOverflow++;
-        }
-    }
-    lastSeq = seq;
+    // Duplicate / reordered / restarted-server handling, including the unsigned
+    // 65535-gap trap, is in SeqTracker and covered by the host tests.
+    const SeqResult sr = seqTracker.update(seq);
+    if (!sr.accept) return;   // exact retransmit — replaying it is an audible stutter
 
-    if (!jPushBlock(data + ESPNOW_HEADER_SIZE, n)) rxOverflow++;
+    // Substitute silence for lost packets so playback keeps its timing instead
+    // of splicing the stream shorter on every loss.
+    if (sr.fillPackets > 0 &&
+        !jbuf.pushSilence(sr.fillPackets * ESPNOW_PAYLOAD_SIZE)) {
+        rxOverflow++;
+    }
+
+    if (!jbuf.pushBlock(data + ESPNOW_HEADER_SIZE, n)) rxOverflow++;
 }
 
 static bool espnowActive = false;
@@ -643,9 +582,9 @@ static void driveClientI2S() {
 
     // Wait for prefill before starting output (prevents immediate underrun)
     if (!jReady) {
-        if (jFill() >= JITTER_PREFILL) {
+        if (jbuf.fill() >= JITTER_PREFILL) {
             jReady = true;
-            LOG_INFO("Jitter buffer ready (" + String(jFill()) + " bytes) — starting I2S");
+            LOG_INFO("Jitter buffer ready (" + String(jbuf.fill()) + " bytes) — starting I2S");
         } else {
             return;
         }
@@ -654,7 +593,7 @@ static void driveClientI2S() {
     static int16_t mono[CLIENT_BATCH];
     static int16_t stereo[CLIENT_BATCH * 2];
 
-    if (!jPeek((uint8_t *)mono, CLIENT_BATCH * 2)) {
+    if (!jbuf.peek((uint8_t *)mono, CLIENT_BATCH * 2)) {
         // Underrun. tx_desc_auto_clear already zeroes the DMA as it drains, so
         // pushing extra silence here would only add a click. Re-arm the prefill
         // gate and let the buffer refill. Counted, not logged — logging every
@@ -681,8 +620,8 @@ static void driveClientI2S() {
     // Round down to whole stereo frames first. i2s_write normally returns a
     // multiple of 4 here, but if it ever returned a partial frame, bw/2 would be
     // an odd number of mono bytes and the jitter buffer's 16-bit framing would be
-    // permanently shifted — the exact failure jPushBlock exists to prevent.
-    jAdvance((int)(bw & ~(size_t)3) / 2);   // 4 bytes written per 2 bytes of mono
+    // permanently shifted — the exact failure pushBlock exists to prevent.
+    jbuf.advance((int)(bw & ~(size_t)3) / 2);   // 4 bytes written per 2 bytes of mono
 }
 
 // ============================================================================
@@ -693,18 +632,15 @@ static void driveClientI2S() {
 static unsigned long clientRetryAfterMs = 0;
 
 static void resetRxState() {
-    jWrite = jRead = 0;
+    jbuf.reset();
+    seqTracker.reset();
     jReady       = false;
-    firstPkt     = true;
     rxActive     = false;
     senderLocked = false;
     lastRxMs     = 0;
     rxCount      = 0;
-    rxDropped    = 0;
     rxOverflow   = 0;
     rxUnderrun   = 0;
-    rxDupe       = 0;
-    rxResync     = 0;
 }
 
 static void enterDiscovery() {
@@ -755,10 +691,10 @@ static void enterClient() {
     delay(200);
 #endif
 
-    jWrite = jRead = 0;
+    jbuf.reset();
+    seqTracker.reset();
     jReady   = false;
     rxActive = false;
-    firstPkt = true;
 
     initI2SForClient();
     if (!clientI2SActive) {
@@ -808,6 +744,12 @@ void setup() {
     playStartupSound();
     deinitI2SForTones();
 #endif
+
+    // Must happen before ESP-NOW comes up: the recv callback starts pushing into
+    // this buffer as soon as the radio is listening.
+    if (!jbuf.init(jStorage, JITTER_BUF_SIZE)) {
+        LOG_ERROR("Jitter buffer init failed — JITTER_BUF_SIZE must be a power of two");
+    }
 
     // ESP-NOW must be up before BT to ensure coexistence layer is ready
     setupESPNow();
@@ -861,11 +803,11 @@ void loop() {
             if (lastRxMs > 0 && millis() - lastRxMs > ESPNOW_SILENCE_TIMEOUT_MS) {
                 LOG_INFO("ESP-NOW silent for " + String(ESPNOW_SILENCE_TIMEOUT_MS / 1000) + "s → DISCOVERY");
                 LOG_INFO("RX stats: rx=" + String(rxCount) +
-                         " lost=" + String(rxDropped) +
+                         " lost=" + String(seqTracker.lost) +
                          " overflow=" + String(rxOverflow) +
                          " underrun=" + String(rxUnderrun) +
-                         " dupe=" + String(rxDupe) +
-                         " resync=" + String(rxResync));
+                         " dupe=" + String(seqTracker.dupe) +
+                         " resync=" + String(seqTracker.resync));
                 enterDiscovery();   // clears the counters and lastRxMs
             }
             break;
@@ -883,13 +825,13 @@ void loop() {
         if (currentMode == MODE_CLIENT) {
             LOG_INFO(String("Status: mode=") + modeStr +
                      " heap=" + String(ESP.getFreeHeap()) +
-                     " jitter=" + String(jFill()) + "B" +
+                     " jitter=" + String(jbuf.fill()) + "B" +
                      " rx=" + String(rxCount) +
-                     " lost=" + String(rxDropped) +
+                     " lost=" + String(seqTracker.lost) +
                      " ovf=" + String(rxOverflow) +
                      " und=" + String(rxUnderrun) +
-                     " dup=" + String(rxDupe) +
-                     " rsy=" + String(rxResync));
+                     " dup=" + String(seqTracker.dupe) +
+                     " rsy=" + String(seqTracker.resync));
         } else if (currentMode == MODE_SERVER) {
             LOG_INFO(String("Status: mode=") + modeStr +
                      " heap=" + String(ESP.getFreeHeap()) +
