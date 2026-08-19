@@ -47,13 +47,21 @@ forwarded to clients. That needs hardware nobody here has yet.
       with tens of ms latency; clients play after a ~185 ms jitter buffer.
       Adjacent rooms will slap-echo. The server needs to delay its own local
       playback to match.
-- [ ] **No clock-drift correction.** Now measured rather than predicted: between
-      the WROOM and the S3 the client's jitter buffer drains at 1.2-1.9 bytes/s,
-      about 25-45 ppm, which empties it in roughly 20-35 minutes. Needs slow
-      fill-level feedback — occasionally drop or duplicate a sample.
-      `tools/bench-mesh.ps1` reports the drift and the time to exhaustion, so
-      this can now be worked on with a measurement instead of a guess. Take a
-      600 s baseline first; at 45 s the figure is still noisy.
+- [ ] **No clock-drift correction.** Measured, not predicted. 600 s baseline
+      (2026-08-19, WROOM source -> S3 client): the client's jitter buffer drains
+      at **1.34 bytes/s, -30.5 ppm**, emptying it in about 18 minutes. Converged
+      across run lengths (45 s: -42.5 ppm, 120 s: -27.2 ppm, 600 s: -30.5 ppm)
+      and corroborated by the independent log-clock measure, which put the WROOM
+      itself at +8.1 +/- 1.2 ppm against the PC.
+
+      The fix is undemanding: 30 ppm at 22.05 kHz is 0.66 samples/s, so
+      duplicating one mono sample about every 1.5 s cancels it. Well below
+      audibility, no resampling required.
+
+      Make it **adaptive**, not a -30 ppm constant: this is one pair of crystals
+      at one temperature, and a third board will have its own offset. Sample the
+      buffer fill every few seconds and nudge toward the target depth.
+      `tools/bench-mesh.ps1` measures the result.
 - [ ] **Sample rate is assumed to be 44.1 kHz.** If A2DP negotiates 48 kHz the
       clients play at the wrong pitch. Read the actual rate from the sink and
       either follow it or resample.
