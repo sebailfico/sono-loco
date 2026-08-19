@@ -2,150 +2,153 @@
 #define CONFIG_H
 
 // ============================================================================
-// Room Identification
+// Room / Device Identification
 // ============================================================================
-// Unique name for this device (visible as Bluetooth speaker name)
-#define ROOM_NAME "Room1"
+// Visible as the Bluetooth speaker name. Change per node if desired,
+// but the system works fine with all nodes having the same name.
+#define ROOM_NAME "SonoLoco"
 
 // ============================================================================
-// I2S / PCM5102 DAC Configuration
+// I2S / PCM5102 DAC Pin Configuration
 // ============================================================================
 // PCM5102 wiring to ESP32:
-//   PCM5102 BCK  -> ESP32 GPIO 26 (Bit Clock)
-//   PCM5102 DIN  -> ESP32 GPIO 25 (Data)
-//   PCM5102 LCK  -> ESP32 GPIO 22 (Word Select / LR Clock)
-//   PCM5102 SCK  -> GND (or leave floating, PCM5102 generates internally)
-//   PCM5102 FMT  -> GND (I2S format)
-//   PCM5102 XSMT -> 3.3V (soft mute off) or GPIO for mute control
-//   PCM5102 FLT  -> GND (normal latency)
-//   PCM5102 DEMP -> GND (de-emphasis off)
+//   PCM5102 BCK  -> GPIO 26
+//   PCM5102 DIN  -> GPIO 25
+//   PCM5102 LCK  -> GPIO 22
+//   PCM5102 SCK  -> GND        (PCM5102 generates clock internally)
+//   PCM5102 FMT  -> GND        (standard I2S format)
+//   PCM5102 XSMT -> 3.3V       (soft mute off)
+//   PCM5102 FLT  -> GND        (normal latency)
+//   PCM5102 DEMP -> GND        (de-emphasis off)
 
-#define I2S_BCK_PIN 26  // Bit Clock
-#define I2S_DATA_PIN 25 // Data Out
-#define I2S_WS_PIN 22   // Word Select (LR Clock)
-
-// I2S buffer configuration
-#define I2S_BUFFER_SIZE 512
-#define I2S_BUFFER_COUNT 20
+#define I2S_BCK_PIN  26
+#define I2S_DATA_PIN 25
+#define I2S_WS_PIN   22
 
 // ============================================================================
-// Bluetooth A2DP Configuration
+// Bluetooth A2DP (SERVER mode — BT Classic nodes only)
 // ============================================================================
-// Bluetooth device name (visible when pairing from phone)
-#define BT_DEVICE_NAME ROOM_NAME
-
-// A2DP audio format (fixed by Bluetooth standard)
-#define BT_SAMPLE_RATE 44100
-#define BT_BITS_PER_SAMPLE 16
-#define BT_CHANNELS 2
+#define BT_DEVICE_NAME   ROOM_NAME
+#define BT_SAMPLE_RATE   44100
+#define VOLUME_DEFAULT   1       // 0–127; keep low, TPA3116 has high gain
 
 // ============================================================================
-// ESP-NOW Mesh Configuration
+// Notification Tones (startup / connect / disconnect)
 // ============================================================================
-// ESP-NOW channel (0 = auto)
-#define ESPNOW_CHANNEL 0
-
-// ESP-NOW receive buffer: 250 bytes * 400 frames = 100KB
-// Only allocated on first received packet (lazy allocation)
-#define ESPNOW_BUFFER_SIZE 250   // ESP_NOW_MAX_DATA_LEN
-#define ESPNOW_BUFFER_COUNT 400
-
-// ============================================================================
-// SBC Codec Configuration (for ESP-NOW audio transport)
-// ============================================================================
-// subbands=8, blocks=16, bitpool=32 → ~44 KB/s at 44100Hz stereo
-// Fits well within ESP-NOW's ~100 KB/s throughput
-#define SBC_SUBBANDS 8
-#define SBC_BLOCKS 16
-#define SBC_BITPOOL 32
+// Connect/disconnect tones are written into an I2S driver that A2DP configured,
+// so the tone generator has to assume the A2DP rate — they are the same number
+// on purpose, don't split them.
+#define TONE_SAMPLE_RATE BT_SAMPLE_RATE
+#define TONE_AMPLITUDE   500     // peak amplitude of a 16-bit tone sample
+#define TONE_FADE_MS     5       // ramp in/out, kills the click at tone edges
 
 // ============================================================================
-// Ring Buffer (BT callback -> main loop for ESP-NOW forwarding)
+// ESP-NOW Mesh
 // ============================================================================
-// 44100 Hz * 2 ch * 2 bytes * 0.046 sec ≈ 8KB
-// NOTE: heap is fragmented after BT+ESP-NOW init; largest contiguous block <16KB
-#define BT_RINGBUF_SIZE 8192
+// Fixed channel — must be the same on every node.
+#define ESPNOW_CHANNEL       1
+
+// Audio payload per packet (bytes). Must be ≤ 250 (ESP-NOW max).
+// At 22050Hz mono 16-bit: 200 bytes = ~4.5ms of audio per packet (~220 pkt/s)
+#define ESPNOW_PAYLOAD_SIZE  200
+
+// FreeRTOS queue depth for the ESP-NOW TX task (packets buffered before dropping)
+#define ESPNOW_TX_QUEUE_DEPTH  32
+
+// Hold ESP-NOW TX for this long after BT audio starts, so the A2DP pipeline has
+// settled before the radio starts competing with it.
+#define TX_WARMUP_MS  1000
+
+// --- WiFi driver buffer counts (see setupESPNow) -----------------------------
+// Receive side carries ~220 packets/s continuously. These buffers are DMA-capable
+// *internal* DRAM — PSRAM cannot back them, so trimming them is the only way to
+// claw back DRAM, and trimming them too far drops audio. 10 is the IDF default;
+// each buffer costs roughly 1.6 KB, so this is ~16 KB of DRAM.
+#define WIFI_STATIC_RX_BUFFERS   10
+
+// Transmit side is gated on the send-complete semaphore, so at most one frame is
+// ever in flight. 4 is plenty; the default 32 would just waste heap.
+#define WIFI_DYNAMIC_TX_BUFFERS  4
 
 // ============================================================================
-// Mode Transition Timeouts
+// Audio Downsampling (SERVER → CLIENT over ESP-NOW)
 // ============================================================================
-// How long (ms) of ESP-NOW silence before CLIENT returns to DISCOVERY
-#define ESPNOW_SILENCE_TIMEOUT_MS 5000  // 5 seconds
-
-// How long (ms) after BT disconnect before SERVER returns to DISCOVERY
-#define BT_DISCONNECT_TIMEOUT_MS 3000   // 3 seconds
-
-// ============================================================================
-// Audio Control Configuration
-// ============================================================================
-#define VOLUME_DEFAULT 1   // 0-127; 13 ≈ 10% amplitude (~90% reduction for loud TPA3116 setups)
-#define VOLUME_MIN 0
-#define VOLUME_MAX 127
+// BT A2DP delivers 44100Hz stereo 16-bit = 176 KB/s
+// We downsample to 22050Hz mono 16-bit = 44 KB/s before broadcasting.
+// Reduction: 2x from halving sample rate + 2x from stereo→mono = 4x total.
+#define CLIENT_SAMPLE_RATE  22050
 
 // ============================================================================
-// Debug Configuration
+// Jitter Buffer (CLIENT mode)
 // ============================================================================
-#define DEBUG_SERIAL Serial
+// Absorbs network timing variation before writing to I2S.
+// 8192 bytes at 22050Hz mono 16-bit ≈ 185ms of audio.
+// MUST be a power of two — the ring uses masking, not modulo (static_assert
+// in main.cpp enforces this).
+#define JITTER_BUF_SIZE    8192
+
+// Minimum bytes in jitter buffer before I2S output starts.
+// Prevents underrun right at stream start (~45ms of pre-fill).
+#define JITTER_PREFILL     2000
+
+// Mono samples handed to I2S per loop() pass.
+#define CLIENT_BATCH       128
+
+// Lost packets are replaced with an equal amount of silence to keep playback
+// timing. Capped so one long outage can't flood the buffer with silence.
+#define MAX_GAP_FILL_PKTS  4
+
+// A sequence number this far from the expected one is treated as a stream
+// restart, not as a gap. Sequence numbers are uint16_t, so a duplicate or
+// reordered frame computes as a "gap" of ~65535 — filling that as loss would
+// charge tens of thousands to the lost counter and inject bogus silence.
+#define SEQ_RESYNC_THRESHOLD  64
+
+// If entering CLIENT mode fails (I2S unavailable), wait this long before trying
+// again. Without it, an incoming stream retriggers the attempt every loop pass
+// and thrashes BT stop/start.
+#define CLIENT_RETRY_BACKOFF_MS  5000
+
+// ============================================================================
+// Mode Timeouts
+// ============================================================================
+// CLIENT returns to DISCOVERY after this many ms of ESP-NOW silence.
+#define ESPNOW_SILENCE_TIMEOUT_MS  5000
+
+// How often the periodic status line is printed (DEBUG_LEVEL >= 3).
+#define STATUS_INTERVAL_MS  10000
+
+// ============================================================================
+// Debug
+// ============================================================================
+#define DEBUG_SERIAL    Serial
 #define DEBUG_BAUD_RATE 115200
 
-// Debug levels: 0=Off, 1=Error, 2=Warn, 3=Info, 4=Debug, 5=Verbose
+// 0=Off 1=Error 2=Warn 3=Info 4=Debug
 #define DEBUG_LEVEL 3
 
-// Macros for debug output
 #if DEBUG_LEVEL >= 1
-#define LOG_ERROR(...)                     \
-    {                                      \
-        DEBUG_SERIAL.print("[ERROR] ");    \
-        DEBUG_SERIAL.println(__VA_ARGS__); \
-    }
+#define LOG_ERROR(msg) { DEBUG_SERIAL.print("[ERROR] "); DEBUG_SERIAL.println(msg); }
 #else
-#define LOG_ERROR(...)
+#define LOG_ERROR(msg)
 #endif
 
 #if DEBUG_LEVEL >= 2
-#define LOG_WARN(...)                      \
-    {                                      \
-        DEBUG_SERIAL.print("[WARN]  ");    \
-        DEBUG_SERIAL.println(__VA_ARGS__); \
-    }
+#define LOG_WARN(msg)  { DEBUG_SERIAL.print("[WARN]  "); DEBUG_SERIAL.println(msg); }
 #else
-#define LOG_WARN(...)
+#define LOG_WARN(msg)
 #endif
 
 #if DEBUG_LEVEL >= 3
-#define LOG_INFO(...)                      \
-    {                                      \
-        DEBUG_SERIAL.print("[INFO]  ");    \
-        DEBUG_SERIAL.println(__VA_ARGS__); \
-    }
+#define LOG_INFO(msg)  { DEBUG_SERIAL.print("[INFO]  "); DEBUG_SERIAL.println(msg); }
 #else
-#define LOG_INFO(...)
+#define LOG_INFO(msg)
 #endif
 
 #if DEBUG_LEVEL >= 4
-#define LOG_DEBUG(...)                     \
-    {                                      \
-        DEBUG_SERIAL.print("[DEBUG] ");    \
-        DEBUG_SERIAL.println(__VA_ARGS__); \
-    }
+#define LOG_DEBUG(msg) { DEBUG_SERIAL.print("[DEBUG] "); DEBUG_SERIAL.println(msg); }
 #else
-#define LOG_DEBUG(...)
+#define LOG_DEBUG(msg)
 #endif
-
-#if DEBUG_LEVEL >= 5
-#define LOG_VERBOSE(...)                   \
-    {                                      \
-        DEBUG_SERIAL.print("[VERB]  ");    \
-        DEBUG_SERIAL.println(__VA_ARGS__); \
-    }
-#else
-#define LOG_VERBOSE(...)
-#endif
-
-// ============================================================================
-// Future: Presence Detection Configuration (ESPectre)
-// ============================================================================
-#define PRESENCE_CHECK_INTERVAL_MS 200 // 5 Hz polling
-#define ABSENCE_TIMEOUT_MS 30000       // 30 seconds before pause
 
 #endif // CONFIG_H
