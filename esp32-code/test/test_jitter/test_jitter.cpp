@@ -362,7 +362,7 @@ static void test_seq_reset_forgets_the_stream(void) {
 
 // ---------------------------------------------------------------------------
 
-int main(int, char **) {
+static int runAllTests(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_init_rejects_non_power_of_two);
@@ -394,3 +394,24 @@ int main(int, char **) {
 
     return UNITY_END();
 }
+
+#ifdef ARDUINO
+
+// Same tests, run on the board. Useful when there is no host compiler, and as a
+// check that the logic behaves the same on Xtensa as it does on the PC.
+#include <Arduino.h>
+
+void setup() {
+    delay(2000);   // let the host's serial monitor attach before output starts
+    runAllTests();
+}
+
+void loop() {}
+
+#else
+
+int main(int, char **) {
+    return runAllTests();
+}
+
+#endif
