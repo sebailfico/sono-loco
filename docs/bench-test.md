@@ -1,7 +1,7 @@
 # Hardware Bench Test
 
 **The ESP-NOW mesh path works.** First proven 2026-08-19: a WROOM sourcing and an
-ESP32-S3 playing, 26,279 packets over 120 s with zero lost, zero overflow, zero
+ESP32-S3 playing, 132,069 packets over 600 s with zero lost, zero overflow, zero
 underrun, zero duplicates and zero resyncs. What remains unproven is the
 *Bluetooth* half of the server role — audio taken from a phone and forwarded —
 because no board on the bench can do it (see "What you need" below).
@@ -166,7 +166,7 @@ Power the second board with the first still serving.
 [INFO]  === CLIENT — ESP-NOW → I2S ===
 [INFO]  Stopping BT to release I2S...
 [INFO]  I2S initialised for CLIENT mode at 22050 Hz mono
-[INFO]  Jitter buffer ready (~2000 bytes) — starting I2S
+[INFO]  Jitter buffer ready (~4000 bytes) — starting I2S
 ```
 
 **Pass criteria:**
@@ -201,7 +201,7 @@ Leave it playing for five minutes and watch the status lines.
 
 Note explicitly whether the two rooms sound aligned. They are expected **not**
 to: the server plays through A2DP at tens of ms latency, the client after a
-~185 ms jitter buffer. Record the perceived offset — it is the input to the
+~137 ms of buffering. Record the perceived offset — it is the input to the
 timing work.
 
 ---

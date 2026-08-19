@@ -83,8 +83,9 @@ currently-stocked module that is fully interchangeable.
 **Amended 2026-08-19, and this matters:** the exclusion is narrower than it was
 written. The conflict only exists while the BT stack is *running*. A WROOM that
 never starts Bluetooth runs WiFi and ESP-NOW perfectly well with no PSRAM —
-measured, not assumed: on the first hardware run a WROOM was the ESP-NOW source
-for 120 s at 220.5 packets/s with `qfull`, `senderr` and `radiofail` all zero.
+measured, not assumed: a WROOM was the ESP-NOW source for a 600 s run at
+220.5 packets/s with `qfull`, `senderr` and `radiofail` all zero, and not one
+packet lost.
 
 So a WROOM cannot be a **server**, because that needs BT and WiFi together. It
 can be a **client**, because that needs only WiFi. The current firmware does not
