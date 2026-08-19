@@ -4,9 +4,15 @@
 // ============================================================================
 // Room / Device Identification
 // ============================================================================
-// Visible as the Bluetooth speaker name. Change per node if desired,
-// but the system works fine with all nodes having the same name.
+// Visible as the Bluetooth speaker name.
+//
+// Set it per node in platformio.ini (-DROOM_NAME='"Kitchen"'), not here, so the
+// source tree stays identical for every board and you flash an environment
+// rather than an edited file. This fallback only applies to a build that does
+// not define it.
+#ifndef ROOM_NAME
 #define ROOM_NAME "SonoLoco"
+#endif
 
 // ============================================================================
 // I2S / PCM5102 DAC Pin Configuration
@@ -35,10 +41,9 @@
 // ============================================================================
 // Notification Tones (startup / connect / disconnect)
 // ============================================================================
-// Connect/disconnect tones are written into an I2S driver that A2DP configured,
-// so the tone generator has to assume the A2DP rate — they are the same number
-// on purpose, don't split them.
-#define TONE_SAMPLE_RATE BT_SAMPLE_RATE
+// The tones use BT_SAMPLE_RATE directly. Connect/disconnect tones are written
+// into an I2S driver that A2DP configured, so the tone generator cannot pick its
+// own rate — there is deliberately no separate TONE_SAMPLE_RATE to drift from it.
 #define TONE_AMPLITUDE   500     // peak amplitude of a 16-bit tone sample
 #define TONE_FADE_MS     5       // ramp in/out, kills the click at tone edges
 

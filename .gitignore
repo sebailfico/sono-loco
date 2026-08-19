@@ -29,6 +29,10 @@ desktop.ini
 # Logs
 *.log
 
+# Serial captures from tools/capture-serial.ps1 — keep the ones worth keeping
+# somewhere else, or they will bury the repo.
+logs/
+
 # Temporary files
 *.tmp
 *.temp
