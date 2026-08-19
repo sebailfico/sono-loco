@@ -23,6 +23,10 @@ unproven until `docs/bench-test.md` has been worked through.
       connected board.
 - [ ] **Confirm the COM ports** with `pio device list` — COM7/COM8/COM9 in
       `platformio.ini` are guesses — and confirm which boards actually have PSRAM.
+- [ ] **Solder a DAC to the S3** and pick its I2S pins — `config.h` currently
+      hardcodes the WROOM/WROVER pins (26/25/22) for every board. Until then the
+      S3 can only be tested as far as "ESP-NOW packets arrive", via the serial
+      counters, with no audio out.
 - [ ] **Run `docs/bench-test.md` end to end** on two boards, at least one WROVER.
       Record the captures; `tools/capture-serial.ps1` writes comparable logs.
 
