@@ -24,6 +24,10 @@
 #include <esp_netif.h>
 #include <esp_event.h>
 #include <esp_idf_version.h>
+#include <esp_timer.h>
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+#include <esp_mac.h>   // esp_read_mac moved out of esp_system.h in IDF 5
+#endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -42,6 +46,36 @@
 
 enum DeviceMode { MODE_DISCOVERY, MODE_SERVER, MODE_CLIENT };
 volatile DeviceMode currentMode = MODE_DISCOVERY;
+
+// ============================================================================
+// Bench mode
+// ============================================================================
+//
+// A runtime mode for automated multi-board testing — see tools/bench-mesh.ps1
+// and docs/bench-test.md. It exists because the normal SERVER role needs a phone
+// to connect over Bluetooth, which cannot be automated, so there would otherwise
+// be no way to produce a stream unattended.
+//
+// In bench mode a node never starts Bluetooth. That matters for more than
+// convenience: the BT/WiFi coexistence problem that keeps a WROOM off the mesh
+// (D3) only exists while the BT stack is running, so with BT off a WROOM can
+// join the mesh perfectly well. Bench mode therefore works on every board.
+//
+// The flag lives in RTC memory, which survives ESP.restart(). That is
+// deliberate: bench mode has to be chosen before setup() decides whether to
+// start Bluetooth, so the node has to be told and then restarted.
+//
+// RTC_NOINIT_ATTR, not RTC_DATA_ATTR. `.rtc.data` is re-initialised from the
+// image on every boot that runs the bootloader, so a RTC_DATA_ATTR flag is
+// already zero again by the time setup() reads it and the node just reboots
+// into normal mode. `.rtc_noinit` is left alone, which is the whole point.
+// The cost is that its value is undefined on a cold boot, hence a magic number
+// rather than a bool.
+#define BENCH_MAGIC 0xB0FFE501
+RTC_NOINIT_ATTR static uint32_t benchMagic;
+
+static bool benchMode   = false;   // this boot is a bench boot
+static bool benchSource = false;   // this node is generating the test stream
 
 // ============================================================================
 // I2S write helper
@@ -213,6 +247,13 @@ static volatile uint32_t txRadioFail  = 0;
 // stays here is the part that genuinely needs a radio and an I2S peripheral.
 static_assert((JITTER_BUF_SIZE & (JITTER_BUF_SIZE - 1)) == 0,
               "JITTER_BUF_SIZE must be a power of two");
+// An empty I2S DMA ring will accept CLIENT_DMA_CAPACITY_BYTES in one pass. If
+// the prefill is smaller than that, the buffer is drained the instant it arms
+// and underruns continuously — measured at 24/s on the first hardware run.
+static_assert(JITTER_PREFILL > CLIENT_DMA_CAPACITY_BYTES,
+              "JITTER_PREFILL must exceed what the I2S DMA ring can swallow at once");
+static_assert(JITTER_PREFILL < JITTER_BUF_SIZE,
+              "JITTER_PREFILL must fit in the jitter buffer");
 
 static uint8_t      jStorage[JITTER_BUF_SIZE];
 static JitterBuffer jbuf;
@@ -327,10 +368,15 @@ static void setupESPNow() {
     // - S3    (PSRAM,  BT disabled)   → init WiFi; acts as ESP-NOW client
     // - WROVER (PSRAM, BT enabled)    → init WiFi; fully interchangeable
 #ifdef ENABLE_BLUETOOTH
-    if (ESP.getPsramSize() == 0) {
+    // Bench mode never starts Bluetooth, so there is no coexistence problem and
+    // no reason to refuse WiFi — this is what lets a WROOM be tested at all.
+    if (!benchMode && ESP.getPsramSize() == 0) {
         LOG_WARN("No PSRAM detected — WiFi/ESP-NOW disabled to protect BT heap.");
         LOG_WARN("This node will play locally only (no mesh). Upgrade to WROVER for full mesh.");
         return;
+    }
+    if (benchMode && ESP.getPsramSize() == 0) {
+        LOG_INFO("Bench mode: no PSRAM, but Bluetooth is off, so ESP-NOW is safe here.");
     }
 #endif
 
@@ -546,8 +592,8 @@ static void initI2SForClient() {
         .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count        = 8,
-        .dma_buf_len          = 256,
+        .dma_buf_count        = CLIENT_DMA_BUF_COUNT,
+        .dma_buf_len          = CLIENT_DMA_BUF_LEN,
         .use_apll             = false,
         .tx_desc_auto_clear   = true
     };
@@ -662,8 +708,10 @@ static void enterDiscovery() {
 
     if (wasClient) {
 #ifdef ENABLE_BLUETOOTH
-        delay(100);
-        startBluetooth();
+        if (!benchMode) {   // bench mode never starts BT — see the bench section
+            delay(100);
+            startBluetooth();
+        }
 #endif
     }
 
@@ -686,9 +734,11 @@ static void enterClient() {
     LOG_INFO("=== CLIENT — ESP-NOW → I2S ===");
 
 #ifdef ENABLE_BLUETOOTH
-    LOG_INFO("Stopping BT to release I2S...");
-    stopBluetooth();
-    delay(200);
+    if (!benchMode) {
+        LOG_INFO("Stopping BT to release I2S...");
+        stopBluetooth();
+        delay(200);
+    }
 #endif
 
     jbuf.reset();
@@ -700,7 +750,7 @@ static void enterClient() {
     if (!clientI2SActive) {
         LOG_ERROR("CLIENT I2S unavailable — returning to DISCOVERY");
 #ifdef ENABLE_BLUETOOTH
-        startBluetooth();
+        if (!benchMode) startBluetooth();
 #endif
         // Back off before retrying. The server keeps broadcasting, so rxActive
         // is set again within milliseconds; without this the node would retry
@@ -712,6 +762,161 @@ static void enterClient() {
 
     currentMode = MODE_CLIENT;
     LOG_INFO("Free heap: " + String(ESP.getFreeHeap()) + " bytes");
+}
+
+// ============================================================================
+// Bench mode — synthetic source, telemetry, serial control
+// ============================================================================
+
+static int64_t  benchStartUs      = 0;   // when this node started sourcing
+static uint32_t benchPktIdx       = 0;   // packets that should have been sent by now
+static uint32_t benchSampleIdx    = 0;   // running sample index, for a continuous tone
+static uint32_t benchTxPackets    = 0;   // packets actually queued
+static unsigned long benchLastReportMs = 0;
+
+/**
+ * Generate the test stream.
+ *
+ * Paced off `esp_timer_get_time()` rather than millis()/micros(): it is a 64-bit
+ * microsecond counter, so it does not wrap at 71 minutes in the middle of a long
+ * drift measurement. The due time for each packet is computed from the packet
+ * index against the start time, not by adding an interval each pass, so rounding
+ * cannot accumulate into exactly the drift we are trying to measure.
+ */
+static void benchServiceSource() {
+    if (!benchSource || !espnowActive || txQueue == nullptr) return;
+
+    const uint32_t samplesPerPkt = ESPNOW_PAYLOAD_SIZE / 2;
+    const int64_t  now           = esp_timer_get_time();
+
+    // Bounded catch-up: if this node was blocked for a while, send a few packets
+    // back to back but never sit here spinning out a whole backlog.
+    for (int burst = 0; burst < BENCH_MAX_CATCHUP_PKTS; burst++) {
+        const int64_t due = benchStartUs +
+            (int64_t)benchPktIdx * 1000000LL * (int64_t)samplesPerPkt / CLIENT_SAMPLE_RATE;
+        if (now < due) return;
+
+        AudioPacket pkt;
+        pkt.seq = txSeq++;
+        pkt.len = ESPNOW_PAYLOAD_SIZE;
+        for (uint32_t i = 0; i < samplesPerPkt; i++) {
+            const float t = (float)(benchSampleIdx + i) / CLIENT_SAMPLE_RATE;
+            const int16_t s =
+                (int16_t)(BENCH_TONE_AMPLITUDE * sinf(2.0f * M_PI * BENCH_TONE_HZ * t));
+            memcpy(pkt.data + i * 2, &s, 2);
+        }
+        benchSampleIdx += samplesPerPkt;
+
+        if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
+        else                                        benchTxPackets++;
+        benchPktIdx++;
+    }
+}
+
+static void benchStartSource() {
+    if (!espnowActive) {
+        DEBUG_SERIAL.println("[BENCH] error reason=espnow_inactive");
+        return;
+    }
+    benchStartUs   = esp_timer_get_time();
+    benchPktIdx    = 0;
+    benchSampleIdx = 0;
+    benchTxPackets = 0;
+    txQueueFull = txSendErr = txRadioFail = 0;
+    benchSource    = true;
+    currentMode    = MODE_SERVER;   // stops this node treating its own role as a listener
+    DEBUG_SERIAL.printf("[BENCH] source start rate=%d hz=%d amp=%d\n",
+                        CLIENT_SAMPLE_RATE, BENCH_TONE_HZ, BENCH_TONE_AMPLITUDE);
+}
+
+static void benchStopSource() {
+    benchSource = false;
+    DEBUG_SERIAL.printf("[BENCH] source stop tx=%lu\n", (unsigned long)benchTxPackets);
+    enterDiscovery();
+}
+
+/**
+ * One machine-parsable line per interval, in every mode, with every field
+ * present whether or not it applies. `ms` is this node's own clock: the host
+ * regresses it against PC time to get each board's ppm error, and the difference
+ * between two boards is their relative drift.
+ *
+ * printf, not String concatenation — this runs once a second forever and the
+ * String version fragments the heap.
+ */
+static void benchReport() {
+    const char *modeStr = currentMode == MODE_DISCOVERY ? "DISCOVERY"
+                        : currentMode == MODE_SERVER    ? "SERVER"
+                                                        : "CLIENT";
+    DEBUG_SERIAL.printf(
+        "[BENCH] ms=%lu role=%s mode=%s heap=%lu jit=%d rx=%lu lost=%lu ovf=%lu "
+        "und=%lu dup=%lu rsy=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu\n",
+        (unsigned long)millis(),
+        benchSource ? "SOURCE" : "SINK",
+        modeStr,
+        (unsigned long)ESP.getFreeHeap(),
+        jbuf.fill(),
+        (unsigned long)rxCount,
+        (unsigned long)seqTracker.lost,
+        (unsigned long)rxOverflow,
+        (unsigned long)rxUnderrun,
+        (unsigned long)seqTracker.dupe,
+        (unsigned long)seqTracker.resync,
+        (unsigned long)benchTxPackets,
+        (unsigned long)txQueueFull,
+        (unsigned long)txSendErr,
+        (unsigned long)txRadioFail);
+}
+
+static void benchIdentify() {
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    DEBUG_SERIAL.printf(
+        "[BENCH] id chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
+        "bench=%d bt=%d espnow=%d name=%s\n",
+        ESP.getChipModel(),
+        (unsigned long)ESP.getPsramSize(),
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        benchMode ? 1 : 0,
+#ifdef ENABLE_BLUETOOTH
+        1,
+#else
+        0,
+#endif
+        espnowActive ? 1 : 0,
+        ROOM_NAME);
+}
+
+/**
+ * Single-character commands, so the host side needs no protocol.
+ *
+ *   ?  identify          b  reboot into bench mode     n  reboot into normal mode
+ *   s  start sourcing    x  stop sourcing              r  report now
+ */
+static void benchServiceSerial() {
+    while (DEBUG_SERIAL.available()) {
+        switch (DEBUG_SERIAL.read()) {
+            case '?': benchIdentify(); break;
+            case 'r': benchReport();   break;
+            case 's': benchStartSource(); break;
+            case 'x': benchStopSource();  break;
+            case 'b':
+                benchMagic = BENCH_MAGIC;
+                DEBUG_SERIAL.println("[BENCH] rebooting into bench mode");
+                DEBUG_SERIAL.flush();
+                delay(50);
+                ESP.restart();
+                break;
+            case 'n':
+                benchMagic = 0;
+                DEBUG_SERIAL.println("[BENCH] rebooting into normal mode");
+                DEBUG_SERIAL.flush();
+                delay(50);
+                ESP.restart();
+                break;
+            default: break;   // ignore newlines and anything unrecognised
+        }
+    }
 }
 
 // ============================================================================
@@ -733,16 +938,25 @@ void setup() {
     DEBUG_SERIAL.println("================================");
     DEBUG_SERIAL.println();
 
+    benchMode = (benchMagic == BENCH_MAGIC);
+    if (benchMode) {
+        DEBUG_SERIAL.println("[BENCH] boot bench=1 (Bluetooth disabled this boot)");
+    }
+
     LOG_INFO("Chip: "    + String(ESP.getChipModel()));
     LOG_INFO("CPU:  "    + String(ESP.getCpuFreqMHz()) + " MHz");
     LOG_INFO("Heap: "    + String(ESP.getFreeHeap()) + " bytes");
     LOG_INFO("PSRAM: "   + String(ESP.getPsramSize()) + " bytes");
 
-    // Startup sound — only on nodes with a DAC connected (BT-capable nodes)
+    // Startup sound — only on nodes with a DAC connected (BT-capable nodes).
+    // Skipped in bench mode: it would delay the first telemetry line and it is
+    // played through an I2S driver that the client path is about to reconfigure.
 #ifdef ENABLE_BLUETOOTH
-    initI2SForTones();
-    playStartupSound();
-    deinitI2SForTones();
+    if (!benchMode) {
+        initI2SForTones();
+        playStartupSound();
+        deinitI2SForTones();
+    }
 #endif
 
     // Must happen before ESP-NOW comes up: the recv callback starts pushing into
@@ -755,10 +969,11 @@ void setup() {
     setupESPNow();
 
 #ifdef ENABLE_BLUETOOTH
-    startBluetooth();
+    if (!benchMode) startBluetooth();
 #endif
 
     LOG_INFO("Setup complete. Entering DISCOVERY...");
+    if (benchMode) benchIdentify();
 }
 
 // ============================================================================
@@ -766,6 +981,11 @@ void setup() {
 // ============================================================================
 
 void loop() {
+    // Always listening for host commands, in every mode — this is how a node is
+    // put into bench mode in the first place.
+    benchServiceSerial();
+    benchServiceSource();
+
     switch (currentMode) {
 
         case MODE_DISCOVERY:
@@ -783,16 +1003,21 @@ void loop() {
 
         case MODE_SERVER:
 #ifdef ENABLE_BLUETOOTH
-            if (doConnectSound) {
-                doConnectSound = false;
-                playConnectedSound();
-            }
-            if (!btConnected) {
-                if (doDisconnectSound) {
-                    doDisconnectSound = false;
-                    playDisconnectedSound();
+            // In bench mode SERVER means "sourcing the synthetic stream" and
+            // there is no BT connection to lose, so none of this applies —
+            // without the guard the node would leave SERVER on the first pass.
+            if (!benchMode) {
+                if (doConnectSound) {
+                    doConnectSound = false;
+                    playConnectedSound();
                 }
-                enterDiscovery();
+                if (!btConnected) {
+                    if (doDisconnectSound) {
+                        doDisconnectSound = false;
+                        playDisconnectedSound();
+                    }
+                    enterDiscovery();
+                }
             }
 #endif
             break;
@@ -811,6 +1036,16 @@ void loop() {
                 enterDiscovery();   // clears the counters and lastRxMs
             }
             break;
+    }
+
+    // Bench telemetry replaces the human-readable status line: the host parses
+    // it, and two status lines a second would just interleave confusingly.
+    if (benchMode) {
+        if (millis() - benchLastReportMs >= BENCH_REPORT_MS) {
+            benchLastReportMs = millis();
+            benchReport();
+        }
+        return;
     }
 
     // Periodic status (DEBUG_LEVEL >= 3 only)
