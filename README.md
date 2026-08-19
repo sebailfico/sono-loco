@@ -79,28 +79,22 @@ identical — see `TODO.md`.
 
 ## Current Status
 
-### What Works
-- [x] Bluetooth A2DP sink (phone → ESP32)
-- [x] I2S output to PCM5102 DAC
-- [x] Notification sounds (startup, connect, disconnect)
-- [x] Basic volume control
+The Bluetooth speaker half works on hardware: A2DP sink, I2S output to the
+PCM5102, notification sounds, volume.
 
-### Written but never validated on hardware
-The whole mesh path is implemented and compiles for all three environments, but no
-part of it has been run on two boards yet. Treat it as unproven.
-- [ ] ESP-NOW audio broadcast (server → clients)
-- [ ] Jitter buffer + I2S playback on clients
-- [ ] Runtime SERVER/CLIENT role negotiation
+**The mesh half has never run on two boards.** It is fully implemented, it
+compiles for all three environments, and its pure-logic parts (ring buffer,
+packet sequence accounting) are covered by host tests — but no ESP-NOW audio has
+ever been observed reaching a client. Treat it as unproven.
 
-See `TODO.md` for the bench-test plan and the open design issues (clock drift,
-server/client time alignment, assumed 44.1 kHz sample rate).
+Where things are written down, so they stay in one place each:
 
-### Roadmap
-- [ ] Fix EMI/interference issues
-- [ ] ESPectre presence detection (auto-pause when room is empty)
-- [ ] Dynamic volume based on presence
-- [ ] Home Assistant integration
-- [ ] OTA updates
+| File | Owns |
+|------|------|
+| `TODO.md` | everything still open, including the known timing and bandwidth problems |
+| `CHANGELOG.md` | what has already been done and when |
+| `docs/decisions.md` | why the architecture is what it is, and what would change it |
+| `docs/bench-test.md` | the two-board bring-up procedure and its pass criteria |
 
 ## Hardware
 
@@ -188,12 +182,20 @@ see the bandwidth note in `TODO.md`.
 
 ### Configuration
 
-Edit `esp32-code/include/config.h`:
+Per-node settings live in `esp32-code/platformio.ini`, alongside that node's COM
+port — so the source tree is identical for every board and you flash an
+*environment*, not an edited file:
 
-```cpp
-#define ROOM_NAME "LivingRoom"   // Visible as Bluetooth speaker name
-#define ESPNOW_CHANNEL 1         // Must be the same on all nodes
+```ini
+[env:esp32wrover]
+extends = esp32_classic
+build_flags =
+    ${esp32_classic.build_flags}      ; extend, never replace — see the gotchas
+    -DROOM_NAME='"LivingRoom"'        ; also the Bluetooth name, keep them distinct
 ```
+
+Everything else is in `esp32-code/include/config.h` and is the same on every
+node — most importantly `ESPNOW_CHANNEL`, which **must** match across the mesh.
 
 ### Build & Upload
 
@@ -230,14 +232,36 @@ PlatformIO is not on `PATH` on the dev machine; use the full path:
 /c/Users/sebai/.platformio/penv/Scripts/pio.exe run -e esp32dev --target upload
 ```
 
+### Tests
+
+The ring buffer and packet sequence accounting run on the host, no board needed:
+
+```bash
+pio test -e native
+```
+
+This needs a host compiler (gcc/clang/MSVC), which is *not* currently installed
+on the dev machine — see `TODO.md`. Until it is, the same tests run on a
+connected board with `pio test -e esp32dev`, using the cross-toolchain
+PlatformIO already has.
+
 ## Code Layout
 
-Two files, deliberately:
+Deliberately small. `main.cpp` is one file on purpose — resist splitting it
+further; the exception below is argued in `docs/decisions.md` (D7).
 
-- `esp32-code/src/main.cpp` — everything: state machine, tones, ESP-NOW TX/RX,
-  jitter buffer, A2DP callbacks, I2S setup.
+- `esp32-code/src/main.cpp` — the state machine, tones, ESP-NOW TX/RX, A2DP
+  callbacks and I2S setup. Everything that needs real hardware.
 - `esp32-code/include/config.h` — every tuneable number. New constants go here,
-  never inline in `main.cpp`.
+  never inline in `main.cpp`. Per-node values go in `platformio.ini` instead.
+- `esp32-code/lib/jitter/` — the client's ring buffer (`jitter.h`) and packet
+  sequence accounting (`seqtracker.h`). Pure logic, no Arduino or ESP-IDF, so it
+  can be tested on a PC. This is where both of the worst bugs in this project
+  lived.
+- `esp32-code/test/test_jitter/` — host tests for the above. Each one
+  corresponds to a real bug or a real invariant.
+- `tools/capture-serial.ps1` — timestamped serial capture, so two bench runs can
+  be compared.
 
 Comments in the code explain *why*, particularly where a line looks wrong but isn't.
 
@@ -269,6 +293,12 @@ Each of these was a real bug. Don't re-introduce them.
 - **Never put two `build_flags` keys in one `platformio.ini` section.** Duplicate keys
   in a single INI section are a hard `DuplicateOptionError` — the whole project stops
   loading, not just that environment. Extend a base section instead.
+- **A `build_flags` in an `[env:...]` section replaces the parent's, it does not
+  add to it.** Writing `build_flags = -DROOM_NAME='"Kitchen"'` under
+  `extends = esp32_classic` silently drops `-DENABLE_BLUETOOTH` and the node
+  quietly builds as a client. Always start the list with
+  `${esp32_classic.build_flags}`. This one fails silently, unlike the duplicate
+  key above — which makes it worse.
 
 ## Libraries
 
