@@ -80,10 +80,23 @@ out early on a board that has BT compiled in and reports no PSRAM.
 A WROOM node is a plain Bluetooth speaker with no mesh. The WROVER is the only
 currently-stocked module that is fully interchangeable.
 
+**Amended 2026-08-19, and this matters:** the exclusion is narrower than it was
+written. The conflict only exists while the BT stack is *running*. A WROOM that
+never starts Bluetooth runs WiFi and ESP-NOW perfectly well with no PSRAM —
+measured, not assumed: on the first hardware run a WROOM was the ESP-NOW source
+for 120 s at 220.5 packets/s with `qfull`, `senderr` and `radiofail` all zero.
+
+So a WROOM cannot be a **server**, because that needs BT and WiFi together. It
+can be a **client**, because that needs only WiFi. The current firmware does not
+offer that — `setupESPNow()` bails on any BT-capable board without PSRAM, and BT
+is started unconditionally at boot — so a client-only runtime mode would be
+needed to use it. Bench mode already proves the mechanism works.
+
 **What would change this:** shrinking the mesh's RAM footprint far enough that
 BT and WiFi coexist without PSRAM — unlikely, the 80 KB is the WiFi driver's own
 buffers, and the static RX buffers cannot be moved to PSRAM because they must be
-DMA-capable internal DRAM. Realistically: buy WROVERs.
+DMA-capable internal DRAM. But the client-only path above needs no such
+breakthrough and would make every WROOM on the shelf a usable node.
 
 ---
 
@@ -186,3 +199,28 @@ because "connect to any node" is the product.
 
 **What would change this:** storing the name in NVS and setting it at runtime,
 if nodes ever get a configuration interface.
+
+---
+
+## D9 — Bench mode is a runtime mode, not a build
+
+**Decided:** 2026-08-19. **Status:** new.
+
+Automated multi-board testing needs a node that produces a stream unattended.
+The normal SERVER role cannot: it requires a phone to connect over A2DP. So a
+node can be told over serial to reboot into **bench mode**, where it never starts
+Bluetooth and can generate a synthetic 22.05 kHz tone straight into the ESP-NOW
+transmit path.
+
+It is a runtime mode rather than a `-DBENCH` build for the reason D4 gives: the
+test should exercise the same binary that ships. The flag lives in
+`RTC_NOINIT_ATTR` memory so it survives the restart that is needed to take effect
+before `setup()` decides whether to start Bluetooth. `RTC_DATA_ATTR` does not
+work here — `.rtc.data` is re-initialised from the image on every boot that runs
+the bootloader, so the flag is already zero again by the time it is read.
+
+Because bench mode never starts Bluetooth, it also works on a WROOM (see D3),
+which is what made a two-board test possible at all with the hardware to hand.
+
+**What would change this:** nothing foreseen. If bench mode ever needs to test
+the *Bluetooth* path it stops being useful, and that part stays manual.

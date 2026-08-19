@@ -1,29 +1,79 @@
 # Hardware Bench Test
 
-The mesh path has never run on hardware. It compiles for all three environments
-and the pure-logic parts are covered by host tests, but nothing below the
-`lib/jitter` line has been observed working on a board.
+**The ESP-NOW mesh path works.** First proven 2026-08-19: a WROOM sourcing and an
+ESP32-S3 playing, 26,279 packets over 120 s with zero lost, zero overflow, zero
+underrun, zero duplicates and zero resyncs. What remains unproven is the
+*Bluetooth* half of the server role — audio taken from a phone and forwarded —
+because no board on the bench can do it (see "What you need" below).
 
-This is the procedure for the first two-board bring-up, written in advance so it
-does not have to be invented while staring at a serial monitor. Work through it
-in order; each step has a pass criterion readable directly from the log.
+There are two ways to test. Use the automated one by default.
+
+## Automated: `tools/bench-mesh.ps1`
+
+```powershell
+./tools/bench-mesh.ps1 -Flash -Duration 120
+```
+
+It discovers every ESP32 attached to the PC, identifies each by chip, flashes the
+matching firmware, reboots them all into bench mode, elects one to generate a
+synthetic test stream, collects telemetry, and reports stream health and clock
+drift. There is no board limit — a third node is picked up automatically.
+
+It works around the fact that the normal SERVER role needs a phone: bench mode
+generates the stream itself and never starts Bluetooth. That is also why a WROOM
+can take part (see D3).
+
+What to read in its output:
+
+- **Stream table** — `lost`, `ovf`, `und`, `dup`, `rsy` should all be 0. `rx`
+  should be within a few packets of the source's `tx`.
+- **Source line** — packets per second should be 220.5. `qfull`, `senderr` and
+  `radiofail` at 0 mean the radio kept up.
+- **Clock drift** — two independent measures. `log ppm` regresses each node's
+  `millis()` against PC time; `audio ppm` derives the same thing from how fast
+  the jitter buffer fills or empties. Prefer the audio column: it measures the
+  drift that actually causes dropouts, and it is immune to the serial latency
+  jitter that makes the log column useless on native-USB boards. The script says
+  so itself when a figure is below its own noise floor.
+- **Time to exhaustion** — at the measured drift, how long before the jitter
+  buffer overflows or underruns. This is the number that matters for the
+  clock-drift work in `TODO.md`.
+
+Drift precision improves with run length. 45 s is enough to see whether audio
+flows; use 600 s or more before trusting a ppm figure.
+
+## Manual walkthrough
+
+The procedure below is the original by-hand version. It is still the only way to
+test the Bluetooth path, and worth doing once so the log output is familiar.
+Each step has a pass criterion readable directly from the serial log.
 
 ## What you need
 
-- Two boards on this PC, each on its own COM port. At least one **WROVER** — a
-  WROOM cannot be a mesh server (see D3 in `docs/decisions.md`), so a
-  WROOM+WROOM pair cannot test any of this.
-- A PCM5102 wired to each, per the README wiring diagram.
-- A phone that can connect to a Bluetooth speaker.
+For the **automated** mesh test: two or more boards on this PC, any mix. Bench
+mode does not use Bluetooth, so a WROOM counts.
 
-Verify the ports first — the values in `platformio.ini` are guesses:
+For the **manual** test of the Bluetooth path: at least one **WROVER**, plus a
+phone. Neither board currently on the bench can be an A2DP server — the WROOM has
+no PSRAM (D3) and the S3 has no BT Classic — so that half cannot be tested until
+a WROVER is bought. This is the outstanding hardware purchase in `TODO.md`.
 
-```
-pio device list
-```
+A PCM5102 on each node if you want to hear anything; the counters work without
+one.
 
-Update `upload_port` / `monitor_port` in `platformio.ini` if they differ. Capture
-each run so two runs can be compared:
+Known bench hardware as of 2026-08-19 (`pio device list`, confirmed by
+`esptool chip_id`):
+
+| Port | Chip | Module | Role in a bench run |
+|------|------|--------|---------------------|
+| COM8 | ESP32-D0WD-V3 | WROOM, no PSRAM | source or client, bench mode only |
+| COM9 | ESP32-S3 | 8 MB embedded PSRAM | source or client |
+
+Note the S3 enumerates on its **native USB** port (VID 303A), not a UART bridge,
+which is why the build sets `-DARDUINO_USB_CDC_ON_BOOT=1`. Without that flag
+`Serial` goes to GPIO43/44 and the board is silent over USB.
+
+Capture a manual run so two runs can be compared:
 
 ```
 ./tools/capture-serial.ps1 -Environment esp32wrover

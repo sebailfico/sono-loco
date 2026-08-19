@@ -6,29 +6,36 @@ file previously carried all of it and the open list got lost inside the done one
 
 ## Current state (2026-08-19)
 
-The full ESP-NOW mesh is implemented in `main.cpp` and compiles for all three
-environments. The ring buffer and packet sequence accounting are covered by host
-tests. **Nothing on the mesh path has been run on two boards yet** — treat it as
-unproven until `docs/bench-test.md` has been worked through.
+**The ESP-NOW mesh path is proven on hardware.** A WROOM sourcing and an
+ESP32-S3 playing: 26,279 packets over 120 s, zero lost, zero overflow, zero
+underrun, zero duplicates, zero resyncs, source rate exactly 220.5 pkt/s.
+Reproduce with `./tools/bench-mesh.ps1 -Flash -Duration 120`.
+
+The 23 host tests also pass on-device (`pio test -e esp32dev`).
+
+Still unproven: the Bluetooth server path, i.e. real audio from a phone
+forwarded to clients. That needs hardware nobody here has yet.
 
 ---
 
-## Blocking the test bench
+## Blocking
 
+- [ ] **Buy a WROVER.** It is the only module that can be a server (BT Classic +
+      PSRAM), and without one the A2DP half of the system cannot be tested at
+      all. The WROOM on the bench has no PSRAM; the S3 has no BT Classic.
+- [ ] **Solder a DAC to the S3** and pick its I2S pins — `config.h` hardcodes the
+      WROOM/WROVER pins (26/25/22) for every board. Until then the S3 is verified
+      only as far as "packets arrive and the buffer stays healthy", with no audio
+      out.
 - [ ] **Install a host compiler** so `pio test -e native` can run — there is no
       gcc/clang/MSVC on this machine, only the PlatformIO cross-toolchains.
       `winget install -e --id MSYS2.MSYS2` then `pacman -S
       mingw-w64-ucrt-x86_64-gcc`, and put `C:\msys64\ucrt64\bin` on PATH.
-      Not strictly required: `pio test -e esp32dev` runs the same tests on a
-      connected board.
-- [ ] **Confirm the COM ports** with `pio device list` — COM7/COM8/COM9 in
-      `platformio.ini` are guesses — and confirm which boards actually have PSRAM.
-- [ ] **Solder a DAC to the S3** and pick its I2S pins — `config.h` currently
-      hardcodes the WROOM/WROVER pins (26/25/22) for every board. Until then the
-      S3 can only be tested as far as "ESP-NOW packets arrive", via the serial
-      counters, with no audio out.
-- [ ] **Run `docs/bench-test.md` end to end** on two boards, at least one WROVER.
-      Record the captures; `tools/capture-serial.ps1` writes comparable logs.
+      Low priority now that the tests run on-device.
+- [ ] **Set `board_build.arduino.memory_type = qio_opi` for the S3** so its 8 MB
+      embedded PSRAM is actually usable. `esptool` reports the PSRAM, the
+      firmware reports `psram=0`. Nothing needs it yet, so this is only about the
+      logs being honest.
 
 ---
 
@@ -40,10 +47,13 @@ unproven until `docs/bench-test.md` has been worked through.
       with tens of ms latency; clients play after a ~185 ms jitter buffer.
       Adjacent rooms will slap-echo. The server needs to delay its own local
       playback to match.
-- [ ] **No clock-drift correction.** The server's BT clock and the client's I2S
-      clock diverge, so the jitter buffer will creep to overflow or underrun over
-      minutes. Needs slow fill-level feedback — occasionally drop or duplicate a
-      sample. Step 3 of the bench test measures the drift direction.
+- [ ] **No clock-drift correction.** Now measured rather than predicted: between
+      the WROOM and the S3 the client's jitter buffer drains at 1.2-1.9 bytes/s,
+      about 25-45 ppm, which empties it in roughly 20-35 minutes. Needs slow
+      fill-level feedback — occasionally drop or duplicate a sample.
+      `tools/bench-mesh.ps1` reports the drift and the time to exhaustion, so
+      this can now be worked on with a measurement instead of a guess. Take a
+      600 s baseline first; at 45 s the figure is still noisy.
 - [ ] **Sample rate is assumed to be 44.1 kHz.** If A2DP negotiates 48 kHz the
       clients play at the wrong pitch. Read the actual rate from the sink and
       either follow it or resample.
@@ -60,6 +70,14 @@ unproven until `docs/bench-test.md` has been worked through.
 - [ ] The server plays 44.1 kHz stereo locally while clients get 22.05 kHz mono,
       so rooms will not sound alike. Decide whether that is acceptable or whether
       the server should downgrade its own output to match.
+
+### Hardware reach
+
+- [ ] **Expose a client-only runtime mode**, so a WROOM can be a real client
+      node. Bench mode already proves a WROOM runs ESP-NOW fine as long as
+      Bluetooth is never started — it sourced the whole 120 s test. The firmware
+      just has no way to say "be a client, never a server" outside bench mode.
+      See the D3 amendment in `docs/decisions.md`.
 
 ### Housekeeping
 

@@ -9,6 +9,44 @@ README's gotcha list.
 
 ---
 
+## 2026-08-19 — First hardware run of the mesh
+
+**The ESP-NOW path works.** A WROOM sourcing and an ESP32-S3 playing: 26,279
+packets over 120 s, zero lost, zero overflow, zero underrun, zero duplicates,
+zero resyncs, source rate exactly 220.5 pkt/s, `qfull`/`senderr`/`radiofail` all
+zero. The 23 unit tests also pass on-device.
+
+- **Bench mode** added to the firmware: a runtime mode, entered by a serial
+  command and a restart, in which a node never starts Bluetooth and can generate
+  a synthetic 22.05 kHz stream straight into the ESP-NOW transmit path. This is
+  what makes unattended testing possible — the normal SERVER role needs a phone.
+  See D9. Single-character serial commands: `?` identify, `b`/`n` reboot into
+  bench/normal, `s`/`x` start/stop sourcing, `r` report.
+- **`tools/bench-mesh.ps1`** added: discovers every attached ESP32, identifies
+  each by chip, flashes the matching firmware, drives the whole set through a
+  streaming test and reports stream health and clock drift. No board limit.
+- **Fixed: the client underran 24 times a second, permanently.** `JITTER_PREFILL`
+  was 2000 bytes while the I2S DMA ring held 4096 bytes of mono, so every arming
+  of the jitter buffer was swallowed whole and immediately ran dry. The audio was
+  surviving on DMA buffering alone and the jitter buffer never approached its
+  intended depth. Prefill raised to 4000, client DMA ring reduced to 4x256
+  frames, and `static_assert`s now tie the two together. Underruns went from
+  1423 in 60 s to 0 in 120 s.
+- **Fixed: the ESP32-S3 was silent over USB.** Its board definition sets
+  `ARDUINO_USB_MODE=1` but not `ARDUINO_USB_CDC_ON_BOOT=1`, so `Serial` went to
+  GPIO43/44 while the board enumerates on native USB.
+- **Fixed: bench mode never engaged.** The flag was `RTC_DATA_ATTR`, and
+  `.rtc.data` is re-initialised from the image on every boot that runs the
+  bootloader. Now `RTC_NOINIT_ATTR`.
+- Unit tests build for hardware as well as the host, so `pio test -e esp32dev`
+  works without a host compiler.
+- Ports confirmed: COM8 is a WROOM (ESP32-D0WD-V3, no PSRAM), COM9 an ESP32-S3
+  with 8 MB embedded PSRAM. The previous `platformio.ini` mapping had the S3 and
+  the WROVER the wrong way round.
+- **D3 amended.** The WROOM's exclusion from the mesh is narrower than recorded:
+  it cannot be a *server*, because that needs BT and WiFi together, but it runs
+  ESP-NOW fine as a *client* with BT off. It sourced the entire test.
+
 ## 2026-08-19 — Structure and docs
 
 - Ring buffer and packet sequence accounting extracted from `main.cpp` into

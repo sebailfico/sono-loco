@@ -82,10 +82,17 @@ identical — see `TODO.md`.
 The Bluetooth speaker half works on hardware: A2DP sink, I2S output to the
 PCM5102, notification sounds, volume.
 
-**The mesh half has never run on two boards.** It is fully implemented, it
-compiles for all three environments, and its pure-logic parts (ring buffer,
-packet sequence accounting) are covered by host tests — but no ESP-NOW audio has
-ever been observed reaching a client. Treat it as unproven.
+**The ESP-NOW mesh works**, as of 2026-08-19: a WROOM sourcing and an ESP32-S3
+playing, 26,279 packets over 120 s with zero lost, overflowed, underrun,
+duplicated or resynced. Run it yourself with `./tools/bench-mesh.ps1 -Flash`.
+
+**The Bluetooth server path is still unproven** — audio taken from a phone and
+forwarded to clients. No board on the bench can do it: the WROOM has no PSRAM and
+the S3 has no BT Classic, so that needs a WROVER.
+
+Also still open: the clocks drift (measured at roughly 25-45 ppm between these
+two boards, enough to empty a client's jitter buffer in about half an hour) and
+nothing corrects for it yet.
 
 Where things are written down, so they stay in one place each:
 
@@ -102,7 +109,7 @@ Where things are written down, so they stay in one place each:
 
 | Module | BT Classic | PSRAM | Role | Notes |
 |--------|-----------|-------|------|-------|
-| ESP32 WROOM 32 | Yes | No | Client only | BT + WiFi simultaneously exhausts heap; ESP-NOW disabled at runtime |
+| ESP32 WROOM 32 | Yes | No | BT speaker; client-capable | BT + WiFi together exhausts the heap, so the firmware disables ESP-NOW. With BT never started it does ESP-NOW fine — proven on the bench — but no runtime mode exposes that yet |
 | ESP32 WROVER | Yes | Yes (4MB) | **Universal** | Recommended — runs full firmware, can be server or client |
 | ESP32-S3 | No | Yes | Client only | Good CPU/RAM but no BT Classic; receives audio via ESP-NOW |
 | ESP32-C6 | No (LE only) | No | Client only | WiFi 6 + Thread, but no BT Classic; weaker than S3 for this use |
@@ -293,6 +300,19 @@ Each of these was a real bug. Don't re-introduce them.
 - **Never put two `build_flags` keys in one `platformio.ini` section.** Duplicate keys
   in a single INI section are a hard `DuplicateOptionError` — the whole project stops
   loading, not just that environment. Extend a base section instead.
+- **`JITTER_PREFILL` must exceed what the I2S DMA ring can swallow in one pass.**
+  At 2000 bytes against a 4096-byte DMA ring, every arming of the jitter buffer
+  was drained instantly and the client underran 24 times a second forever, while
+  the audio limped along on DMA buffering alone. `static_assert`s tie the two
+  constants together now.
+- **The ESP32-S3 needs `-DARDUINO_USB_CDC_ON_BOOT=1`.** Its board definition sets
+  `ARDUINO_USB_MODE=1` but leaves CDC off, so `Serial` goes to GPIO43/44 while
+  the board enumerates on native USB — completely silent over the cable you are
+  plugged into.
+- **Bench mode's flag must be `RTC_NOINIT_ATTR`, not `RTC_DATA_ATTR`.**
+  `.rtc.data` is re-initialised from the image on every boot that runs the
+  bootloader, so the flag reads back as zero and the node reboots into normal
+  mode instead.
 - **A `build_flags` in an `[env:...]` section replaces the parent's, it does not
   add to it.** Writing `build_flags = -DROOM_NAME='"Kitchen"'` under
   `extends = esp32_classic` silently drops `-DENABLE_BLUETOOTH` and the node
