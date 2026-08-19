@@ -92,9 +92,26 @@
 // in main.cpp enforces this).
 #define JITTER_BUF_SIZE    8192
 
-// Minimum bytes in jitter buffer before I2S output starts.
-// Prevents underrun right at stream start (~45ms of pre-fill).
-#define JITTER_PREFILL     2000
+// Client I2S DMA ring. dma_buf_len counts stereo frames, so the ring holds
+// CLIENT_DMA_BUF_COUNT * CLIENT_DMA_BUF_LEN frames, and each frame consumes two
+// bytes of mono from the jitter buffer.
+#define CLIENT_DMA_BUF_COUNT  4
+#define CLIENT_DMA_BUF_LEN    256
+
+// Bytes of mono audio the DMA ring can swallow when completely empty:
+// 4 * 256 frames * 2 bytes = 2048 (~46 ms).
+#define CLIENT_DMA_CAPACITY_BYTES (CLIENT_DMA_BUF_COUNT * CLIENT_DMA_BUF_LEN * 2)
+
+// Minimum bytes in the jitter buffer before I2S output starts (~91 ms).
+//
+// This MUST exceed CLIENT_DMA_CAPACITY_BYTES, and the first hardware run is why:
+// at 2000 bytes it was below the DMA capacity of the then 8-buffer ring, so
+// every time the buffer armed, the DMA swallowed the whole prefill in one pass
+// and the buffer immediately ran dry -- 24 underruns per second, forever, and a
+// jitter buffer that never held more than a fraction of its intended depth. The
+// audio survived on DMA buffering alone. A static_assert in main.cpp enforces
+// the relationship now.
+#define JITTER_PREFILL     4000
 
 // Mono samples handed to I2S per loop() pass.
 #define CLIENT_BATCH       128
@@ -113,6 +130,24 @@
 // again. Without it, an incoming stream retriggers the attempt every loop pass
 // and thrashes BT stop/start.
 #define CLIENT_RETRY_BACKOFF_MS  5000
+
+// ============================================================================
+// Bench Mode (automated multi-board testing — tools/bench-mesh.ps1)
+// ============================================================================
+// The synthetic source generates this tone instead of taking audio from A2DP,
+// so a stream can be produced with no phone in the loop. Audible if a DAC is
+// attached, which makes a live run easy to sanity-check by ear.
+#define BENCH_TONE_HZ         440
+#define BENCH_TONE_AMPLITUDE  6000
+
+// If the source falls behind (blocked for a while), send at most this many
+// packets back-to-back to catch up rather than spinning out the whole backlog.
+#define BENCH_MAX_CATCHUP_PKTS  8
+
+// How often each node emits its machine-parsable [BENCH] telemetry line. This
+// is the sampling interval for the clock-drift regression, so shorter gives a
+// better fit but more serial traffic.
+#define BENCH_REPORT_MS  1000
 
 // ============================================================================
 // Mode Timeouts
