@@ -79,21 +79,6 @@ forwarded to clients. That needs hardware nobody here has yet.
 
 ### Hardware reach
 
-- [ ] **The C3 cannot source the bench stream.** Measured 2026-08-20: as the
-      synthetic source it queued 37.8 pkt/s against the required 220.5 and
-      starved the client into 159 underruns in 90 s. As a *client* it is fine —
-      131,378 packets, zero underruns — which is the role it will actually have,
-      so this only blocks a C3-only pair on the bench.
-
-      The rate matches one packet per generation pass, so the generator is the
-      bottleneck, not the radio (`qfull=0`, `senderr=0`). `benchServiceSource`
-      calls `sinf` per sample and `2.0f * M_PI * BENCH_TONE_HZ * t` promotes to
-      *double* because `M_PI` is a double — soft-float double on a chip with no
-      FPU.
-
-      The fix is a lookup table rather than a faster `sinf`: 2,205 samples is
-      exactly 44 periods of 440 Hz at 22.05 kHz, so it wraps seamlessly, costs
-      4.4 KB, and takes float out of the bench TX path on every board.
 - [ ] **Expose a client-only runtime mode**, so a WROOM can be a real client
       node. Bench mode already proves a WROOM runs ESP-NOW fine as long as
       Bluetooth is never started — it sourced the whole 600 s test. The firmware
