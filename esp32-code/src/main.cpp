@@ -490,7 +490,11 @@ static inline void decimReset() {
 // ESP-NOW packets. The BT library still drives I2S locally (local playback).
 static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
     if (currentMode != MODE_SERVER || !txReady || !espnowActive) return;
-    if (millis() - audioStartMs < TX_WARMUP_MS) return;
+    // Signed, for the reason spelled out at the ESP-NOW silence check: this
+    // timestamp is written from the A2DP state callback, and an unsigned
+    // difference against a timestamp set a moment in the future wraps to a huge
+    // number — here that would silently skip the warmup instead of enforcing it.
+    if ((long)(millis() - audioStartMs) < (long)TX_WARMUP_MS) return;
 
     const int16_t *in      = (const int16_t *)data;
     const int      nStereo = length / 4;   // 4 bytes per stereo sample pair
@@ -1104,16 +1108,31 @@ void loop() {
         case MODE_CLIENT:
             driveClientI2S();
 
-            // Read both once. Recomputing millis() or re-reading lastRxMs for
-            // the log would report different numbers than the ones that made the
-            // decision, which is exactly what you do not want when the decision
-            // itself is under suspicion.
+            // Read both once, and compare SIGNED.
+            //
+            // lastRxMs is written by the ESP-NOW receive callback on another
+            // task. At 220 packets/s a packet lands between this read of
+            // millis() and the read of lastRxMs often enough to matter, and the
+            // timestamp is then a millisecond in the *future*. Unsigned, that
+            // difference wraps to ~4.29e9 and sails past the threshold, so the
+            // node declares five seconds of silence in the middle of a flawless
+            // stream, drops to DISCOVERY and re-prefills the jitter buffer.
+            // Audible, and it invalidates any drift measurement taken across it.
+            //
+            // Measured, not theorised: [BENCH] silence now=13822 last=13823
+            // delta=4294967295 rx=14, and twice more in a 600 s run whose rx
+            // counter was advancing by 221 packets every second throughout.
+            //
+            // Same idiom as clientRetryAfterMs below. Any comparison against a
+            // timestamp another task writes needs it; the ones that only ever
+            // compare against loop()'s own bookkeeping do not.
             {
             const unsigned long nowMs  = millis();
             const unsigned long lastMs = lastRxMs;
-            if (lastMs > 0 && nowMs - lastMs > ESPNOW_SILENCE_TIMEOUT_MS) {
-                DEBUG_SERIAL.printf("[BENCH] silence now=%lu last=%lu delta=%lu rx=%lu\n",
-                                    nowMs, lastMs, nowMs - lastMs, (unsigned long)rxCount);
+            const long          ageMs  = (long)(nowMs - lastMs);
+            if (lastMs > 0 && ageMs > (long)ESPNOW_SILENCE_TIMEOUT_MS) {
+                DEBUG_SERIAL.printf("[BENCH] silence now=%lu last=%lu age=%ld rx=%lu\n",
+                                    nowMs, lastMs, ageMs, (unsigned long)rxCount);
                 LOG_INFO("ESP-NOW silent for " + String(ESPNOW_SILENCE_TIMEOUT_MS / 1000) + "s → DISCOVERY");
                 LOG_INFO("RX stats: rx=" + String(rxCount) +
                          " lost=" + String(seqTracker.lost) +
