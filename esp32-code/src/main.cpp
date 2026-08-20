@@ -1028,6 +1028,7 @@ void setup() {
     dcfg.kp            = DRIFT_KP;
     dcfg.maxRatePerSec = DRIFT_MAX_RATE;
     dcfg.emaTauMs      = DRIFT_EMA_TAU_MS;
+    dcfg.settleMs      = DRIFT_SETTLE_MS;
     // begin() here and reset() everywhere else: the correction counters have to
     // outlive a mode change, or a bench run cannot total them.
     driftCtl.begin(dcfg, millis());

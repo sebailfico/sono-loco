@@ -24,9 +24,16 @@ static const int SAMPLE_RATE   = 22050;
 static const int BYTES_PER_SEC = SAMPLE_RATE * 2;   // 16-bit mono
 static const int BATCH_SAMPLES = 128;               // CLIENT_BATCH
 static const int BATCH_BYTES   = BATCH_SAMPLES * 2;
-static const int TARGET        = 4000;              // JITTER_PREFILL
+// DRIFT_TARGET_BYTES: the prefill minus what the I2S DMA ring holds once
+// playback is running. The ring buffer only ever contains the remainder, which
+// is what the controller can see -- steering to the full prefill was a real bug,
+// caught on a C3 client, and test_target_is_the_ring_not_the_prefill pins it.
+static const int TARGET        = 4000 - 2048;
 static const int BUF_SIZE      = 8192;              // JITTER_BUF_SIZE
-static const int DMA_CAPACITY  = 2048;              // CLIENT_DMA_CAPACITY_BYTES
+// Health margins: how close the ring may come to empty (underrun) or full
+// (overflow). Not the DMA capacity -- the ring legitimately sits below that
+// number now, because the DMA is holding the rest of the prefill.
+static const double SAFE_MARGIN = 800.0;
 
 static DriftController::Config defaultCfg() {
     DriftController::Config c;
@@ -35,6 +42,7 @@ static DriftController::Config defaultCfg() {
     c.kp            = 0.005f;
     c.maxRatePerSec = 5.0f;
     c.emaTauMs      = 4000.0f;
+    c.settleMs      = 12000;
     return c;
 }
 
@@ -77,7 +85,8 @@ static void test_no_correction_inside_deadband(void) {
 static void test_draining_buffer_asks_to_insert(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
-    int net = runAt(d, TARGET - 1400, 10000);
+    // Longer than settleMs: nothing is corrected inside the dead time.
+    int net = runAt(d, TARGET - 1400, 25000);
     TEST_ASSERT_LESS_THAN_INT(0, net);
     TEST_ASSERT_TRUE(d.inserted > 0);
     TEST_ASSERT_EQUAL_UINT32(0, d.dropped);
@@ -86,7 +95,7 @@ static void test_draining_buffer_asks_to_insert(void) {
 static void test_filling_buffer_asks_to_drop(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
-    int net = runAt(d, TARGET + 1400, 10000);
+    int net = runAt(d, TARGET + 1400, 25000);
     TEST_ASSERT_GREATER_THAN_INT(0, net);
     TEST_ASSERT_TRUE(d.dropped > 0);
     TEST_ASSERT_EQUAL_UINT32(0, d.inserted);
@@ -97,7 +106,7 @@ static void test_rate_is_clamped(void) {
     DriftController::Config c = defaultCfg();
     d.begin(c, 0);
     // An error of 4000 bytes would ask for 18/s unclamped.
-    runAt(d, 0, 30000);
+    runAt(d, 0, 40000);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, -c.maxRatePerSec, d.rate());
 }
 
@@ -108,7 +117,7 @@ static void test_unapplied_correction_stays_owed(void) {
     // Drive it until a correction is due, then refuse to apply it.
     DriftController::Correction c = DriftController::NONE;
     uint32_t t = 0;
-    for (; t < 20000 && c == DriftController::NONE; t += 6) {
+    for (; t < 40000 && c == DriftController::NONE; t += 6) {
         c = d.update(t, TARGET - 1400);
     }
     TEST_ASSERT_EQUAL_INT(DriftController::INSERT, c);
@@ -126,15 +135,49 @@ static void test_unapplied_correction_stays_owed(void) {
 static void test_reset_forgets_everything(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
-    runAt(d, TARGET - 1400, 10000);
+    runAt(d, TARGET - 1400, 25000);
     TEST_ASSERT_TRUE(d.inserted > 0);
 
-    d.reset(10000);
+    d.reset(25000);
     TEST_ASSERT_EQUAL_FLOAT(0.0f, d.rate());
     // Re-seeds on the next reading rather than reading a post-underrun refill
     // as a 3000-byte error.
-    TEST_ASSERT_EQUAL_INT(DriftController::NONE, d.update(10000, TARGET - 3000));
+    TEST_ASSERT_EQUAL_INT(DriftController::NONE, d.update(25000, TARGET - 3000));
     TEST_ASSERT_EQUAL_FLOAT((float)(TARGET - 3000), d.smoothedFill());
+}
+
+static void test_settle_window_suppresses_the_arming_transient(void) {
+    DriftController d;
+    d.begin(defaultCfg(), 0);
+
+    // What arming actually looks like: playback starts with the full prefill in
+    // the ring and an empty DMA ring, and the DMA takes its share within about
+    // 50 ms. That step is 2,048 bytes and it is not drift.
+    uint32_t t = 0;
+    for (; t < 60; t += 6) { d.confirm(d.update(t, 4000)); }
+    for (; t < 11000; t += 6) { d.confirm(d.update(t, TARGET)); }
+
+    // Nothing corrected: the step was absorbed by the dead time, not chased.
+    TEST_ASSERT_EQUAL_UINT32(0, d.inserted);
+    TEST_ASSERT_EQUAL_UINT32(0, d.dropped);
+
+    // And the filter was running throughout, so when the window closes the
+    // estimate is essentially the settled level. Three time constants leaves
+    // about 5% of the 2,048-byte step -- ~100 bytes, well inside the deadband,
+    // so it cannot provoke a correction on its own.
+    TEST_ASSERT_FLOAT_WITHIN(150.0f, (float)TARGET, d.smoothedFill());
+}
+
+static void test_natural_level_needs_no_correction(void) {
+    // The target is the prefill minus what the DMA ring holds -- the level the
+    // ring actually settles at. Steering to the prefill instead pulled a real
+    // client 1,600 bytes above its natural level at nearly full rate for
+    // minutes. Held at the natural level, the controller must do nothing at all.
+    DriftController d;
+    d.begin(defaultCfg(), 0);
+    runAt(d, TARGET, 120000);
+    TEST_ASSERT_EQUAL_UINT32(0, d.inserted);
+    TEST_ASSERT_EQUAL_UINT32(0, d.dropped);
 }
 
 static void test_survives_the_millis_wrap(void) {
@@ -143,7 +186,7 @@ static void test_survives_the_millis_wrap(void) {
     d.begin(defaultCfg(), nearWrap);
     // Straddle the wrap. A naive dt would go hugely positive or negative here
     // and either freeze the filter or dump a burst of corrections.
-    int net = runAt(d, TARGET - 1400, 20000, nearWrap);
+    int net = runAt(d, TARGET - 1400, 30000, nearWrap);
     TEST_ASSERT_LESS_THAN_INT(0, net);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, -5.0f, d.rate());
 }
@@ -151,12 +194,12 @@ static void test_survives_the_millis_wrap(void) {
 static void test_a_stall_cannot_dump_credit(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
-    runAt(d, TARGET - 1400, 20000);              // rate now clamped at -5/s
+    runAt(d, TARGET - 1400, 30000);              // rate now clamped at -5/s
     uint32_t before = d.inserted;
 
     // A 10-second stall (mode change, a blocked write). At -5/s an unclamped dt
     // would owe 50 corrections at once; the clamp caps it at one batch's worth.
-    DriftController::Correction c = d.update(30000, TARGET - 1400);
+    DriftController::Correction c = d.update(40000, TARGET - 1400);
     d.confirm(c);
     TEST_ASSERT_TRUE(d.inserted - before <= 1);
 }
@@ -270,9 +313,10 @@ static void test_uncorrected_buffer_empties_within_the_hour(void) {
 static void test_corrected_buffer_holds_for_an_hour(void) {
     SimResult r = simulate(30.5, 3600.0, true);
 
-    // The point of the exercise: an hour in, the buffer is still healthy.
-    TEST_ASSERT_TRUE(r.minFill > (double)DMA_CAPACITY);
-    TEST_ASSERT_TRUE(r.maxFill < (double)BUF_SIZE);
+    // The point of the exercise: an hour in, the buffer is still healthy --
+    // clear of empty and clear of full, with no trend left.
+    TEST_ASSERT_TRUE(r.minFill > SAFE_MARGIN);
+    TEST_ASSERT_TRUE(r.maxFill < (double)BUF_SIZE - SAFE_MARGIN);
 
     // It parks below target: that offset is what generates the correction rate
     // the drift demands, and it is the documented cost of P-only control.
@@ -297,8 +341,8 @@ static void test_corrected_the_other_way_round(void) {
     // A client whose crystal is slow: the buffer fills instead, and the
     // controller must drop rather than insert.
     SimResult r = simulate(-30.5, 3600.0, true);
-    TEST_ASSERT_TRUE(r.maxFill < (double)BUF_SIZE);
-    TEST_ASSERT_TRUE(r.minFill > (double)DMA_CAPACITY);
+    TEST_ASSERT_TRUE(r.maxFill < (double)BUF_SIZE - SAFE_MARGIN);
+    TEST_ASSERT_TRUE(r.minFill > SAFE_MARGIN);
     const uint32_t steady = r.dropped - r.droppedAtHalf;
     TEST_ASSERT_UINT32_WITHIN(60, 1211, steady);
     TEST_ASSERT_EQUAL_UINT32(0, r.inserted);
@@ -310,8 +354,8 @@ static void test_a_third_board_with_a_different_offset(void) {
     static const double offsets[] = {-80.0, -12.0, 5.0, 60.0};
     for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
         SimResult r = simulate(offsets[i], 3600.0, true);
-        TEST_ASSERT_TRUE(r.minFill > (double)DMA_CAPACITY);
-        TEST_ASSERT_TRUE(r.maxFill < (double)BUF_SIZE);
+        TEST_ASSERT_TRUE(r.minFill > SAFE_MARGIN);
+        TEST_ASSERT_TRUE(r.maxFill < (double)BUF_SIZE - SAFE_MARGIN);
     }
 }
 
@@ -337,6 +381,8 @@ static int runAllTests(void) {
     RUN_TEST(test_rate_is_clamped);
     RUN_TEST(test_unapplied_correction_stays_owed);
     RUN_TEST(test_reset_forgets_everything);
+    RUN_TEST(test_settle_window_suppresses_the_arming_transient);
+    RUN_TEST(test_natural_level_needs_no_correction);
     RUN_TEST(test_survives_the_millis_wrap);
     RUN_TEST(test_a_stall_cannot_dump_credit);
 

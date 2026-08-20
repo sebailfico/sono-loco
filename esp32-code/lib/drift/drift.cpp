@@ -8,11 +8,12 @@ void DriftController::begin(const Config &cfg, uint32_t nowMs) {
 }
 
 void DriftController::reset(uint32_t nowMs) {
-    ema_    = 0.0f;
-    rate_   = 0.0f;
-    credit_ = 0.0f;
-    lastMs_ = nowMs;
-    seeded_ = false;
+    ema_        = 0.0f;
+    rate_       = 0.0f;
+    credit_     = 0.0f;
+    lastMs_     = nowMs;
+    settleLeft_ = cfg_.settleMs;
+    seeded_     = false;
 }
 
 DriftController::Correction DriftController::update(uint32_t nowMs, int fillBytes) {
@@ -37,6 +38,16 @@ DriftController::Correction DriftController::update(uint32_t nowMs, int fillByte
     // though the caller's batch interval is not exactly regular.
     const float alpha = (float)dt / (cfg_.emaTauMs + (float)dt);
     ema_ += alpha * ((float)fillBytes - ema_);
+
+    // Dead time after a reset. The filter above keeps running -- it is the
+    // correcting that waits -- so when the window closes the estimate is already
+    // settled and the first correction is a real one.
+    if (settleLeft_ > 0) {
+        settleLeft_ = (dt >= settleLeft_) ? 0 : settleLeft_ - dt;
+        rate_   = 0.0f;
+        credit_ = 0.0f;
+        return NONE;
+    }
 
     const float error = ema_ - (float)cfg_.targetBytes;
     const float dead  = (float)cfg_.deadbandBytes;
