@@ -36,12 +36,24 @@ What to read in its output:
   should be within a few packets of the source's `tx`.
 - **Source line** — packets per second should be 220.5. `qfull`, `senderr` and
   `radiofail` at 0 mean the radio kept up.
-- **Clock drift** — two independent measures. `log ppm` regresses each node's
-  `millis()` against PC time; `audio ppm` derives the same thing from how fast
-  the jitter buffer fills or empties. Prefer the audio column: it measures the
+- **Clock drift** — three measures. `log ppm` regresses each node's `millis()`
+  against PC time; `audio ppm` derives the same thing from how fast the jitter
+  buffer fills or empties; `corr` counts the samples the drift controller
+  inserted or dropped. Prefer the audio column over the log one: it measures the
   drift that actually causes dropouts, and it is immune to the serial latency
   jitter that makes the log column useless on native-USB boards. The script says
   so itself when a figure is below its own noise floor.
+- **Which column is the measurement depends on whether correction is on.** With
+  correction running, a flat `audio ppm` is the *result*, not the measurement —
+  the drift has been moved into the `corr` column, one sample at a time. Read it
+  as `+2418/-0`: inserts and drops are shown separately because a controller
+  doing both in equal measure is hunting rather than correcting, and a net figure
+  would hide that.
+
+  To measure the raw drift instead, run with `-NoDrift`. Doing both back to back
+  on the same boards in the same session is the only comparison worth recording:
+  the offset is a property of that pair of crystals at that temperature, so a
+  corrected run today against an uncorrected one from last week proves nothing.
 - **Time to exhaustion** — at the measured drift, how long before the jitter
   buffer overflows or underruns. This is the number that matters for the
   clock-drift work in `TODO.md`.

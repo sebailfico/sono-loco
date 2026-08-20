@@ -4,14 +4,18 @@ What is **open**. Completed work is in `CHANGELOG.md`, standing design choices
 and their reasoning are in `docs/decisions.md`. Keep those three separate — this
 file previously carried all of it and the open list got lost inside the done one.
 
-## Current state (2026-08-19)
+## Current state (2026-08-20)
 
 **The ESP-NOW mesh path is proven on hardware.** A WROOM sourcing and an
 ESP32-S3 playing: 132,069 packets over 600 s, zero lost, zero overflow, zero
 underrun, zero duplicates, zero resyncs, source rate exactly 220.5 pkt/s.
 Reproduce with `./tools/bench-mesh.ps1 -Flash -Duration 600`.
 
-The 23 host tests also pass on-device (`pio test -e esp32dev`).
+The 38 host tests also pass on-device (`pio test -e esp32dev`): 23 for the
+jitter buffer and sequence accounting, 15 for the clock-drift controller.
+
+Clock-drift correction is written and simulated but **not yet measured on
+hardware** — see below. Everything above the drift entry still holds.
 
 Still unproven: the Bluetooth server path, i.e. real audio from a phone
 forwarded to clients. That needs hardware nobody here has yet.
@@ -48,21 +52,20 @@ forwarded to clients. That needs hardware nobody here has yet.
       46 ms of I2S DMA).
       Adjacent rooms will slap-echo. The server needs to delay its own local
       playback to match.
-- [ ] **No clock-drift correction.** Measured, not predicted. 600 s baseline
-      (2026-08-19, WROOM source -> S3 client): the client's jitter buffer drains
-      at **1.34 bytes/s, -30.5 ppm**, emptying it in about 18 minutes. Converged
-      across run lengths (45 s: -42.5 ppm, 120 s: -27.2 ppm, 600 s: -30.5 ppm)
-      and corroborated by the independent log-clock measure, which put the WROOM
-      itself at +8.1 +/- 1.2 ppm against the PC.
+- [ ] **Clock-drift correction needs its hardware run.** Implemented and
+      simulated, not yet measured on boards: `lib/drift/` steers the jitter
+      buffer to its target depth by duplicating or dropping one mono sample at a
+      time, `pio test -e esp32dev -f test_drift` covers the closed loop against
+      the measured -30.5 ppm, and the model reproduces the recorded 1.34 B/s
+      slope before it is trusted. See D11.
 
-      The fix is undemanding: 30 ppm at 22.05 kHz is 0.66 samples/s, so
-      duplicating one mono sample about every 1.5 s cancels it. Well below
-      audibility, no resampling required.
+      What is left is the evidence: `./tools/bench-mesh.ps1 -Flash -Duration 600`
+      twice on the same boards, once with `-NoDrift` and once without. Expect the
+      uncorrected run to reproduce -30.5 ppm and the corrected one to show a flat
+      buffer with the drift appearing in the `corr` column instead. Until that is
+      recorded in `CHANGELOG.md`, this is unproven — the prefill bug was also
+      invisible in the code.
 
-      Make it **adaptive**, not a -30 ppm constant: this is one pair of crystals
-      at one temperature, and a third board will have its own offset. Sample the
-      buffer fill every few seconds and nudge toward the target depth.
-      `tools/bench-mesh.ps1` measures the result.
 - [ ] **Sample rate is assumed to be 44.1 kHz.** If A2DP negotiates 48 kHz the
       clients play at the wrong pitch. Read the actual rate from the sink and
       either follow it or resample.

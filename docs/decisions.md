@@ -260,3 +260,51 @@ worth revisiting once there is a second person flashing boards, or an OTA path
 (`TODO.md`) that has to decide whether an image is newer than the running one —
 `git describe` output does not order without parsing, and that would be the
 moment to put a real semver in the tag and compare against it.
+
+---
+
+## D11 — Drift is corrected by duplicating and dropping single samples
+
+**Decided:** 2026-08-20. **Status:** new, measured in simulation, awaiting the
+600 s bench run.
+
+Two crystals, nothing synchronising them: the client consumes at a slightly
+different rate than the source produces, and the jitter buffer slowly empties or
+fills. Measured over 600 s on the first pair of boards, -30.5 ppm, which drains
+the buffer in about 18 minutes of continuous play. Every client has to correct
+for it or eventually break.
+
+The correction is **one mono sample, duplicated or skipped, at a batch
+boundary**. 30 ppm at 22.05 kHz is 0.67 samples per second — roughly one edit
+every 1.5 s, holding a single sample for one extra sample period. That is far
+below audibility on this material and it costs nothing: no filter state, no
+fractional-delay interpolation, no per-sample arithmetic in the audio path at
+all.
+
+The alternative is a real asynchronous sample-rate converter, which resamples the
+whole stream by the measured ratio. It is the correct answer for a system that
+has to survive large or fast-changing offsets, and the wrong one here: it would
+add a resampler to a 240 MHz core that also runs a radio, to fix an error of
+0.003%. If the mesh ever carries stereo, a higher rate, or material where a
+held sample is audible, that trade changes.
+
+**It is a controller, not a constant.** -30.5 ppm is one pair of crystals at one
+temperature; a third board has a different offset, and the same board has a
+different one when it is warm. So the firmware steers on the *buffer occupancy*
+it can actually see, rather than on a number measured once. Proportional control
+on the smoothed fill error with a deadband — the deadband is what keeps it from
+chasing packet-arrival jitter, and it costs a slightly shallower buffer in
+exchange. The full reasoning, including why there is no integral term, is in
+`lib/drift/drift.h`.
+
+Placing the edit at a batch boundary rather than hunting for a zero crossing is
+also deliberate: the partial-write accounting in `driveClientI2S` is the code
+that once shifted the 16-bit framing permanently, and an edit in the middle of a
+buffer that I2S may only half accept is exactly how that bug would come back.
+One sample either side of a write whose length is already handled correctly
+cannot do that.
+
+**What would change this:** material where a held sample is audible, a client
+whose offset exceeds the 227 ppm the controller is allowed to correct, or a
+sample rate that stops being fixed at 22.05 kHz (`TODO.md` — if A2DP negotiates
+48 kHz, the whole rate assumption changes and an SRC may be needed anyway).

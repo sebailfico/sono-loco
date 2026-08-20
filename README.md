@@ -99,8 +99,11 @@ the S3 has no BT Classic, so that needs a WROVER.
 
 Also still open: the clocks drift. Measured over 600 s at **−30.5 ppm** between
 these two boards, which drains a client's jitter buffer in about 18 minutes.
-Nothing corrects for it yet — see `TODO.md`, which carries the numbers and what
-the fix needs to look like.
+A controller for it now exists (`lib/drift/`, D11) — it duplicates or drops one
+mono sample at a time to hold the buffer at its target depth, and the closed loop
+is covered by simulation in `pio test -f test_drift`. It has **not yet been
+measured on hardware**, so treat it as unproven until `CHANGELOG.md` says
+otherwise; see `TODO.md` for exactly which run is missing.
 
 Where things are written down, so they stay in one place each:
 
@@ -299,6 +302,7 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `s` | start generating the synthetic test stream |
 | `x` | stop generating it |
 | `r` | print a telemetry line now |
+| `d` | toggle clock-drift correction (on by default) |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
 A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs
@@ -318,8 +322,16 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   sequence accounting (`seqtracker.h`). Pure logic, no Arduino or ESP-IDF, so it
   can be tested on a PC. This is where both of the worst bugs in this project
   lived.
-- `esp32-code/test/test_jitter/` — host tests for the above. Each one
-  corresponds to a real bug or a real invariant.
+- `esp32-code/lib/drift/` — the clock-drift controller. Decides when a client
+  should duplicate or drop a sample to hold its buffer at depth; it never touches
+  I2S or the ring buffer itself, which is what makes the closed loop simulable on
+  a PC. See D11.
+- `esp32-code/test/test_jitter/` — host tests for the ring buffer and sequence
+  accounting. Each one corresponds to a real bug or a real invariant.
+- `esp32-code/test/test_drift/` — host tests for the controller, including
+  hour-long closed-loop simulations at the drift measured on these boards. The
+  model is checked against the recorded 1.34 B/s slope before anything built on
+  it is believed.
 - `esp32-code/scripts/version.py` — a PlatformIO pre-build step that defines
   `FW_VERSION` from `git describe`. There is no version constant to bump by hand;
   see D10.

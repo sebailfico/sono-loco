@@ -129,6 +129,44 @@
 // Mono samples handed to I2S per loop() pass.
 #define CLIENT_BATCH       128
 
+// ============================================================================
+// Clock Drift Correction (CLIENT mode)
+// ============================================================================
+// Source and client run off separate crystals with nothing synchronising them.
+// Measured over 600 s on the first two boards: the client consumed 30.5 ppm
+// faster than the source produced, draining the jitter buffer at 1.34 bytes/s
+// and emptying it in about 18 minutes. See lib/drift/drift.h for the control
+// law and test/test_drift for the closed-loop simulations these values were
+// chosen against.
+//
+// The correction is one duplicated or dropped mono sample at a time -- 30 ppm at
+// 22.05 kHz is 0.67 samples/s, roughly one edit every 1.5 s, which is why no
+// resampler is needed.
+
+// Fill the controller steers towards. The prefill depth is the right target:
+// it is already chosen to sit well clear of the DMA ring.
+#define DRIFT_TARGET_BYTES    JITTER_PREFILL
+
+// No correction at all inside this band, in bytes. Two packets' worth, so
+// ordinary packet-arrival jitter never provokes an edit. The cost is that the
+// buffer drifts this far before anything happens (~300 s at 30 ppm) and settles
+// a little below target rather than exactly on it.
+#define DRIFT_DEADBAND_BYTES  400
+
+// Corrections per second per byte of error outside the deadband. 0.005 puts the
+// loop time constant at 1/(2*kp) = 100 s -- far faster than the drift it
+// corrects (which needs ~400 s to build that much error) and far slower than the
+// input filter, so the loop cannot ring.
+#define DRIFT_KP              0.005f
+
+// Hard cap on the correction rate, corrections per second. 5/s is 227 ppm of
+// authority, comfortably past any crystal pair, and bounds how much audio the
+// controller can touch if something else goes wrong.
+#define DRIFT_MAX_RATE        5.0f
+
+// Time constant of the fill low-pass, ms.
+#define DRIFT_EMA_TAU_MS      4000.0f
+
 // Lost packets are replaced with an equal amount of silence to keep playback
 // timing. Capped so one long outage can't flood the buffer with silence.
 #define MAX_GAP_FILL_PKTS  4

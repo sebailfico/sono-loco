@@ -44,6 +44,12 @@
 .PARAMETER Ports
     Explicit port list, bypassing discovery. e.g. -Ports COM8,COM9
 
+.PARAMETER NoDrift
+    Turn clock-drift correction off on every node before measuring. This is how
+    the uncorrected baseline is reproduced: run once with it and once without,
+    same boards, same session, and compare. Without it the correction is on,
+    which is the shipping behaviour.
+
 .PARAMETER KeepBenchMode
     Leave the nodes in bench mode at the end instead of rebooting them back to
     normal speaker behaviour.
@@ -60,7 +66,8 @@ param(
     [string]$Source = '',
     [string[]]$Ports = @(),
     [int]$PollMs = 10,
-    [switch]$KeepBenchMode
+    [switch]$KeepBenchMode,
+    [switch]$NoDrift
 )
 
 $ErrorActionPreference = 'Stop'
@@ -395,6 +402,28 @@ if (-not $sourceNode) { throw 'No node with ESP-NOW active could be the source.'
 $sourceNode.IsSource = $true
 
 Write-Host "Source: $($sourceNode.Port) ($($sourceNode.Chip))" -ForegroundColor Green
+
+# Drift correction defaults to on, because that is what ships. -NoDrift turns it
+# off on every node so the uncorrected baseline can be reproduced on the same
+# boards in the same session -- the only comparison that means anything, since
+# the drift being measured is a property of this particular pair of crystals at
+# this particular temperature.
+$driftState = 'on'
+if ($NoDrift) {
+    $driftState = 'off'
+    Write-Host 'Disabling clock-drift correction on every node ...' -ForegroundColor Yellow
+    foreach ($n in $nodes) {
+        $null = $n.Sp.ReadExisting()
+        Send-Cmd -Sp $n.Sp -Cmd 'd'
+        $line = Wait-ForLine -Sp $n.Sp -Pattern '^\[BENCH\] drift=' -TimeoutSec 4
+        if (-not $line) {
+            Write-Warning "$($n.Port) did not acknowledge the drift toggle -- it may still be correcting"
+        } elseif ($line -notmatch 'drift=0') {
+            Write-Warning "$($n.Port) reports $line -- expected drift=0"
+        }
+    }
+}
+
 foreach ($n in $nodes) { $null = $n.Sp.ReadExisting() }
 Send-Cmd -Sp $sourceNode.Sp -Cmd 's'
 
@@ -410,6 +439,7 @@ $logPath = Join-Path $logDir "bench-$stamp.log"
     "# started  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     "# version  : $repoVersion"
     "# duration : $Duration s"
+    "# drift    : correction $driftState"
     "# source   : $($sourceNode.Port)"
     "# nodes    : $(($nodes | ForEach-Object { "$($_.Port)=$($_.Chip)" }) -join ' ')"
     "# firmware : $(($nodes | ForEach-Object { "$($_.Port)=$(if ($_.Ident) { $_.Ident['fw'] } else { '?' })" }) -join ' ')"
@@ -517,7 +547,20 @@ foreach ($n in $nodes) {
     $jitBps   = $null
     if ($jitSlope) { $jitBps = $jitSlope.Slope }
 
+    # Corrections the drift controller actually applied. With correction on this
+    # replaces the buffer slope as the drift measurement: the whole point is that
+    # the slope goes to zero, so the drift shows up here instead, one sample at a
+    # time. Inserts mean the client is running fast, which is the same sign
+    # convention as a draining buffer.
+    $dIns = 0.0; $dDrp = 0.0
+    if ($null -ne $last['ins']) { $dIns = [double]$last['ins'] - [double]$first['ins'] }
+    if ($null -ne $last['drp']) { $dDrp = [double]$last['drp'] - [double]$first['drp'] }
+    $corrPpm = $null
+    if ($span -gt 0) { $corrPpm = -($dIns - $dDrp) / $span / $SampleRate * 1e6 }
+
     $results += [pscustomobject]@{
+        Ins = $dIns; Drp = $dDrp; CorrPpm = $corrPpm
+        DriftOn = ($last['drift'] -eq '1')
         Port = $n.Port; Chip = $n.Chip; Role = $last['role']; Mode = $last['mode']
         Span = $span; Ppm = $ppm; PpmSe = $ppmSe
         Rx = $dRx; Lost = $dLost; Ovf = $dOvf; Und = $dUnd; Dup = $dDup; Rsy = $dRsy; Tx = $dTx
@@ -550,12 +593,17 @@ if ($src) {
 Write-Host ''
 Write-Host 'Clock drift'
 Write-Host '-----------'
-Write-Host 'Two independent measures. "log" regresses each node''s millis() against'
-Write-Host 'PC time; "audio" derives drift from how fast the jitter buffer fills or'
-Write-Host 'empties, which is the one that actually causes dropouts.'
+Write-Host "Correction is $driftState."
+Write-Host 'Three measures. "log" regresses each node''s millis() against PC time;'
+Write-Host '"audio" derives drift from how fast the jitter buffer fills or empties;'
+Write-Host '"corr" counts the samples the drift controller inserted or dropped.'
 Write-Host ''
-Write-Host ("{0,-6} {1,12} {2,10} {3,14} {4,12} {5,12}" -f `
-    'Port', 'log ppm', '+/-', 'vs source', 'jitter B/s', 'audio ppm')
+Write-Host 'With correction ON the audio column should read about zero -- that is what'
+Write-Host 'success looks like -- and the corr column carries the drift instead. With it'
+Write-Host 'OFF the corr column is empty and the audio column is the measurement.'
+Write-Host ''
+Write-Host ("{0,-6} {1,12} {2,10} {3,14} {4,12} {5,12} {6,10} {7,12}" -f `
+    'Port', 'log ppm', '+/-', 'vs source', 'jitter B/s', 'audio ppm', 'corr', 'corr ppm')
 foreach ($r in $results) {
     if ($src -and $null -ne $r.Ppm -and $null -ne $src.Ppm) {
         $rel = '{0,14:N1}' -f ($r.Ppm - $src.Ppm)
@@ -569,7 +617,17 @@ foreach ($r in $results) {
         $jb     = '{0,12}' -f 'n/a'
         $jitPpm = '{0,12}' -f 'n/a'
     }
-    Write-Host ("{0,-6} {1,12:N1} {2,10:N1} {3} {4} {5}" -f $r.Port, $r.Ppm, $r.PpmSe, $rel, $jb, $jitPpm)
+    # "+12/-0" reads better than a net figure here: a controller that is
+    # inserting and dropping in equal measure is hunting, not correcting, and a
+    # net of zero would hide it.
+    $corr = '{0,10}' -f ('+{0:N0}/-{1:N0}' -f $r.Ins, $r.Drp)
+    if ($null -ne $r.CorrPpm) {
+        $corrPpm = '{0,12:N1}' -f $r.CorrPpm
+    } else {
+        $corrPpm = '{0,12}' -f 'n/a'
+    }
+    Write-Host ("{0,-6} {1,12:N1} {2,10:N1} {3} {4} {5} {6} {7}" -f `
+        $r.Port, $r.Ppm, $r.PpmSe, $rel, $jb, $jitPpm, $corr, $corrPpm)
 
     # An uncertainty larger than the estimate means the log-derived figure says
     # nothing. It happens on native-USB boards, where CDC latency jitter swamps
@@ -613,6 +671,21 @@ foreach ($r in $results) {
         Write-Host ("PASS {0}: {1:N0} packets, loss {2:N2}%, buffer stable" -f $r.Port, $r.Rx, $lossPct) -ForegroundColor Green
     } else {
         Write-Host ("WARN {0}: {1}" -f $r.Port, ($issues -join ', ')) -ForegroundColor Yellow
+    }
+
+    # What the drift controller did, and whether it was enough. A correcting
+    # client should show a flat buffer and a correction rate equal to the drift;
+    # a buffer still moving while corrections are being applied means the drift
+    # is past the controller's authority, or the loop is not converging.
+    if ($r.DriftOn) {
+        $flat = ($null -ne $r.JitBps -and [math]::Abs($r.JitBps) -le 0.5)
+        if ($flat) {
+            Write-Host ("     drift correction held: {0:N0} inserted, {1:N0} dropped = {2:N1} ppm, buffer flat at {3:N0} B" -f `
+                $r.Ins, $r.Drp, $r.CorrPpm, $r.JitLast) -ForegroundColor Green
+        } elseif ($r.Ins -gt 0 -or $r.Drp -gt 0) {
+            Write-Host ("     drift correction is running ({0:N0}/{1:N0} = {2:N1} ppm) but the buffer is still moving" -f `
+                $r.Ins, $r.Drp, $r.CorrPpm) -ForegroundColor Yellow
+        }
     }
 
     # Time until the jitter buffer runs out of room, at the observed drift.
