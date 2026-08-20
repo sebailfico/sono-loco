@@ -5,18 +5,21 @@
  * Clock-drift correction for the CLIENT audio path.
  *
  * The source and every client run off their own crystal, and nothing
- * synchronises them. Measured over 600 s on the first two boards, the client
- * consumed 30.5 ppm faster than the WROOM produced -- 1.34 bytes/s out of the
- * jitter buffer, which empties it in about 18 minutes of continuous play. The
- * absolute number is a property of one pair of crystals at one temperature and
- * is not worth hard-coding: a third board has its own offset, and the same board
- * has a different one when it is warm.
+ * synchronises them. Measured over 600 s: the S3 consumed 30.5 ppm faster than
+ * the WROOM produced, and an ESP32-C3 against that same WROOM consumed 57.7 ppm
+ * faster -- 1.34 and 2.55 bytes/s out of the jitter buffer, emptying it in 18 and
+ * 10 minutes of continuous play respectively.
+ *
+ * Two clients of one source, differing by a factor of nearly two. The absolute
+ * number is a property of a particular pair of crystals at a particular
+ * temperature and is not worth hard-coding; that was the argument in advance,
+ * and the second board then made it out loud.
  *
  * So this is a controller, not a constant. It watches the buffer occupancy and
  * asks the caller to consume one extra sample now and then (buffer too full) or
- * one fewer (buffer draining). At 22.05 kHz, 30 ppm is 0.66 samples/s -- about
- * one edit every 1.5 s. That is far below audibility and needs no resampler,
- * which is the whole reason this approach was chosen over an SRC.
+ * one fewer (buffer draining). At 22.05 kHz, 30 ppm is 0.66 samples/s and 58 ppm
+ * is 1.28 -- one edit every second or two. That is far below audibility and needs
+ * no resampler, which is the whole reason this approach was chosen over an SRC.
  *
  * Pure logic, no Arduino or ESP-IDF, so the convergence behaviour can be
  * simulated on the host rather than discovered on a bench -- see
@@ -26,18 +29,26 @@
  * Control law: proportional, on the smoothed fill error, with a deadband.
  *
  *   - Proportional only. The plant is an integrator (a rate error accumulates
- *     into a level error), so P alone has no steady-state *level* error in the
- *     sense that matters: the buffer parks at whatever offset produces exactly
- *     the correction rate the drift demands, and stays there. With the defaults
- *     below and 30 ppm of drift that offset is about 530 bytes -- 24 ms shallower
- *     than target, still an order of magnitude above the DMA ring. Adding an
- *     integral term would recover those 24 ms and buy a wind-up failure mode in
+ *     into a level error), so the buffer parks at whatever offset produces
+ *     exactly the correction rate the drift demands, and stays there:
+ *
+ *         steady-state depth = target - (deadband + required_rate / kp)
+ *
+ *     That is not a footnote, it is the design constraint. The gain decides how
+ *     deep the buffer runs, and that depth has to survive a radio hiccup. With
+ *     config.h's values a -58 ppm client parks about 320 bytes below target;
+ *     at the gain this started with, four times gentler, it parked 660 bytes
+ *     below and underran on an ordinary two-packet loss. Adding an integral term
+ *     would recover the remaining offset and buy a wind-up failure mode in
  *     exchange, which is a bad trade for a buffer this deep.
  *   - The deadband is what stops the controller chasing packet-arrival jitter.
  *     Below it, nothing happens at all.
- *   - Loop time constant works out at 1/(2*kp) = 100 s with the defaults, versus
- *     a disturbance that takes ~400 s to build the offset it corrects and an
- *     input filter at 4 s. Three well-separated timescales, so it cannot ring.
+ *   - Loop time constant is 1/(2*kp) -- 25 s with config.h's gain -- against an
+ *     input filter at 4 s and a disturbance that takes minutes to build the
+ *     offset it corrects. Three well-separated timescales, so it cannot ring.
+ *
+ * The numbers above are illustrative; config.h holds the actual values and the
+ * reasoning for each. Re-derive rather than trusting this comment if they move.
  */
 
 #include <stdint.h>
