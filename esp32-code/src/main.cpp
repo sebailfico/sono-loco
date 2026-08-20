@@ -894,7 +894,7 @@ static void benchReport() {
     DEBUG_SERIAL.printf(
         "[BENCH] ms=%lu role=%s mode=%s heap=%lu jit=%d rx=%lu lost=%lu ovf=%lu "
         "und=%lu dup=%lu rsy=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu "
-        "drift=%d ins=%lu drp=%lu dr=%.3f\n",
+        "drift=%d ins=%lu drp=%lu dr=%.3f srx=%ld\n",
         (unsigned long)millis(),
         benchSource ? "SOURCE" : "SINK",
         modeStr,
@@ -916,7 +916,12 @@ static void benchReport() {
         // Corrections per second the controller is currently asking for. Once
         // the loop is closed this is the only in-band measure of drift left:
         // a corrected buffer no longer has a slope to regress.
-        driftCtl.rate());
+        driftCtl.rate(),
+        // Age of the last received packet, as the silence check sees it. Signed
+        // and printed even when it is meaningless (a source has no rx), because
+        // a value that goes *negative* or jumps is the evidence that the check
+        // is misfiring rather than the radio going quiet.
+        lastRxMs ? (long)(millis() - lastRxMs) : -1L);
 }
 
 static void benchIdentify() {
@@ -1099,7 +1104,16 @@ void loop() {
         case MODE_CLIENT:
             driveClientI2S();
 
-            if (lastRxMs > 0 && millis() - lastRxMs > ESPNOW_SILENCE_TIMEOUT_MS) {
+            // Read both once. Recomputing millis() or re-reading lastRxMs for
+            // the log would report different numbers than the ones that made the
+            // decision, which is exactly what you do not want when the decision
+            // itself is under suspicion.
+            {
+            const unsigned long nowMs  = millis();
+            const unsigned long lastMs = lastRxMs;
+            if (lastMs > 0 && nowMs - lastMs > ESPNOW_SILENCE_TIMEOUT_MS) {
+                DEBUG_SERIAL.printf("[BENCH] silence now=%lu last=%lu delta=%lu rx=%lu\n",
+                                    nowMs, lastMs, nowMs - lastMs, (unsigned long)rxCount);
                 LOG_INFO("ESP-NOW silent for " + String(ESPNOW_SILENCE_TIMEOUT_MS / 1000) + "s → DISCOVERY");
                 LOG_INFO("RX stats: rx=" + String(rxCount) +
                          " lost=" + String(seqTracker.lost) +
@@ -1108,6 +1122,7 @@ void loop() {
                          " dupe=" + String(seqTracker.dupe) +
                          " resync=" + String(seqTracker.resync));
                 enterDiscovery();   // clears the counters and lastRxMs
+            }
             }
             break;
     }
