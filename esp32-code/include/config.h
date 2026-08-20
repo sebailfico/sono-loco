@@ -163,9 +163,30 @@
 // 22.05 kHz is 0.67 samples/s, roughly one edit every 1.5 s, which is why no
 // resampler is needed.
 
-// Fill the controller steers towards. The prefill depth is the right target:
-// it is already chosen to sit well clear of the DMA ring.
-#define DRIFT_TARGET_BYTES    JITTER_PREFILL
+// Fill the controller steers towards.
+//
+// NOT the prefill. The jitter buffer is not where all the buffered audio lives:
+// once playback is running the I2S DMA ring holds CLIENT_DMA_CAPACITY_BYTES of
+// it, and the ring settles at what is left. JITTER_PREFILL is the *total* depth;
+// this is the part of it the controller can see and therefore the part it can
+// steer.
+//
+// Steering to JITTER_PREFILL was the first version, and hardware said no: on a
+// C3 client it dragged the buffer 1,600 bytes above its natural level at nearly
+// the full correction rate for minutes on end -- 36 ms of latency the design
+// does not want, and a saturated controller measuring nothing while it climbed.
+// The recorded v0.1.0 baseline shows the same natural level on the S3: the ring
+// sat between 1,400 and 2,300 bytes for the whole 600 s run, never near 4,000.
+#define DRIFT_TARGET_BYTES    (JITTER_PREFILL - CLIENT_DMA_CAPACITY_BYTES)
+
+// How long after playback arms before corrections may start, ms.
+//
+// Arming happens at JITTER_PREFILL with an empty DMA ring, and the ring then
+// takes its share within about 50 ms -- a 2,048-byte step down that is not
+// drift and must not be corrected as if it were. Three filter time constants is
+// enough for the smoothed fill to forget it. Drift takes minutes to matter, so
+// the dead time costs nothing.
+#define DRIFT_SETTLE_MS       12000
 
 // No correction at all inside this band, in bytes. Two packets' worth, so
 // ordinary packet-arrival jitter never provokes an edit. The cost is that the

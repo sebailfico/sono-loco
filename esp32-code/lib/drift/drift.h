@@ -55,6 +55,16 @@ public:
         float maxRatePerSec;
         /** Time constant of the fill low-pass, milliseconds. */
         float emaTauMs;
+        /**
+         * Dead time after a reset before any correction may be applied, ms.
+         *
+         * Playback arms with a full prefill and an empty DMA ring, and the ring
+         * then takes its share in one step. That step is an artefact of starting
+         * up, not drift, and correcting it wastes authority in the wrong
+         * direction. The filter is still running during this window -- only the
+         * correcting is held off -- so it starts from a settled estimate.
+         */
+        uint32_t settleMs;
     };
 
     /** Intent returned by update(). */
@@ -107,6 +117,7 @@ private:
     float    rate_    = 0.0f;
     float    credit_  = 0.0f;   ///< fractional corrections owed, signed
     uint32_t lastMs_  = 0;
+    uint32_t settleLeft_ = 0;   ///< ms of dead time remaining after a reset
     bool     seeded_  = false;
 
     // A stall (mode change, a long blocking write) must not hand the controller
