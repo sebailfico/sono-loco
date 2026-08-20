@@ -30,7 +30,7 @@
 // ============================================================================
 // I2S / PCM5102 DAC Pin Configuration
 // ============================================================================
-// PCM5102 wiring to ESP32:
+// PCM5102 wiring, classic ESP32 (WROOM / WROVER):
 //   PCM5102 BCK  -> GPIO 26
 //   PCM5102 DIN  -> GPIO 25
 //   PCM5102 LCK  -> GPIO 22
@@ -39,10 +39,30 @@
 //   PCM5102 XSMT -> 3.3V       (soft mute off)
 //   PCM5102 FLT  -> GND        (normal latency)
 //   PCM5102 DEMP -> GND        (de-emphasis off)
+//
+// The pin numbers are per target because they have to be: GPIO 22-25 do not
+// exist on an ESP32-S3 at all, and GPIO 26 is a flash/PSRAM pin there. The
+// classic numbers were being handed to every board regardless, which is a
+// silently invalid pin map on anything but a WROOM or WROVER.
+//
+// Override per node in platformio.ini (-DI2S_BCK_PIN=…) if a board is wired
+// differently; these are only defaults.
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
+// Provisional, and deliberately conservative: free on both an S3 devkit and a
+// C3 devkitm-1, clear of the strapping pins (0/2/3/8/9/45/46), the native USB
+// pair (18/19 on a C3, 19/20 on an S3), UART0, and the flash and octal-PSRAM
+// banks (26-37 on an S3). Nothing is soldered to either board yet -- when a DAC
+// goes on, confirm these against that board's pinout rather than trusting them.
+#define I2S_BCK_PIN  4
+#define I2S_WS_PIN   5
+#define I2S_DATA_PIN 6
+#else
+// Classic ESP32. Wired and working on hardware.
 #define I2S_BCK_PIN  26
 #define I2S_DATA_PIN 25
 #define I2S_WS_PIN   22
+#endif
 
 // ============================================================================
 // Bluetooth A2DP (SERVER mode — BT Classic nodes only)

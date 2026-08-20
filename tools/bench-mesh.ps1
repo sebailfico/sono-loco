@@ -144,7 +144,8 @@ function Get-EnvForChip {
     param([string]$Chip)
     if (-not $Chip) { return $null }
     if ($Chip -match 'ESP32-S3') { return 'esp32s3' }
-    if ($Chip -match 'ESP32-C')  { return $null }     # no build for C-series yet
+    if ($Chip -match 'ESP32-C3') { return 'esp32c3' }
+    if ($Chip -match 'ESP32-C')  { return $null }      # C6/C5/H2: no build yet
     if ($Chip -match 'ESP32')    { return 'esp32dev' } # classic: WROOM or WROVER
     return $null
 }
