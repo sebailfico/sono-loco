@@ -77,8 +77,9 @@ WiFi claims ~80 KB of the ~215 KB DRAM heap and the BT stack can no longer
 allocate its L2CAP/AVDTP buffers, so it crashes. `setupESPNow()` therefore bails
 out early on a board that has BT compiled in and reports no PSRAM.
 
-A WROOM node is a plain Bluetooth speaker with no mesh. The WROVER is the only
-currently-stocked module that is fully interchangeable.
+A WROOM node left in its default mode is a plain Bluetooth speaker with no mesh.
+The WROVER is the only currently-stocked module that is fully interchangeable —
+the only one that can be a server and still switch to being a client.
 
 **Amended 2026-08-19, and this matters:** the exclusion is narrower than it was
 written. The conflict only exists while the BT stack is *running*. A WROOM that
@@ -88,37 +89,53 @@ measured, not assumed: a WROOM was the ESP-NOW source for a 600 s run at
 packet lost.
 
 So a WROOM cannot be a **server**, because that needs BT and WiFi together. It
-can be a **client**, because that needs only WiFi. The current firmware does not
-offer that — `setupESPNow()` bails on any BT-capable board without PSRAM, and BT
-is started unconditionally at boot — so a client-only runtime mode would be
-needed to use it. Bench mode already proves the mechanism works.
+can be a **client**, because that needs only WiFi.
+
+**Implemented 2026-08-20:** client-only mode, set with the serial command `c` and
+stored in NVS. A node in it never starts Bluetooth, so `setupESPNow()` lets it
+have the radio, and a WROOM becomes a real mesh node. Measured on the shipping
+path rather than in bench mode — normal boot, ordinary status output — a WROOM
+took 12,870 packets in 60 s with zero overflow, zero underrun, a jitter buffer
+holding 2,880 bytes and 93 KB of heap still free. `tools/test-client-only.ps1`
+reproduces it.
+
+It is stored in NVS rather than RTC memory, unlike bench mode, because it is a
+*setting*: a node wired into a room has to come back as what it was after the
+power blinks. Bench mode staying volatile is equally deliberate — a board left in
+a test mode by a power cut is a trap.
 
 **What would change this:** shrinking the mesh's RAM footprint far enough that
 BT and WiFi coexist without PSRAM — unlikely, the 80 KB is the WiFi driver's own
 buffers, and the static RX buffers cannot be moved to PSRAM because they must be
-DMA-capable internal DRAM. But the client-only path above needs no such
-breakthrough and would make every WROOM on the shelf a usable node.
+DMA-capable internal DRAM. What remains true is the shape of the conclusion: a
+WROOM is a server or a client, never both, and which one it is is now a setting
+rather than an accident of what the board has soldered to it.
 
 ---
 
-## D4 — One binary for WROOM and WROVER, three environment names
+## D4 — One build per instruction set, one environment name per board
 
-**Decided:** during the second audit. **Status:** holding.
+**Decided:** during the second audit. **Status:** holding; the count has changed
+twice, the rule has not.
 
-There are two builds because there are two instruction sets, and three
-environment names because there are three boards with three COM ports.
-`esp32dev` and `esp32wrover` compile identical code.
+There is one build per instruction set — three now: classic Xtensa, S3, and the
+RISC-V C3 added 2026-08-20 — and one environment name per board that might be
+plugged in, because each needs its own COM port. `esp32dev` and `esp32wrover`
+compile identical code.
 
 This works because the Arduino core ships `CONFIG_SPIRAM=y` with
 `CONFIG_SPIRAM_BOOT_INIT` unset, so `psramInit()` probes at boot and only logs a
 warning when there is no PSRAM. One image boots on both modules and D3's runtime
 check decides what the node can do.
 
-**What would change this:** nothing should. If a board needs different
-*behaviour*, detect it at runtime — adding a third build config re-introduces
-"which binary is on which board?", which is the problem D1 exists to avoid. The
-S3 stays separate only because it is a different architecture with no BT Classic
-and the A2DP library will not compile for it.
+**What would change this:** nothing should — but read the rule carefully, because
+the number is not the rule. A build config is for silicon that cannot execute the
+same instructions. The S3 and C3 have their own because they are different
+architectures with no BT Classic, and the A2DP library will not compile for
+either. A board that merely needs to *behave* differently must not get one: that
+re-introduces "which binary is on which board?", which is the problem D1 exists
+to avoid. When a WROOM needed to be a client rather than a server, the answer was
+a runtime setting stored in NVS (D3), not a fourth build.
 
 ---
 
