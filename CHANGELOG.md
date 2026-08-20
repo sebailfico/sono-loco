@@ -30,6 +30,8 @@ in `TODO.md` false.
 
 ## v0.2.0 — 2026-08-20 — Clock-drift correction, measured
 
+`b335d5a…77601a2`, tagged at `77601a2`.
+
 **It holds.** WROOM source, ESP32-C3 client, 600 s each way, same boards and same
 session, `v0.1.0-7-g778986f`:
 
