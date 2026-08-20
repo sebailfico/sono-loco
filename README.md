@@ -121,21 +121,27 @@ Where things are written down, so they stay in one place each:
 
 | Module | BT Classic | PSRAM | Role | Notes |
 |--------|-----------|-------|------|-------|
-| ESP32 WROOM 32 | Yes | No | BT speaker; client-capable | BT + WiFi together exhausts the heap, so the firmware disables ESP-NOW. With BT never started it does ESP-NOW fine — proven on the bench — but no runtime mode exposes that yet |
-| ESP32 WROVER | Yes | Yes (4MB) | **Universal** | Recommended — runs full firmware, can be server or client |
+| ESP32 WROOM 32 | Yes | No | BT speaker **or** client | One or the other, chosen with `c` (client-only mode). BT + WiFi together exhausts the heap; with BT never started it runs the mesh fine — 12,870 packets in 60 s, no underruns |
+| ESP32 WROVER | Yes | Yes (4MB) | **Universal** | Recommended — runs full firmware, can be server or client, both at once |
 | ESP32-S3 | No | Yes | Client only | Good CPU/RAM but no BT Classic; receives audio via ESP-NOW |
-| ESP32-C6 | No (LE only) | No | Client only | WiFi 6 + Thread, but no BT Classic; weaker than S3 for this use |
+| ESP32-C3 | No (LE only) | No | Client only | RISC-V, so its own build. Works as a client and as a bench source; measured -57.7 ppm against a WROOM |
+| ESP32-C6 | No (LE only) | No | Client only | WiFi 6 + Thread, but no BT Classic; untried here |
 
-The goal is for every node to be interchangeable. Only the **WROVER** currently meets that requirement.
+The goal is for every node to be interchangeable. Only the **WROVER** meets that in
+full — it is the only module that can be a server *and* switch to being a client.
 
-**Why the WROOM can't do the mesh.** Running BT Classic and WiFi at the same time on
-an ESP32 needs PSRAM. Without it, WiFi claims ~80 KB of the ~215 KB DRAM heap and the
-BT stack can no longer allocate its L2CAP/AVDTP buffers, so it crashes. `setupESPNow()`
-therefore *deliberately bails out* on a board that has BT compiled in and no PSRAM.
-A WROOM node is a plain Bluetooth speaker with no mesh — that is by design, not a bug.
+**Why a WROOM has to choose.** Running BT Classic and WiFi at the same time on an
+ESP32 needs PSRAM. Without it, WiFi claims ~80 KB of the ~215 KB DRAM heap and the BT
+stack can no longer allocate its L2CAP/AVDTP buffers, so it crashes. `setupESPNow()`
+therefore bails out on a board that has BT compiled in, no PSRAM, and Bluetooth about
+to start.
 
-The S3 and C6 have the opposite problem: plenty of RAM, no BT Classic at all. They are
-compiled without `-DENABLE_BLUETOOTH` and can only ever be clients.
+The escape is to not start Bluetooth: a node in **client-only mode** (`c`) gets the
+radio and joins the mesh, and a WROOM becomes a real node instead of a standalone
+speaker. What it cannot be is a server, which genuinely does need both at once. See D3.
+
+The S3, C3 and C6 have the opposite problem: plenty of RAM, no BT Classic at all. They
+are compiled without `-DENABLE_BLUETOOTH` and can only ever be clients.
 
 Server and clients share one radio between BT and ESP-NOW, so mesh bandwidth is tight —
 see the bandwidth note in `TODO.md`.
@@ -218,14 +224,15 @@ node — most importantly `ESPNOW_CHANNEL`, which **must** match across the mesh
 
 ### Build & Upload
 
-There are **two builds**, because there are only two instruction sets — and three
-environment names, one per board that might be plugged in:
+There is **one build per instruction set** — three of them — and one environment
+name per board that might be plugged in:
 
 | Environment   | Board        | Port | Build | Role |
 |---------------|--------------|------|-------|------|
-| `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker. No PSRAM, so no mesh while BT runs — but a full mesh node in bench mode, where BT stays off |
+| `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
 | `esp32wrover` | ESP32 WROVER | COM7 | `esp32_classic` | SERVER or CLIENT — the reference node. **None attached yet**, so the port is a placeholder |
 | `esp32s3`     | ESP32-S3     | COM9 | `esp32s3_client` | CLIENT only (no BT Classic) |
+| `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
 
 Ports confirmed 2026-08-19 with `pio device list` and `esptool chip_id`.
 `tools/bench-mesh.ps1` does not depend on them — it discovers ports and
@@ -236,10 +243,12 @@ only so each board keeps its port. The Arduino core ships `CONFIG_SPIRAM=y` with
 `CONFIG_SPIRAM_BOOT_INIT` unset, so `psramInit()` probes for PSRAM at boot and only
 logs a warning when there is none — one image boots on both modules and
 `setupESPNow()` picks the role at runtime. That is the project premise, so resist
-adding a third build; if a board needs different *behaviour*, detect it at runtime.
+adding a build config for anything but a new instruction set; if a board needs
+different *behaviour*, detect it at runtime or make it a setting, the way
+client-only mode is.
 
-The S3 must stay separate: different architecture, no BT Classic, and the A2DP
-library will not compile for it.
+The S3 and C3 must stay separate: different architectures — Xtensa and RISC-V —
+no BT Classic on either, and the A2DP library will not compile for them.
 
 ```bash
 cd esp32-code
@@ -304,6 +313,7 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `x` | stop generating it |
 | `r` | print a telemetry line now |
 | `d` | toggle clock-drift correction (on by default) |
+| `c` | toggle client-only mode and reboot — the node then never starts Bluetooth, which is what lets a WROOM be a mesh client. Kept in NVS, so it survives a power cut |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
 A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs
@@ -338,6 +348,9 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   see D10.
 - `tools/bench-mesh.ps1` — the automated multi-board mesh test: discover, flash,
   stream, measure drift, report. Scales to any number of boards.
+- `tools/test-client-only.ps1` — checks that a BT-capable board really works as a
+  mesh client on a *normal* boot. `bench-mesh.ps1` cannot cover this, because it
+  puts every node into bench mode by design.
 - `tools/capture-serial.ps1` — timestamped serial capture of a single node, so
   two manual runs can be compared.
 

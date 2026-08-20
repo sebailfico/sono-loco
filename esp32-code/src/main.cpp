@@ -30,6 +30,7 @@
 #endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <Preferences.h>
 
 // Hardware-independent parts of the CLIENT receive path, tested on the host
 // with `pio test -e native` — see test/test_jitter.
@@ -77,6 +78,38 @@ RTC_NOINIT_ATTR static uint32_t benchMagic;
 
 static bool benchMode   = false;   // this boot is a bench boot
 static bool benchSource = false;   // this node is generating the test stream
+
+// ============================================================================
+// Client-only mode
+// ============================================================================
+//
+// A node told never to be a server: Bluetooth is not started, so ESP-NOW runs
+// without the coexistence problem that needs PSRAM, and a WROOM becomes a usable
+// mesh client instead of a standalone speaker. See the D3 amendment.
+//
+// Unlike bench mode this is a *setting*, not a test mode, so it lives in NVS
+// rather than RTC memory. RTC memory survives a restart but not a power cut, and
+// a node wired into a room is expected to come back as what it was after the
+// power blinks. Bench mode staying volatile is equally deliberate: a board left
+// in a test mode by a power cut is a trap, not a feature.
+static Preferences prefs;
+static bool        clientOnly = false;
+
+static const char *PREF_NAMESPACE = "sonoloco";
+static const char *PREF_CLIENT_ONLY = "clientonly";
+
+/**
+ * Whether this boot may run the Bluetooth stack at all.
+ *
+ * One predicate rather than a condition repeated at each call site: BT is
+ * started from setup() and restarted whenever a node leaves CLIENT, and a node
+ * that skipped BT at boot must not acquire it later on a mode change. On a WROOM
+ * that would be the D3 crash arriving several minutes after boot, which is a
+ * miserable thing to debug.
+ */
+static inline bool btAllowed() {
+    return !benchMode && !clientOnly;
+}
 
 // ============================================================================
 // I2S write helper
@@ -378,13 +411,19 @@ static void setupESPNow() {
 #ifdef ENABLE_BLUETOOTH
     // Bench mode never starts Bluetooth, so there is no coexistence problem and
     // no reason to refuse WiFi — this is what lets a WROOM be tested at all.
-    if (!benchMode && ESP.getPsramSize() == 0) {
+    // The guard is about BT and WiFi running *together*. Bench mode and
+    // client-only mode both mean Bluetooth is never started, so neither needs
+    // PSRAM to run the mesh — which is exactly what makes a WROOM a usable
+    // client rather than a standalone speaker. See the D3 amendment.
+    const bool btWillStart = btAllowed();
+    if (btWillStart && ESP.getPsramSize() == 0) {
         LOG_WARN("No PSRAM detected — WiFi/ESP-NOW disabled to protect BT heap.");
-        LOG_WARN("This node will play locally only (no mesh). Upgrade to WROVER for full mesh.");
+        LOG_WARN("This node will play locally only (no mesh). Set client-only mode ('c')");
+        LOG_WARN("to use it as a mesh client instead, or upgrade to a WROVER.");
         return;
     }
-    if (benchMode && ESP.getPsramSize() == 0) {
-        LOG_INFO("Bench mode: no PSRAM, but Bluetooth is off, so ESP-NOW is safe here.");
+    if (!btWillStart && ESP.getPsramSize() == 0) {
+        LOG_INFO("No PSRAM, but Bluetooth is off this boot, so ESP-NOW is safe here.");
     }
 #endif
 
@@ -754,7 +793,7 @@ static void enterDiscovery() {
 
     if (wasClient) {
 #ifdef ENABLE_BLUETOOTH
-        if (!benchMode) {   // bench mode never starts BT — see the bench section
+        if (btAllowed()) {
             delay(100);
             startBluetooth();
         }
@@ -780,7 +819,7 @@ static void enterClient() {
     LOG_INFO("=== CLIENT — ESP-NOW → I2S ===");
 
 #ifdef ENABLE_BLUETOOTH
-    if (!benchMode) {
+    if (btAllowed()) {
         LOG_INFO("Stopping BT to release I2S...");
         stopBluetooth();
         delay(200);
@@ -797,7 +836,7 @@ static void enterClient() {
     if (!clientI2SActive) {
         LOG_ERROR("CLIENT I2S unavailable — returning to DISCOVERY");
 #ifdef ENABLE_BLUETOOTH
-        if (!benchMode) startBluetooth();
+        if (btAllowed()) startBluetooth();
 #endif
         // Back off before retrying. The server keeps broadcasting, so rxActive
         // is set again within milliseconds; without this the node would retry
@@ -989,7 +1028,7 @@ static void benchIdentify() {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     DEBUG_SERIAL.printf(
         "[BENCH] id fw=%s chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
-        "bench=%d bt=%d espnow=%d drift=%d name=%s\n",
+        "bench=%d bt=%d espnow=%d drift=%d conly=%d name=%s\n",
         FW_VERSION,
         ESP.getChipModel(),
         (unsigned long)ESP.getPsramSize(),
@@ -1002,6 +1041,7 @@ static void benchIdentify() {
 #endif
         espnowActive ? 1 : 0,
         driftEnabled ? 1 : 0,
+        clientOnly ? 1 : 0,
         ROOM_NAME);
 }
 
@@ -1011,6 +1051,7 @@ static void benchIdentify() {
  *   ?  identify          b  reboot into bench mode     n  reboot into normal mode
  *   s  start sourcing    x  stop sourcing              r  report now
  *   d  toggle clock-drift correction
+ *   c  toggle client-only mode and reboot (persists across power cuts)
  */
 static void benchServiceSerial() {
     while (DEBUG_SERIAL.available()) {
@@ -1027,6 +1068,22 @@ static void benchServiceSerial() {
                 break;
             case 's': benchStartSource(); break;
             case 'x': benchStopSource();  break;
+            case 'c': {
+                // Persisted, then restarted: whether Bluetooth starts is decided
+                // in setup(), so like bench mode this only takes effect on the
+                // next boot. Unlike bench mode it is written to NVS, because a
+                // node wired into a room should come back as what it was after
+                // the power blinks.
+                const bool next = !clientOnly;
+                prefs.begin(PREF_NAMESPACE, false);
+                prefs.putBool(PREF_CLIENT_ONLY, next);
+                prefs.end();
+                DEBUG_SERIAL.printf("[BENCH] clientonly=%d rebooting\n", next ? 1 : 0);
+                DEBUG_SERIAL.flush();
+                delay(50);
+                ESP.restart();
+                break;
+            }
             case 'b':
                 benchMagic = BENCH_MAGIC;
                 DEBUG_SERIAL.println("[BENCH] rebooting into bench mode");
@@ -1054,14 +1111,25 @@ void setup() {
     DEBUG_SERIAL.begin(DEBUG_BAUD_RATE);
     delay(1000);
 
+    // Before the banner, because the banner reports it, and before
+    // setupESPNow() and any decision about Bluetooth, because both depend on it.
+    // Read-only handle — the only writer is the 'c' command.
+    prefs.begin(PREF_NAMESPACE, true);
+    clientOnly = prefs.getBool(PREF_CLIENT_ONLY, false);
+    prefs.end();
+
     DEBUG_SERIAL.println();
     DEBUG_SERIAL.println("================================");
     DEBUG_SERIAL.println("  SonoLoco — Multi-Room Audio");
     DEBUG_SERIAL.println("  Firmware: " FW_VERSION);
 #ifdef ENABLE_BLUETOOTH
-    DEBUG_SERIAL.println("  Mode: SERVER capable (BT + ESP-NOW)");
+    if (clientOnly) {
+        DEBUG_SERIAL.println("  Mode: CLIENT only (configured — BT never starts)");
+    } else {
+        DEBUG_SERIAL.println("  Mode: SERVER capable (BT + ESP-NOW)");
+    }
 #else
-    DEBUG_SERIAL.println("  Mode: CLIENT only (ESP-NOW)");
+    DEBUG_SERIAL.println("  Mode: CLIENT only (no BT Classic on this chip)");
 #endif
     DEBUG_SERIAL.println("================================");
     DEBUG_SERIAL.println();
@@ -1070,6 +1138,7 @@ void setup() {
     if (benchMode) {
         DEBUG_SERIAL.println("[BENCH] boot bench=1 (Bluetooth disabled this boot)");
     }
+
 
     LOG_INFO("Chip: "    + String(ESP.getChipModel()));
     LOG_INFO("CPU:  "    + String(ESP.getCpuFreqMHz()) + " MHz");
@@ -1109,7 +1178,7 @@ void setup() {
     setupESPNow();
 
 #ifdef ENABLE_BLUETOOTH
-    if (!benchMode) startBluetooth();
+    if (btAllowed()) startBluetooth();
 #endif
 
     LOG_INFO("Setup complete. Entering DISCOVERY...");
@@ -1146,7 +1215,8 @@ void loop() {
             // In bench mode SERVER means "sourcing the synthetic stream" and
             // there is no BT connection to lose, so none of this applies —
             // without the guard the node would leave SERVER on the first pass.
-            if (!benchMode) {
+            // A client-only node never gets here at all.
+            if (btAllowed()) {
                 if (doConnectSound) {
                     doConnectSound = false;
                     playConnectedSound();

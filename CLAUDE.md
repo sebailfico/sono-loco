@@ -37,8 +37,10 @@ code, not the docs — assume the code is the truth and fix the doc.
   `CHANGELOG.md` entries carry that version — a measurement taken from a dirty
   tree (trailing `*`) is not reproducible, so commit before measuring anything
   worth recording. See D10.
-- There are two builds for three board types, on purpose. If a board needs
-  different *behaviour*, detect it at runtime — don't add a build config.
+- One build per instruction set, and no more: three today (classic Xtensa, S3,
+  C3) for five board types. A build config is for silicon that cannot execute the
+  same instructions. If a board needs different *behaviour*, detect it at runtime
+  or make it a setting — don't add a build config.
 - **Anything touching the client audio path must be re-measured, not reasoned
   about.** Run `./tools/bench-mesh.ps1 -Flash -Duration 600` and compare against
   the recorded baseline in `CHANGELOG.md`: zero lost/ovf/und/dup/rsy, source at

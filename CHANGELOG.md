@@ -30,6 +30,29 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **A WROOM can be a mesh client.** Client-only mode, set with the serial command
+  `c`: the node never starts Bluetooth, so the BT/WiFi coexistence problem that
+  needs PSRAM never arises and `setupESPNow()` lets it have the radio. This is
+  the D3 amendment finally reaching the shipping path — bench mode has been able
+  to demonstrate the mechanism since v0.1.0, but bench mode is a test mode.
+
+  Measured on a normal boot with ordinary status output, not in bench mode: a
+  WROOM took **12,870 packets in 60 s, zero overflow, zero underrun**, jitter
+  buffer holding 2,880 bytes, 93 KB of heap still free.
+  `tools/test-client-only.ps1` reproduces it, and checks the things that would
+  make a pass meaningless — that the node is *not* in bench mode, and that
+  Bluetooth never started.
+
+  Stored in NVS rather than RTC memory, unlike bench mode, because it is a
+  setting: a node wired into a room comes back as what it was after a power cut.
+  Bench mode stays volatile for the same reason inverted — a board left in a test
+  mode by a power cut is a trap.
+
+  Whether Bluetooth may start is now one predicate, `btAllowed()`, rather than a
+  condition repeated at four call sites. One of those four restarted BT when a
+  node left CLIENT, which on a client-only WROOM would have been the D3 crash
+  arriving minutes after boot.
+
 - **The bench tone is a lookup table now, and a C3 can source.** Generating it
   with `sinf` per sample capped an ESP32-C3 at 37.8 packets/s against the 220.5
   the stream needs, starving its client into 159 underruns in 90 s. The C3 has no

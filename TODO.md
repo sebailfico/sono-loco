@@ -77,14 +77,6 @@ forwarded to clients. That needs hardware nobody here has yet.
       so rooms will not sound alike. Decide whether that is acceptable or whether
       the server should downgrade its own output to match.
 
-### Hardware reach
-
-- [ ] **Expose a client-only runtime mode**, so a WROOM can be a real client
-      node. Bench mode already proves a WROOM runs ESP-NOW fine as long as
-      Bluetooth is never started — it sourced the whole 600 s test. The firmware
-      just has no way to say "be a client, never a server" outside bench mode.
-      See the D3 amendment in `docs/decisions.md`.
-
 ### Housekeeping
 
 - [ ] `String` concatenation in every `LOG_*` call fragments the heap — switch to
