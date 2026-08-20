@@ -251,6 +251,19 @@ PlatformIO is not on `PATH` on the dev machine; use the full path:
 /c/Users/sebai/.platformio/penv/Scripts/pio.exe run -e esp32dev --target upload
 ```
 
+Every build stamps itself with `git describe --tags --always --dirty=*`, printed
+by the build, in the boot banner and in the node's `?` identify line:
+
+```
+  SonoLoco — Multi-Room Audio
+  Firmware: v0.1.0-3-gabc1234
+```
+
+A trailing `*` means the build came from a tree with uncommitted changes, so its
+sha does not describe what is on the board. `tools/bench-mesh.ps1` warns about
+that, and about a board running anything other than the tree you are reading —
+which is the usual cause of a bench result that will not reproduce. See D10.
+
 ### Tests
 
 The ring buffer and packet sequence accounting run on the host, no board needed:
@@ -280,7 +293,7 @@ Any node can be driven by hand over the serial monitor, in any build:
 
 | Key | Effect |
 |-----|--------|
-| `?` | identify — chip, PSRAM, MAC, whether BT and ESP-NOW are active |
+| `?` | identify — firmware version, chip, PSRAM, MAC, whether BT and ESP-NOW are active |
 | `b` | reboot into bench mode (Bluetooth stays off) |
 | `n` | reboot into normal mode |
 | `s` | start generating the synthetic test stream |
@@ -307,6 +320,9 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   lived.
 - `esp32-code/test/test_jitter/` — host tests for the above. Each one
   corresponds to a real bug or a real invariant.
+- `esp32-code/scripts/version.py` — a PlatformIO pre-build step that defines
+  `FW_VERSION` from `git describe`. There is no version constant to bump by hand;
+  see D10.
 - `tools/bench-mesh.ps1` — the automated multi-board mesh test: discover, flash,
   stream, measure drift, report. Scales to any number of boards.
 - `tools/capture-serial.ps1` — timestamped serial capture of a single node, so

@@ -872,8 +872,9 @@ static void benchIdentify() {
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     DEBUG_SERIAL.printf(
-        "[BENCH] id chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
+        "[BENCH] id fw=%s chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
         "bench=%d bt=%d espnow=%d name=%s\n",
+        FW_VERSION,
         ESP.getChipModel(),
         (unsigned long)ESP.getPsramSize(),
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
@@ -930,6 +931,7 @@ void setup() {
     DEBUG_SERIAL.println();
     DEBUG_SERIAL.println("================================");
     DEBUG_SERIAL.println("  SonoLoco — Multi-Room Audio");
+    DEBUG_SERIAL.println("  Firmware: " FW_VERSION);
 #ifdef ENABLE_BLUETOOTH
     DEBUG_SERIAL.println("  Mode: SERVER capable (BT + ESP-NOW)");
 #else

@@ -15,6 +15,19 @@
 #endif
 
 // ============================================================================
+// Firmware Version
+// ============================================================================
+// Injected at build time by scripts/version.py from `git describe`, e.g.
+// "v0.1.0-3-gabc1234" (or with a trailing "*" for a dirty tree). There is no
+// version constant to maintain here on purpose -- see D10 in docs/decisions.md.
+//
+// This fallback only applies to a build with no git available; if a board
+// reports "unknown", nothing it measures can be tied to a commit.
+#ifndef FW_VERSION
+#define FW_VERSION "unknown"
+#endif
+
+// ============================================================================
 // I2S / PCM5102 DAC Pin Configuration
 // ============================================================================
 // PCM5102 wiring to ESP32:

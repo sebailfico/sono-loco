@@ -7,9 +7,48 @@ Entries here are the *record*; the reasoning behind the standing design choices
 is in `docs/decisions.md`, and the traps worth not re-introducing are in the
 README's gotcha list.
 
+## Versions
+
+Each released section is headed with the version the firmware reports, which is
+`git describe --tags --always --dirty=*` baked in at build time — a board says
+`v0.1.0` when it is running exactly that tag, `v0.1.0-3-gabc1234` three commits
+later, and appends `*` when it was built from a tree with uncommitted changes.
+See D10.
+
+That is what makes the measurements below worth keeping: a figure like "-30.5
+ppm" is a claim about a specific build, and the version is what lets you rebuild
+it. `tools/bench-mesh.ps1` records the version of every node in its log header
+and warns when a board is running something other than the tree you are reading.
+Numbers quoted from a `*` build are not reproducible and should not be recorded
+here.
+
+Tag when a claim becomes true on hardware, not on a calendar. `v0.1.0` is the
+mesh working on real boards; the next tag will be whatever makes the next claim
+in `TODO.md` false.
+
 ---
 
-## 2026-08-19 — First hardware run of the mesh
+## Unreleased — commit-based versioning
+
+- **Firmware version derived from git.** `esp32-code/scripts/version.py` runs as
+  a PlatformIO pre-build step and defines `FW_VERSION` from
+  `git describe --tags --always --dirty=*`. There is no version constant to
+  maintain, because a hand-bumped one is wrong exactly when it matters — after
+  someone forgets. See D10.
+- The version appears in the boot banner and in the `[BENCH] id fw=…` identify
+  line, so a running board can be matched to a commit without guessing.
+- `tools/bench-mesh.ps1` reports the firmware version of every node, records it
+  in the log header, and warns on the three ways it can be wrong: a board older
+  than the tree, a build from a dirty tree, or nodes disagreeing with each other.
+  Its log header now carries the full `git describe` string instead of a bare
+  short sha.
+- **`v0.1.0` tagged** at `22688a1` — the first hardware-proven mesh.
+
+## v0.1.0 — 2026-08-19 — First hardware run of the mesh
+
+`704b501…22688a1`, tagged at `22688a1`. This is the first tag, so it also
+covers everything in the sections below — they are the history that led up to
+it, not earlier releases.
 
 **The ESP-NOW path works.** A WROOM sourcing and an ESP32-S3 playing: 26,279
 packets over 120 s, zero lost, zero overflow, zero underrun, zero duplicates,
@@ -54,6 +93,8 @@ zero. The 23 unit tests also pass on-device.
 
 ## 2026-08-19 — Structure and docs
 
+`ca4887d…debcb26`
+
 - Ring buffer and packet sequence accounting extracted from `main.cpp` into
   `lib/jitter/`, with host tests in `test/test_jitter/` and a `native`
   PlatformIO environment. This is the code that produced the two worst bugs in
@@ -75,6 +116,8 @@ zero. The 23 unit tests also pass on-device.
   and `CLAUDE.md` had never been tracked at all.
 
 ## 2026-08-18 — Second audit pass
+
+`bb0b2e2`, `df88798` — audited before the repo was tracked, committed after.
 
 Compiles for all three environments. Not flashed.
 
@@ -131,6 +174,8 @@ Compiles for all three environments. Not flashed.
 - WROVER PlatformIO environment added.
 
 ## Earlier
+
+`8e044fd…0da167c`
 
 Bluetooth A2DP sink, I2S output to the PCM5102, notification sounds and basic
 volume control. This part has run on hardware.

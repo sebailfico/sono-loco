@@ -25,6 +25,13 @@ can take part (see D3).
 
 What to read in its output:
 
+- **Firmware line** — the `git describe` version each node is actually running,
+  printed at the top of the run and again with the results. Warnings here come
+  before anything else in the output for a reason: a board left running an older
+  build, or a build made from a dirty tree, produces numbers that will not
+  reproduce, and nothing else on screen would reveal it. Rerun with `-Flash` if
+  a node does not match the tree, and commit before measuring anything you intend
+  to record. See D10.
 - **Stream table** — `lost`, `ovf`, `und`, `dup`, `rsy` should all be 0. `rx`
   should be within a few packets of the source's `tx`.
 - **Source line** — packets per second should be 220.5. `qfull`, `senderr` and
@@ -111,6 +118,7 @@ pio device monitor -e esp32wrover
 
 ```
   SonoLoco — Multi-Room Audio
+  Firmware: v0.1.0
   Mode: SERVER capable (BT + ESP-NOW)
 [INFO]  Chip: ...
 [INFO]  PSRAM: 4194304 bytes
@@ -132,6 +140,9 @@ pio device monitor -e esp32wrover
   correct behaviour, not a failure.
 - Record each board's MAC. The client locks onto the server's MAC, so knowing
   which is which makes the next steps readable.
+- `Firmware:` shows the commit the board was built from, and no trailing `*`.
+  A `*` means uncommitted changes, so the run cannot be reproduced from the sha
+  and is not worth recording.
 
 ---
 
@@ -229,4 +240,20 @@ The transitions that have historically broken:
 
 Keep the captured logs. When a change later makes something better or worse, the
 only way to tell is to compare the counters between two runs of this same
-procedure, so note in `CHANGELOG.md` which firmware state a capture belongs to.
+procedure, so record the firmware version alongside the numbers in
+`CHANGELOG.md`.
+
+`tools/bench-mesh.ps1` writes that version into its log header for you:
+
+```
+# SonoLoco mesh bench
+# started  : 2026-08-20 11:04:12
+# version  : v0.1.0-3-gabc1234
+# duration : 600 s
+# source   : COM8
+# nodes    : COM8=ESP32-D0WD-V3 COM9=ESP32-S3
+# firmware : COM8=v0.1.0-3-gabc1234 COM9=v0.1.0-3-gabc1234
+```
+
+A manual capture has no such header, so write the version down from the boot
+banner. A measurement whose build cannot be identified is an anecdote.
