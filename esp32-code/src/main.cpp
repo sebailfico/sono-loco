@@ -898,7 +898,7 @@ static void benchReport() {
     DEBUG_SERIAL.printf(
         "[BENCH] ms=%lu role=%s mode=%s heap=%lu jit=%d rx=%lu lost=%lu ovf=%lu "
         "und=%lu dup=%lu rsy=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu "
-        "drift=%d ins=%lu drp=%lu dr=%.3f srx=%ld\n",
+        "drift=%d ins=%lu drp=%lu dr=%.3f tgt=%d srx=%ld\n",
         (unsigned long)millis(),
         benchSource ? "SOURCE" : "SINK",
         modeStr,
@@ -921,6 +921,10 @@ static void benchReport() {
         // the loop is closed this is the only in-band measure of drift left:
         // a corrected buffer no longer has a slope to regress.
         driftCtl.rate(),
+        // The level being steered to. It is measured after the settle window
+        // rather than computed, so recording it is the only way to tell a
+        // correctly calibrated client from one steering at the wrong depth.
+        driftCtl.target(),
         // Age of the last received packet, as the silence check sees it. Signed
         // and printed even when it is meaningless (a source has no rx), because
         // a value that goes *negative* or jumps is the evidence that the check
@@ -1032,7 +1036,8 @@ void setup() {
 #endif
 
     DriftController::Config dcfg;
-    dcfg.targetBytes   = DRIFT_TARGET_BYTES;
+    dcfg.targetBytes    = DRIFT_TARGET_BYTES;
+    dcfg.targetCeilBytes = DRIFT_TARGET_CEIL_BYTES;
     dcfg.deadbandBytes = DRIFT_DEADBAND_BYTES;
     dcfg.kp            = DRIFT_KP;
     dcfg.maxRatePerSec = DRIFT_MAX_RATE;

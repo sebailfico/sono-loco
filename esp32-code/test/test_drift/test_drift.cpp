@@ -37,9 +37,10 @@ static const double SAFE_MARGIN = 800.0;
 
 static DriftController::Config defaultCfg() {
     DriftController::Config c;
-    c.targetBytes   = TARGET;
-    c.deadbandBytes = 400;
-    c.kp            = 0.005f;
+    c.targetBytes    = TARGET;
+    c.targetCeilBytes = TARGET + 1024;
+    c.deadbandBytes = 200;
+    c.kp            = 0.02f;
     c.maxRatePerSec = 5.0f;
     c.emaTauMs      = 4000.0f;
     c.settleMs      = 12000;
@@ -76,8 +77,10 @@ static void test_first_update_only_seeds(void) {
 static void test_no_correction_inside_deadband(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
-    // 399 bytes off target, held for a minute: the controller must not twitch.
-    TEST_ASSERT_EQUAL_INT(0, runAt(d, TARGET - 399, 60000));
+    // One byte inside the deadband, held for a minute: the controller must not
+    // twitch. The calibration clamps to the configured floor at this level, so
+    // the error really is -199 and not zero.
+    TEST_ASSERT_EQUAL_INT(0, runAt(d, TARGET - 199, 60000));
     TEST_ASSERT_EQUAL_UINT32(0, d.inserted);
     TEST_ASSERT_EQUAL_UINT32(0, d.dropped);
 }
@@ -359,6 +362,24 @@ static void test_a_third_board_with_a_different_offset(void) {
     }
 }
 
+static void test_equilibrium_depth_survives_a_hiccup(void) {
+    // Proportional control parks the buffer exactly far enough from target to
+    // generate the rate the drift demands, so the steady-state depth is a
+    // function of the gain -- and it has to leave room for a radio hiccup.
+    //
+    // This is not a theoretical margin. In the 600 s baseline the C3 client
+    // underran on a two-packet loss with 1,304 bytes showing one second earlier,
+    // so ~1,300 bytes (29 ms) is a depth that demonstrably does not survive
+    // ordinary conditions. The original gain parked a -58 ppm client at exactly
+    // that. 1,500 bytes is the floor this asserts; the current gain leaves ~1,990.
+    static const double worstCase[] = {-80.0, -58.0, 58.0, 80.0};
+    for (unsigned i = 0; i < sizeof(worstCase) / sizeof(worstCase[0]); i++) {
+        SimResult r = simulate(worstCase[i], 3600.0, true);
+        TEST_ASSERT_TRUE(r.finalFill > 1500.0);
+        TEST_ASSERT_TRUE(r.minFill   > 1200.0);
+    }
+}
+
 static void test_drift_beyond_authority_degrades_gracefully(void) {
     // 400 ppm is far outside anything two crystals do, and past the 5/s clamp
     // (227 ppm). The buffer loses the race, but the controller must still be
@@ -391,6 +412,7 @@ static int runAllTests(void) {
     RUN_TEST(test_corrected_buffer_holds_for_an_hour);
     RUN_TEST(test_corrected_the_other_way_round);
     RUN_TEST(test_a_third_board_with_a_different_offset);
+    RUN_TEST(test_equilibrium_depth_survives_a_hiccup);
     RUN_TEST(test_drift_beyond_authority_degrades_gracefully);
 
     return UNITY_END();

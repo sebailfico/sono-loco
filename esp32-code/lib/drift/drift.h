@@ -45,8 +45,29 @@
 class DriftController {
 public:
     struct Config {
-        /** Fill the controller steers towards, in bytes. */
-        int   targetBytes;
+        /**
+         * Bounds on the fill the controller steers towards, in bytes.
+         *
+         * The target is *measured*, not assumed: when the settle window closes,
+         * the smoothed fill is taken as the target, clamped into this band. That
+         * level is where the client naturally runs with the designed prefill, so
+         * steering to it corrects drift and nothing else.
+         *
+         * Computing it instead was wrong on hardware. Prefill minus the DMA
+         * ring's capacity assumes the ring sits permanently full; measured, it
+         * holds about 1,880 of its 2,048 bytes, and the 350-byte error showed up
+         * as a client settling that much shallower than intended -- which is
+         * depth it cannot spare, as the underrun below shows.
+         *
+         * The band is what the arithmetic can justify: ring + DMA content is
+         * conserved at the prefill, so the ring is somewhere between prefill
+         * minus the DMA capacity and the prefill itself. The ceiling is set
+         * where the DMA would be less than half full, which after a settle
+         * window means something is wrong and the measurement is not to be
+         * trusted.
+         */
+        int   targetBytes;      ///< floor, and the fallback before calibration
+        int   targetCeilBytes;  ///< ceiling
         /** No correction at all while |error| is inside this, in bytes. */
         int   deadbandBytes;
         /** Corrections per second per byte of error outside the deadband. */
@@ -100,6 +121,14 @@ public:
     float smoothedFill() const { return ema_; }
 
     /**
+     * The fill being steered to. Equal to Config::targetBytes until the settle
+     * window closes and the measured level replaces it. Worth reporting: it is
+     * the difference between a client holding its depth and one settling
+     * somewhere shallower than anyone intended.
+     */
+    int target() const { return target_; }
+
+    /**
      * Current correction rate, corrections per second, signed as Correction is.
      * This is the controller's own estimate of the drift, and once the loop is
      * closed it is the only in-band measure of it left: a corrected buffer no
@@ -113,6 +142,7 @@ public:
 
 private:
     Config   cfg_{};
+    int      target_  = 0;      ///< measured at the end of the settle window
     float    ema_     = 0.0f;
     float    rate_    = 0.0f;
     float    credit_  = 0.0f;   ///< fractional corrections owed, signed
