@@ -30,6 +30,18 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **Heap telemetry reports the largest allocatable block**, not just free heap.
+  Free heap alone cannot answer the question `TODO.md` asks about `String`
+  logging: fragmentation shows as the biggest block shrinking while the total
+  stays flat. A 600 s run had free heap byte-identical end to end, which proves
+  less than it appears to — hence `maxalloc=`, in both the bench line and the
+  normal status line.
+- **The normal status line carries the drift controller's state** (`tgt`, `ins`,
+  `drp`). It was only visible in bench telemetry, i.e. in the one configuration
+  that is not the shipping one.
+- **A drift correction now requires that playback actually advanced.** `DROP`
+  applied even when I2S accepted nothing, discarding a sample that was never
+  played to correct drift that had not accrued. `INSERT` already required it.
 - **A WROOM can be a mesh client.** Client-only mode, set with the serial command
   `c`: the node never starts Bluetooth, so the BT/WiFi coexistence problem that
   needs PSRAM never arises and `setupESPNow()` lets it have the radio. This is
