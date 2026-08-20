@@ -163,21 +163,22 @@
 // 22.05 kHz is 0.67 samples/s, roughly one edit every 1.5 s, which is why no
 // resampler is needed.
 
-// Fill the controller steers towards.
+// Bounds on the fill the controller steers towards. The target itself is
+// measured once the settle window closes -- see lib/drift/drift.h -- and clamped
+// into this band.
 //
-// NOT the prefill. The jitter buffer is not where all the buffered audio lives:
-// once playback is running the I2S DMA ring holds CLIENT_DMA_CAPACITY_BYTES of
-// it, and the ring settles at what is left. JITTER_PREFILL is the *total* depth;
-// this is the part of it the controller can see and therefore the part it can
-// steer.
+// Ring occupancy plus DMA content is conserved at JITTER_PREFILL, so the ring
+// sits somewhere between the prefill less the DMA ring's capacity and the
+// prefill itself. Measured on hardware the DMA holds about 1,880 of its 2,048
+// bytes, putting the natural level near 2,250 rather than the 1,952 the
+// arithmetic predicts. That 350-byte difference is not academic: it is depth the
+// client does not have to spare.
 //
-// Steering to JITTER_PREFILL was the first version, and hardware said no: on a
-// C3 client it dragged the buffer 1,600 bytes above its natural level at nearly
-// the full correction rate for minutes on end -- 36 ms of latency the design
-// does not want, and a saturated controller measuring nothing while it climbed.
-// The recorded v0.1.0 baseline shows the same natural level on the S3: the ring
-// sat between 1,400 and 2,300 bytes for the whole 600 s run, never near 4,000.
-#define DRIFT_TARGET_BYTES    (JITTER_PREFILL - CLIENT_DMA_CAPACITY_BYTES)
+// The ceiling is where the DMA would be under half full. After a settle window
+// that means something is wrong, and a measurement that far out is not one to
+// steer by.
+#define DRIFT_TARGET_BYTES      (JITTER_PREFILL - CLIENT_DMA_CAPACITY_BYTES)
+#define DRIFT_TARGET_CEIL_BYTES (JITTER_PREFILL - CLIENT_DMA_CAPACITY_BYTES / 2)
 
 // How long after playback arms before corrections may start, ms.
 //
@@ -192,13 +193,30 @@
 // ordinary packet-arrival jitter never provokes an edit. The cost is that the
 // buffer drifts this far before anything happens (~300 s at 30 ppm) and settles
 // a little below target rather than exactly on it.
-#define DRIFT_DEADBAND_BYTES  400
+// One packet. Wide enough that packet-arrival jitter never provokes an edit --
+// and the 4 s filter below has already removed most of that anyway -- while
+// costing only 4.5 ms of depth before the controller engages. It was 400, and
+// 400 is depth this buffer cannot spare: see the equilibrium arithmetic under
+// DRIFT_KP.
+#define DRIFT_DEADBAND_BYTES  200
 
-// Corrections per second per byte of error outside the deadband. 0.005 puts the
-// loop time constant at 1/(2*kp) = 100 s -- far faster than the drift it
-// corrects (which needs ~400 s to build that much error) and far slower than the
-// input filter, so the loop cannot ring.
-#define DRIFT_KP              0.005f
+// Corrections per second per byte of error outside the deadband.
+//
+// This sets where the buffer parks. Proportional control holds the level exactly
+// far enough from target to generate the correction rate the drift demands, so
+// the steady-state depth is
+//
+//     target - (deadband + required_rate / kp)
+//
+// and that depth has to survive a radio hiccup. It is not a free parameter: at
+// 0.005 and the -58 ppm measured between the WROOM and the C3, the client parks
+// at ~1,290 bytes -- 29 ms. A client at that depth underran in the 600 s
+// baseline on a two-packet loss, with the buffer showing 1,304 bytes one second
+// earlier. At 0.02 the same client parks near 1,990 bytes, and the loop time
+// constant is 1/(2*kp) = 25 s: still six times slower than the input filter, so
+// there is nothing for it to ring against, and far faster than the drift it
+// corrects.
+#define DRIFT_KP              0.02f
 
 // Hard cap on the correction rate, corrections per second. 5/s is 227 ppm of
 // authority, comfortably past any crystal pair, and bounds how much audio the

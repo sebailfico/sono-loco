@@ -14,6 +14,9 @@ void DriftController::reset(uint32_t nowMs) {
     lastMs_     = nowMs;
     settleLeft_ = cfg_.settleMs;
     seeded_     = false;
+    // Until the settle window closes and a level has actually been observed,
+    // the floor stands in. Nothing is corrected during that window anyway.
+    target_     = cfg_.targetBytes;
 }
 
 DriftController::Correction DriftController::update(uint32_t nowMs, int fillBytes) {
@@ -46,10 +49,19 @@ DriftController::Correction DriftController::update(uint32_t nowMs, int fillByte
         settleLeft_ = (dt >= settleLeft_) ? 0 : settleLeft_ - dt;
         rate_   = 0.0f;
         credit_ = 0.0f;
+
+        // On the pass that closes the window, adopt the level the client has
+        // settled at. This is the calibration: everything after it is drift.
+        if (settleLeft_ == 0) {
+            int measured = (int)(ema_ + 0.5f);
+            if (measured < cfg_.targetBytes)     measured = cfg_.targetBytes;
+            if (measured > cfg_.targetCeilBytes) measured = cfg_.targetCeilBytes;
+            target_ = measured;
+        }
         return NONE;
     }
 
-    const float error = ema_ - (float)cfg_.targetBytes;
+    const float error = ema_ - (float)target_;
     const float dead  = (float)cfg_.deadbandBytes;
 
     float excess = 0.0f;
