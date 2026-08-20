@@ -363,6 +363,15 @@ Each of these was a real bug. Don't re-introduce them.
   11–22 kHz straight back into the audible band.
 - **Sequence-gap arithmetic is unsigned.** A duplicate or reordered packet computes as
   a gap of ~65535; it has to be treated as a resync, not as 65535 lost packets.
+- **Elapsed-time comparisons against a timestamp another task writes must be signed.**
+  `millis() - lastRxMs` is unsigned, so a timestamp written one millisecond *after*
+  this task read `millis()` wraps the difference to ~4.29 billion and every threshold
+  test passes. That is not hypothetical: a client dropped to DISCOVERY announcing five
+  seconds of ESP-NOW silence while its own receive counter was advancing by 221 packets
+  a second (`silence now=13822 last=13823 age=4294967295`). Cast to `long` —
+  `(long)(millis() - then) > TIMEOUT` — as `clientRetryAfterMs` already does.
+  Comparisons against `loop()`'s own bookkeeping are safe, because only one task
+  writes them.
 - **Don't name a global `btStarted`.** Arduino's `esp32-hal-bt.h` already declares
   `bool btStarted()` at global scope and the collision is a hard compile error.
 - **Role state must be cleared on every entry to DISCOVERY,** not just when leaving
