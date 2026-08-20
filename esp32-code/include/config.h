@@ -153,15 +153,16 @@
 // Clock Drift Correction (CLIENT mode)
 // ============================================================================
 // Source and client run off separate crystals with nothing synchronising them.
-// Measured over 600 s on the first two boards: the client consumed 30.5 ppm
-// faster than the source produced, draining the jitter buffer at 1.34 bytes/s
-// and emptying it in about 18 minutes. See lib/drift/drift.h for the control
-// law and test/test_drift for the closed-loop simulations these values were
-// chosen against.
+// Measured over 600 s against one WROOM source: an S3 client drifts -30.5 ppm
+// (1.34 B/s, buffer empty in ~18 min), a C3 client -57.7 ppm (2.55 B/s, ~10
+// min). Two clients of one source, differing by nearly a factor of two, which is
+// the case for a controller rather than a constant made by the hardware. See
+// lib/drift/drift.h for the control law and test/test_drift for the closed-loop
+// simulations these values were chosen against.
 //
-// The correction is one duplicated or dropped mono sample at a time -- 30 ppm at
-// 22.05 kHz is 0.67 samples/s, roughly one edit every 1.5 s, which is why no
-// resampler is needed.
+// The correction is one duplicated or dropped mono sample at a time -- at
+// 22.05 kHz those offsets are 0.67 and 1.28 samples/s, an edit every second or
+// two, which is why no resampler is needed.
 
 // Bounds on the fill the controller steers towards. The target itself is
 // measured once the settle window closes -- see lib/drift/drift.h -- and clamped
@@ -189,15 +190,14 @@
 // the dead time costs nothing.
 #define DRIFT_SETTLE_MS       12000
 
-// No correction at all inside this band, in bytes. Two packets' worth, so
-// ordinary packet-arrival jitter never provokes an edit. The cost is that the
-// buffer drifts this far before anything happens (~300 s at 30 ppm) and settles
-// a little below target rather than exactly on it.
+// No correction at all while the smoothed error is inside this band.
+//
 // One packet. Wide enough that packet-arrival jitter never provokes an edit --
 // and the 4 s filter below has already removed most of that anyway -- while
-// costing only 4.5 ms of depth before the controller engages. It was 400, and
-// 400 is depth this buffer cannot spare: see the equilibrium arithmetic under
-// DRIFT_KP.
+// costing only 4.5 ms of depth before the controller engages, which at the
+// measured offsets is 150 s (S3) or 78 s (C3) of untouched drift at startup.
+// It was 400, and 400 is depth this buffer cannot spare: see the equilibrium
+// arithmetic under DRIFT_KP.
 #define DRIFT_DEADBAND_BYTES  200
 
 // Corrections per second per byte of error outside the deadband.

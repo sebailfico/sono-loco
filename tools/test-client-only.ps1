@@ -148,9 +148,26 @@ $src.Write('s')
 Write-Host " done"
 
 # --- 4. Watch the client behave like a client -------------------------------
-Write-Host "  watching $Client for $Duration s ..."
+# Keep the capture. This is the only path that exercises the ordinary String-built
+# status line -- bench telemetry replaces it with printf -- so it is the only
+# place heap behaviour under normal logging can be observed.
+$logDir = Join-Path $repoRoot 'logs'
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
+$logPath = Join-Path $logDir ("clientonly-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+
+Write-Host "  watching $Client for $Duration s (log: $logPath) ..."
 $null = $cli.ReadExisting()
 $out = Read-For -Sp $cli -Seconds $Duration
+
+@(
+    "# SonoLoco client-only check"
+    "# started : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    "# version : $version"
+    "# client  : $Client"
+    "# source  : $Source"
+    "#"
+    $out
+) | Out-File -FilePath $logPath -Encoding utf8
 
 if ($out -match '=== CLIENT') {
     Write-Host "  PASS entered CLIENT mode from a normal boot" -ForegroundColor Green
@@ -211,6 +228,18 @@ foreach ($p in @($cli, $src)) {
     try { $p.Dispose() } catch {}
 }
 
+# Heap trend over the run. The status line is built with String concatenation,
+# which fragments the heap in principle; whether it does in practice is a
+# question for a long run, not an argument (TODO.md).
+$heaps = [regex]::Matches($out, 'Status: mode=CLIENT heap=(\d+)')
+if ($heaps.Count -ge 3) {
+    $first = [int]$heaps[0].Groups[1].Value
+    $last  = [int]$heaps[$heaps.Count - 1].Groups[1].Value
+    Write-Host ("  heap: {0} -> {1} bytes over {2} status lines ({3:+#;-#;0} bytes)" -f `
+        $first, $last, $heaps.Count, ($last - $first))
+}
+
 Write-Host ''
+Write-Host "Raw capture: $logPath"
 if ($fail) { Write-Host 'Overall: FAIL' -ForegroundColor Red; exit 1 }
 Write-Host 'Overall: PASS' -ForegroundColor Green
