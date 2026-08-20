@@ -1,0 +1,117 @@
+#ifndef DRIFT_H
+#define DRIFT_H
+
+/**
+ * Clock-drift correction for the CLIENT audio path.
+ *
+ * The source and every client run off their own crystal, and nothing
+ * synchronises them. Measured over 600 s on the first two boards, the client
+ * consumed 30.5 ppm faster than the WROOM produced -- 1.34 bytes/s out of the
+ * jitter buffer, which empties it in about 18 minutes of continuous play. The
+ * absolute number is a property of one pair of crystals at one temperature and
+ * is not worth hard-coding: a third board has its own offset, and the same board
+ * has a different one when it is warm.
+ *
+ * So this is a controller, not a constant. It watches the buffer occupancy and
+ * asks the caller to consume one extra sample now and then (buffer too full) or
+ * one fewer (buffer draining). At 22.05 kHz, 30 ppm is 0.66 samples/s -- about
+ * one edit every 1.5 s. That is far below audibility and needs no resampler,
+ * which is the whole reason this approach was chosen over an SRC.
+ *
+ * Pure logic, no Arduino or ESP-IDF, so the convergence behaviour can be
+ * simulated on the host rather than discovered on a bench -- see
+ * test/test_drift. It is also the reason the caller applies the correction: this
+ * class never touches I2S or the ring buffer, it only decides.
+ *
+ * Control law: proportional, on the smoothed fill error, with a deadband.
+ *
+ *   - Proportional only. The plant is an integrator (a rate error accumulates
+ *     into a level error), so P alone has no steady-state *level* error in the
+ *     sense that matters: the buffer parks at whatever offset produces exactly
+ *     the correction rate the drift demands, and stays there. With the defaults
+ *     below and 30 ppm of drift that offset is about 530 bytes -- 24 ms shallower
+ *     than target, still an order of magnitude above the DMA ring. Adding an
+ *     integral term would recover those 24 ms and buy a wind-up failure mode in
+ *     exchange, which is a bad trade for a buffer this deep.
+ *   - The deadband is what stops the controller chasing packet-arrival jitter.
+ *     Below it, nothing happens at all.
+ *   - Loop time constant works out at 1/(2*kp) = 100 s with the defaults, versus
+ *     a disturbance that takes ~400 s to build the offset it corrects and an
+ *     input filter at 4 s. Three well-separated timescales, so it cannot ring.
+ */
+
+#include <stdint.h>
+
+class DriftController {
+public:
+    struct Config {
+        /** Fill the controller steers towards, in bytes. */
+        int   targetBytes;
+        /** No correction at all while |error| is inside this, in bytes. */
+        int   deadbandBytes;
+        /** Corrections per second per byte of error outside the deadband. */
+        float kp;
+        /** Hard cap on correction rate, corrections per second. */
+        float maxRatePerSec;
+        /** Time constant of the fill low-pass, milliseconds. */
+        float emaTauMs;
+    };
+
+    /** Intent returned by update(). */
+    enum Correction : int8_t {
+        INSERT = -1,   ///< buffer draining: emit a sample without consuming one
+        NONE   =  0,
+        DROP   = +1    ///< buffer filling: consume a sample without emitting it
+    };
+
+    void begin(const Config &cfg, uint32_t nowMs);
+
+    /**
+     * Forget the accumulated state. Call whenever playback restarts -- after an
+     * underrun re-arms the prefill gate, or on entry to CLIENT mode. The buffer
+     * refill that follows is not drift and must not be integrated as if it were.
+     */
+    void reset(uint32_t nowMs);
+
+    /**
+     * Feed the current occupancy. Call once per output batch.
+     *
+     * Returns what the caller *should* do; it does not assume the caller can.
+     * Nothing is counted and no credit is spent until confirm() says the
+     * correction actually happened, so an I2S write that comes up short simply
+     * leaves the correction outstanding for the next batch.
+     */
+    Correction update(uint32_t nowMs, int fillBytes);
+
+    /** Report what was actually applied -- the value update() returned, or NONE. */
+    void confirm(Correction applied);
+
+    /** Smoothed occupancy, bytes. Telemetry only. */
+    float smoothedFill() const { return ema_; }
+
+    /**
+     * Current correction rate, corrections per second, signed as Correction is.
+     * This is the controller's own estimate of the drift, and once the loop is
+     * closed it is the only in-band measure of it left: a corrected buffer no
+     * longer has a slope to regress. rate/sampleRate is the drift in ppm.
+     */
+    float rate() const { return rate_; }
+
+    /** Counters, for the [BENCH] telemetry line. */
+    uint32_t inserted = 0;
+    uint32_t dropped  = 0;
+
+private:
+    Config   cfg_{};
+    float    ema_     = 0.0f;
+    float    rate_    = 0.0f;
+    float    credit_  = 0.0f;   ///< fractional corrections owed, signed
+    uint32_t lastMs_  = 0;
+    bool     seeded_  = false;
+
+    // A stall (mode change, a long blocking write) must not hand the controller
+    // a huge dt and let it spend a second's worth of credit in one batch.
+    static const uint32_t MAX_DT_MS = 100;
+};
+
+#endif  // DRIFT_H

@@ -33,6 +33,7 @@
 
 // Hardware-independent parts of the CLIENT receive path, tested on the host
 // with `pio test -e native` — see test/test_jitter.
+#include "drift.h"
 #include "jitter.h"
 #include "seqtracker.h"
 
@@ -258,6 +259,13 @@ static_assert(JITTER_PREFILL < JITTER_BUF_SIZE,
 static uint8_t      jStorage[JITTER_BUF_SIZE];
 static JitterBuffer jbuf;
 static SeqTracker   seqTracker(SEQ_RESYNC_THRESHOLD, MAX_GAP_FILL_PKTS);
+
+// Clock-drift correction. The controller only decides; driveClientI2S applies.
+// Runtime-switchable rather than compile-time so a bench run can measure the
+// same boards with it on and off -- the before/after is the only evidence that
+// it does anything, and D9's reasoning applies: test the binary that ships.
+static DriftController driftCtl;
+static bool            driftEnabled = true;
 
 static volatile bool jReady   = false;   // true once prefill threshold is met
 static volatile bool rxActive = false;   // set by recv callback, triggers mode switch
@@ -646,8 +654,18 @@ static void driveClientI2S() {
         // loop tick during an underrun makes the underrun worse.
         jReady = false;
         rxUnderrun++;
+        // The refill that follows is not drift. Integrating it would provoke a
+        // burst of corrections on top of a buffer that is already unhappy.
+        driftCtl.reset(millis());
         return;
     }
+
+    // Ask before the batch, apply after it. Keeping the correction outside the
+    // batch is what leaves the partial-write accounting below untouched: one
+    // sample either side of a write whose length is already handled correctly,
+    // rather than an edit in the middle of a buffer that I2S may only half take.
+    DriftController::Correction corr = DriftController::NONE;
+    if (driftEnabled) corr = driftCtl.update(millis(), jbuf.fill());
 
     // Expand mono → stereo (duplicate sample to both channels)
     for (int i = 0; i < CLIENT_BATCH; i++) {
@@ -667,7 +685,30 @@ static void driveClientI2S() {
     // multiple of 4 here, but if it ever returned a partial frame, bw/2 would be
     // an odd number of mono bytes and the jitter buffer's 16-bit framing would be
     // permanently shifted — the exact failure pushBlock exists to prevent.
-    jbuf.advance((int)(bw & ~(size_t)3) / 2);   // 4 bytes written per 2 bytes of mono
+    const size_t frames = (bw & ~(size_t)3) / 4;
+    jbuf.advance((int)frames * 2);             // 4 bytes written per 2 bytes of mono
+
+    // One sample of correction, at a batch boundary. At the drift these boards
+    // actually have that is one edit every 1.5 s: inaudible, and it needs no
+    // resampler. Nothing is counted unless it happened -- an I2S write that came
+    // up short leaves the correction owed, and it is applied next batch instead.
+    if (corr == DriftController::DROP) {
+        // Consume a sample without playing it. Two bytes, so the buffer's 16-bit
+        // framing survives -- the one thing this path must never get wrong.
+        if (jbuf.fill() >= 2) {
+            jbuf.advance(2);
+            driftCtl.confirm(corr);
+        }
+    } else if (corr == DriftController::INSERT && frames > 0) {
+        // Play a sample twice without consuming it: hold the value one extra
+        // sample period. No discontinuity is possible by construction, because
+        // it is the sample that was just played.
+        const int16_t held  = mono[frames - 1];
+        int16_t frame[2]    = {held, held};
+        size_t  bwExtra     = 0;
+        i2s_write(I2S_NUM_0, frame, sizeof(frame), &bwExtra, pdMS_TO_TICKS(20));
+        if (bwExtra == sizeof(frame)) driftCtl.confirm(corr);
+    }
 }
 
 // ============================================================================
@@ -680,6 +721,7 @@ static unsigned long clientRetryAfterMs = 0;
 static void resetRxState() {
     jbuf.reset();
     seqTracker.reset();
+    driftCtl.reset(millis());
     jReady       = false;
     rxActive     = false;
     senderLocked = false;
@@ -743,6 +785,7 @@ static void enterClient() {
 
     jbuf.reset();
     seqTracker.reset();
+    driftCtl.reset(millis());
     jReady   = false;
     rxActive = false;
 
@@ -850,7 +893,8 @@ static void benchReport() {
                                                         : "CLIENT";
     DEBUG_SERIAL.printf(
         "[BENCH] ms=%lu role=%s mode=%s heap=%lu jit=%d rx=%lu lost=%lu ovf=%lu "
-        "und=%lu dup=%lu rsy=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu\n",
+        "und=%lu dup=%lu rsy=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu "
+        "drift=%d ins=%lu drp=%lu dr=%.3f\n",
         (unsigned long)millis(),
         benchSource ? "SOURCE" : "SINK",
         modeStr,
@@ -865,7 +909,14 @@ static void benchReport() {
         (unsigned long)benchTxPackets,
         (unsigned long)txQueueFull,
         (unsigned long)txSendErr,
-        (unsigned long)txRadioFail);
+        (unsigned long)txRadioFail,
+        driftEnabled ? 1 : 0,
+        (unsigned long)driftCtl.inserted,
+        (unsigned long)driftCtl.dropped,
+        // Corrections per second the controller is currently asking for. Once
+        // the loop is closed this is the only in-band measure of drift left:
+        // a corrected buffer no longer has a slope to regress.
+        driftCtl.rate());
 }
 
 static void benchIdentify() {
@@ -873,7 +924,7 @@ static void benchIdentify() {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     DEBUG_SERIAL.printf(
         "[BENCH] id fw=%s chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
-        "bench=%d bt=%d espnow=%d name=%s\n",
+        "bench=%d bt=%d espnow=%d drift=%d name=%s\n",
         FW_VERSION,
         ESP.getChipModel(),
         (unsigned long)ESP.getPsramSize(),
@@ -885,6 +936,7 @@ static void benchIdentify() {
         0,
 #endif
         espnowActive ? 1 : 0,
+        driftEnabled ? 1 : 0,
         ROOM_NAME);
 }
 
@@ -893,12 +945,21 @@ static void benchIdentify() {
  *
  *   ?  identify          b  reboot into bench mode     n  reboot into normal mode
  *   s  start sourcing    x  stop sourcing              r  report now
+ *   d  toggle clock-drift correction
  */
 static void benchServiceSerial() {
     while (DEBUG_SERIAL.available()) {
         switch (DEBUG_SERIAL.read()) {
             case '?': benchIdentify(); break;
             case 'r': benchReport();   break;
+            case 'd':
+                // No restart needed: the controller is re-armed rather than
+                // reconfigured, so one run can measure the same boards with
+                // correction off and on without reflashing between them.
+                driftEnabled = !driftEnabled;
+                driftCtl.reset(millis());
+                DEBUG_SERIAL.printf("[BENCH] drift=%d\n", driftEnabled ? 1 : 0);
+                break;
             case 's': benchStartSource(); break;
             case 'x': benchStopSource();  break;
             case 'b':
@@ -960,6 +1021,16 @@ void setup() {
         deinitI2SForTones();
     }
 #endif
+
+    DriftController::Config dcfg;
+    dcfg.targetBytes   = DRIFT_TARGET_BYTES;
+    dcfg.deadbandBytes = DRIFT_DEADBAND_BYTES;
+    dcfg.kp            = DRIFT_KP;
+    dcfg.maxRatePerSec = DRIFT_MAX_RATE;
+    dcfg.emaTauMs      = DRIFT_EMA_TAU_MS;
+    // begin() here and reset() everywhere else: the correction counters have to
+    // outlive a mode change, or a bench run cannot total them.
+    driftCtl.begin(dcfg, millis());
 
     // Must happen before ESP-NOW comes up: the recv callback starts pushing into
     // this buffer as soon as the radio is listening.

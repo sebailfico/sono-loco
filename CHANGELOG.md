@@ -28,6 +28,34 @@ in `TODO.md` false.
 
 ---
 
+## Unreleased — clock-drift correction (not yet measured on hardware)
+
+**Status: implemented and simulated, unproven on boards.** The 600 s A/B bench
+run is the missing evidence and `TODO.md` carries what it has to show. Nothing
+here should be quoted as a result until it does — the last thing that looked
+right in the code and was wrong on hardware cost 24 underruns a second for
+months.
+
+- **`lib/drift/`** added: a proportional controller on the smoothed jitter-buffer
+  fill, with a deadband. It decides only; `driveClientI2S` applies the decision by
+  duplicating or dropping a single mono sample at a batch boundary. At the
+  measured 30.5 ppm that is one edit every 1.5 s — inaudible, and no resampler.
+  Why this rather than an SRC, and why a controller rather than a -30.5 ppm
+  constant: D11.
+- **15 tests** in `test/test_drift`, including hour-long closed-loop simulations
+  at ±30.5 ppm and at four other offsets, plus the degenerate case past the
+  controller's authority. The model is validated against the recorded v0.1.0
+  slope of 1.34 B/s before anything built on it is trusted. All 38 tests pass
+  on-device (`pio test -e esp32dev`).
+- Correction is **switchable at runtime** — serial `d`, or `-NoDrift` on the
+  bench harness — so one session can measure the same boards with it off and on.
+  A runtime switch rather than a build flag, for D9's reason: test the binary
+  that ships.
+- Telemetry carries `drift=`, `ins=`, `drp=` and the controller's own rate
+  estimate; the harness reports corrections and the ppm they imply next to the
+  two existing drift measures. Once the loop is closed the correction rate *is*
+  the drift measurement — a corrected buffer has no slope left to regress.
+
 ## Unreleased — commit-based versioning
 
 - **Firmware version derived from git.** `esp32-code/scripts/version.py` runs as
