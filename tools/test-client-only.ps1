@@ -33,8 +33,22 @@
 .PARAMETER Keep
     Leave the client in client-only mode at the end.
 
+.PARAMETER Flash
+    Upload the application firmware to both boards first. Worth doing after
+    `pio test`, which leaves the *unit-test* binary on the board -- that firmware
+    runs its tests once at boot and then sits in an empty loop(), so the node goes
+    silent and every check here fails for a reason that has nothing to do with
+    the feature under test.
+
+.PARAMETER ClientEnv
+    PlatformIO environment for the client board. Required with -Flash.
+
+.PARAMETER SourceEnv
+    PlatformIO environment for the source board. Required with -Flash.
+
 .EXAMPLE
     ./tools/test-client-only.ps1 -Client COM8 -Source COM10
+    ./tools/test-client-only.ps1 -Client COM8 -Source COM10 -Flash -ClientEnv esp32dev -SourceEnv esp32c3
 #>
 
 [CmdletBinding()]
@@ -42,7 +56,10 @@ param(
     [Parameter(Mandatory = $true)][string]$Client,
     [Parameter(Mandatory = $true)][string]$Source,
     [int]$Duration = 60,
-    [switch]$Keep
+    [switch]$Keep,
+    [switch]$Flash,
+    [string]$ClientEnv = '',
+    [string]$SourceEnv = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -89,12 +106,52 @@ Write-Host "repo              : $version"
 
 $fail = $false
 
+# --- 0. Flash, if asked -----------------------------------------------------
+if ($Flash) {
+    if (-not $ClientEnv -or -not $SourceEnv) {
+        throw '-Flash needs -ClientEnv and -SourceEnv (e.g. -ClientEnv esp32dev -SourceEnv esp32c3)'
+    }
+    $pio = Join-Path $env:USERPROFILE '.platformio\penv\Scripts\pio.exe'
+    if (-not (Test-Path $pio)) {
+        $c = Get-Command pio -ErrorAction SilentlyContinue
+        if (-not $c) { throw 'PlatformIO not found' }
+        $pio = $c.Source
+    }
+    $projectDir = Join-Path $repoRoot 'esp32-code'
+    foreach ($pair in @(@($Client, $ClientEnv), @($Source, $SourceEnv))) {
+        Write-Host ("  flashing {0} with {1} ..." -f $pair[0], $pair[1]) -NoNewline
+        # The toolchain writes warnings to stderr, which $ErrorActionPreference =
+        # 'Stop' would turn into a terminating error despite a zero exit code.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $pio run -d $projectDir -e $pair[1] --target upload --upload-port $pair[0] 2>&1 | Out-Null
+        } finally { $ErrorActionPreference = $prevEap }
+        if ($LASTEXITCODE -ne 0) { throw "Upload to $($pair[0]) failed (exit $LASTEXITCODE)" }
+        Write-Host ' done'
+    }
+    Start-Sleep -Seconds 2
+}
+
 # --- 1. Put the client into client-only mode --------------------------------
 $cli = Open-Port -Port $Client
 Start-Sleep -Milliseconds 800
 $null = $cli.ReadExisting()
 $cli.Write('?')
-$id = Read-For -Sp $cli -Seconds 4 -Pattern 'conly=\d'
+$id = Read-For -Sp $cli -Seconds 6 -Pattern 'conly=\d'
+
+# Fail here rather than 600 s later. A board that says nothing at all is almost
+# always running the unit-test firmware: `pio test` uploads it, it prints its
+# results once at boot and then sits in an empty loop(). Every check below would
+# fail, none of them for a reason to do with client-only mode.
+if (-not $id) {
+    try { $cli.Close() } catch {}
+    try { $cli.Dispose() } catch {}
+    throw ("$Client said nothing in 6 s. If `pio test` has run since the last " +
+           "upload, the board is running the test firmware -- reflash the app " +
+           "(pio run -e <env> --target upload --upload-port $Client) or pass -Flash.")
+}
+
 if ($id -match 'conly=1') {
     Write-Host "  already in client-only mode"
 } else {
@@ -112,7 +169,7 @@ if ($id -match 'conly=1') {
 Start-Sleep -Milliseconds 500
 $null = $cli.ReadExisting()
 $cli.Write('?')
-$id = Read-For -Sp $cli -Seconds 5 -Pattern 'conly=\d'
+$id = Read-For -Sp $cli -Seconds 8 -Pattern 'conly=\d'
 
 if ($id -match 'conly=1')  { Write-Host "  PASS client-only is set" -ForegroundColor Green }
 else { Write-Host "  FAIL client-only did not stick: $id" -ForegroundColor Red; $fail = $true }
@@ -178,15 +235,19 @@ if ($out -match '=== CLIENT') {
 
 # The status line is the ordinary one, not bench telemetry: this node is not in
 # bench mode, which is the entire point.
-$statuses = [regex]::Matches($out, 'Status: mode=CLIENT heap=(\d+) jitter=(\d+)B rx=(\d+) lost=(\d+) ovf=(\d+) und=(\d+)')
+$statuses = [regex]::Matches($out, 'Status: mode=CLIENT [^
+]*')
 if ($statuses.Count -gt 0) {
-    $last = $statuses[$statuses.Count - 1]
-    $jit  = [int]$last.Groups[2].Value
-    $rx   = [int]$last.Groups[3].Value
-    $ovf  = [int]$last.Groups[5].Value
-    $und  = [int]$last.Groups[6].Value
-    Write-Host ("  last status: rx={0} jitter={1}B ovf={2} und={3} heap={4}" -f `
-        $rx, $jit, $ovf, $und, $last.Groups[1].Value)
+    $lastLine = $statuses[$statuses.Count - 1].Value
+    function Field { param([string]$Line, [string]$Name)
+        if ($Line -match ($Name + '=(\d+)')) { return [int]$matches[1] }
+        return $null
+    }
+    $jit = Field $lastLine 'jitter'
+    $rx  = Field $lastLine 'rx'
+    $ovf = Field $lastLine 'ovf'
+    $und = Field $lastLine 'und'
+    Write-Host ("  last status: $lastLine")
 
     if ($rx -gt 0)   { Write-Host "  PASS packets are arriving" -ForegroundColor Green }
     else { Write-Host "  FAIL no packets received" -ForegroundColor Red; $fail = $true }
@@ -231,12 +292,20 @@ foreach ($p in @($cli, $src)) {
 # Heap trend over the run. The status line is built with String concatenation,
 # which fragments the heap in principle; whether it does in practice is a
 # question for a long run, not an argument (TODO.md).
-$heaps = [regex]::Matches($out, 'Status: mode=CLIENT heap=(\d+)')
+# Heap trend. Free heap alone cannot answer the String-fragmentation question --
+# fragmentation shows as the largest allocatable block falling while free heap
+# stays flat -- so both are reported. TODO.md asks for the measurement, not an
+# argument.
+$heaps = [regex]::Matches($out, 'Status: mode=CLIENT heap=(\d+) maxalloc=(\d+)')
 if ($heaps.Count -ge 3) {
-    $first = [int]$heaps[0].Groups[1].Value
-    $last  = [int]$heaps[$heaps.Count - 1].Groups[1].Value
-    Write-Host ("  heap: {0} -> {1} bytes over {2} status lines ({3:+#;-#;0} bytes)" -f `
-        $first, $last, $heaps.Count, ($last - $first))
+    $h0 = [int]$heaps[0].Groups[1].Value
+    $h1 = [int]$heaps[$heaps.Count - 1].Groups[1].Value
+    $m0 = [int]$heaps[0].Groups[2].Value
+    $m1 = [int]$heaps[$heaps.Count - 1].Groups[2].Value
+    Write-Host ("  heap     : {0} -> {1} ({2:+#;-#;0} bytes) over {3} status lines" -f `
+        $h0, $h1, ($h1 - $h0), $heaps.Count)
+    Write-Host ("  maxalloc : {0} -> {1} ({2:+#;-#;0} bytes)  <- fragmentation shows here" -f `
+        $m0, $m1, ($m1 - $m0))
 }
 
 Write-Host ''

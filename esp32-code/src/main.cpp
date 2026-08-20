@@ -731,11 +731,17 @@ static void driveClientI2S() {
     const size_t frames = (bw & ~(size_t)3) / 4;
     jbuf.advance((int)frames * 2);             // 4 bytes written per 2 bytes of mono
 
-    // One sample of correction, at a batch boundary. At the drift these boards
-    // actually have that is one edit every 1.5 s: inaudible, and it needs no
-    // resampler. Nothing is counted unless it happened -- an I2S write that came
-    // up short leaves the correction owed, and it is applied next batch instead.
-    if (corr == DriftController::DROP) {
+    // One sample of correction, at a batch boundary -- an edit every second or
+    // two at the offsets these boards actually have. Inaudible, and it needs no
+    // resampler. Nothing is counted unless it happened: an I2S write that came up
+    // short leaves the correction owed, and it is applied next batch instead.
+    //
+    // Both directions require frames > 0, i.e. that playback actually advanced.
+    // A correction is a statement about the rate audio is being consumed at, and
+    // if the DMA took nothing then it was not consumed at any rate; dropping a
+    // sample there would discard audio that was never played, to fix a drift that
+    // did not accrue.
+    if (corr == DriftController::DROP && frames > 0) {
         // Consume a sample without playing it. Two bytes, so the buffer's 16-bit
         // framing survives -- the one thing this path must never get wrong.
         if (jbuf.fill() >= 2) {
@@ -989,7 +995,7 @@ static void benchReport() {
     DEBUG_SERIAL.printf(
         "[BENCH] ms=%lu role=%s mode=%s heap=%lu jit=%d rx=%lu lost=%lu ovf=%lu "
         "und=%lu dup=%lu rsy=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu "
-        "drift=%d ins=%lu drp=%lu dr=%.3f tgt=%d srx=%ld\n",
+        "drift=%d ins=%lu drp=%lu dr=%.3f tgt=%d srx=%ld maxalloc=%lu\n",
         (unsigned long)millis(),
         benchSource ? "SOURCE" : "SINK",
         modeStr,
@@ -1020,7 +1026,10 @@ static void benchReport() {
         // and printed even when it is meaningless (a source has no rx), because
         // a value that goes *negative* or jumps is the evidence that the check
         // is misfiring rather than the radio going quiet.
-        lastRxMs ? (long)(millis() - lastRxMs) : -1L);
+        lastRxMs ? (long)(millis() - lastRxMs) : -1L,
+        // Largest allocatable block. Free heap can sit perfectly still while
+        // this one falls, which is exactly what heap fragmentation looks like.
+        (unsigned long)ESP.getMaxAllocHeap());
 }
 
 static void benchIdentify() {
@@ -1293,8 +1302,17 @@ void loop() {
             currentMode == MODE_SERVER    ? "SERVER"    : "CLIENT";
 
         if (currentMode == MODE_CLIENT) {
+            // maxalloc is the largest single block still allocatable. Free heap
+            // alone cannot answer the question the LOG_* String concatenation
+            // raises: fragmentation shows up as this number falling while free
+            // heap stays flat, so a run that watched only `heap` would report
+            // "no change" and prove nothing.
             LOG_INFO(String("Status: mode=") + modeStr +
                      " heap=" + String(ESP.getFreeHeap()) +
+                     " maxalloc=" + String(ESP.getMaxAllocHeap()) +
+                     " tgt=" + String(driftCtl.target()) +
+                     " ins=" + String(driftCtl.inserted) +
+                     " drp=" + String(driftCtl.dropped) +
                      " jitter=" + String(jbuf.fill()) + "B" +
                      " rx=" + String(rxCount) +
                      " lost=" + String(seqTracker.lost) +

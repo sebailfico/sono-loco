@@ -79,9 +79,24 @@ forwarded to clients. That needs hardware nobody here has yet.
 
 ### Housekeeping
 
-- [ ] `String` concatenation in every `LOG_*` call fragments the heap — switch to
-      `printf`-style. Watch `heap=` in the bench test's five-minute run to see
-      whether this is real or theoretical.
+- [ ] **Is `String` concatenation in `LOG_*` actually fragmenting the heap?**
+      Half-measured, and the half that is done is the half that cannot answer it.
+
+      Over 600 s of normal-mode client playback (54 String-built status lines,
+      132,048 packets) free heap was **byte-identical start to end: 93,020 →
+      93,020**. That looks conclusive and is not: `ESP.getFreeHeap()` is *total*
+      free, and fragmentation shows up as the largest allocatable block shrinking
+      while the total stays flat. It is blind to the failure it was meant to
+      detect.
+
+      `maxalloc=` (`ESP.getMaxAllocHeap()`) is now in both the normal status line
+      and the bench telemetry, which is the number to watch. The confirming run
+      has not been done. Do that before touching the logging: on the evidence so
+      far this may well be a non-problem, and the `printf` conversion would be
+      churn across every log call in the file.
+
+      `./tools/test-client-only.ps1 -Client COM8 -Source COM10 -Duration 600`
+      reports both figures.
 - [ ] Connect/disconnect tones write into `I2S_NUM_0` while the A2DP task also
       owns it; sequence them properly instead of interleaving.
 - [ ] Rename `esp32-code/` to something consistent with the project name.
