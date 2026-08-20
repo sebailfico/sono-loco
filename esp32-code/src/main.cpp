@@ -818,6 +818,55 @@ static void enterClient() {
 static int64_t  benchStartUs      = 0;   // when this node started sourcing
 static uint32_t benchPktIdx       = 0;   // packets that should have been sent by now
 static uint32_t benchSampleIdx    = 0;   // running sample index, for a continuous tone
+
+/**
+ * The test tone, precomputed.
+ *
+ * Generating it with sinf() per sample put a hard ceiling on how fast a node
+ * could source: an ESP32-C3 managed 37.8 packets/s against the 220.5 the stream
+ * needs, and starved its client into 159 underruns in 90 s. The C3 has no FPU at
+ * all, and `2.0f * M_PI * BENCH_TONE_HZ * t` is worse than it looks — M_PI is a
+ * *double*, so the whole expression is evaluated in soft-float double before
+ * being handed to sinf. The radio was never the bottleneck: qfull and senderr
+ * were both zero throughout.
+ *
+ * The table holds an exact whole number of tone periods, so playing it end to
+ * end and wrapping is seamless — no phase discontinuity, no click. That length
+ * is sampleRate / gcd(sampleRate, toneHz): 2205 samples for 440 Hz at 22.05 kHz,
+ * which is exactly 44 periods and 4.4 KB.
+ *
+ * A tone frequency sharing no factor with the sample rate would demand a table
+ * of sampleRate samples — 44 KB — hence the static_assert rather than a silent
+ * allocation nobody asked for.
+ */
+static constexpr uint32_t benchGcd(uint32_t a, uint32_t b) {
+    return b == 0 ? a : benchGcd(b, a % b);
+}
+static constexpr uint32_t BENCH_TONE_LEN =
+    CLIENT_SAMPLE_RATE / benchGcd(CLIENT_SAMPLE_RATE, BENCH_TONE_HZ);
+
+static_assert(BENCH_TONE_LEN <= 4096,
+              "BENCH_TONE_HZ shares too little with CLIENT_SAMPLE_RATE — the "
+              "wrap-exact tone table would be huge. Pick a frequency that "
+              "divides more evenly (440 Hz at 22050 Hz needs 2205 samples).");
+
+static int16_t  benchTone[BENCH_TONE_LEN];
+static uint32_t benchTonePhase = 0;
+static bool     benchToneReady = false;
+
+/**
+ * Built once when sourcing starts, not at boot: only a source ever needs it, and
+ * on a C3 these are the expensive calls that the table exists to keep out of the
+ * transmit path.
+ */
+static void benchBuildTone() {
+    for (uint32_t i = 0; i < BENCH_TONE_LEN; i++) {
+        const float t = (float)i / (float)CLIENT_SAMPLE_RATE;
+        benchTone[i] = (int16_t)(BENCH_TONE_AMPLITUDE *
+                                 sinf(2.0f * (float)M_PI * (float)BENCH_TONE_HZ * t));
+    }
+    benchToneReady = true;
+}
 static uint32_t benchTxPackets    = 0;   // packets actually queued
 static unsigned long benchLastReportMs = 0;
 
@@ -846,11 +895,11 @@ static void benchServiceSource() {
         AudioPacket pkt;
         pkt.seq = txSeq++;
         pkt.len = ESPNOW_PAYLOAD_SIZE;
+        // Table lookup, wrapping by comparison rather than modulo: no division
+        // and no float anywhere in the transmit path.
         for (uint32_t i = 0; i < samplesPerPkt; i++) {
-            const float t = (float)(benchSampleIdx + i) / CLIENT_SAMPLE_RATE;
-            const int16_t s =
-                (int16_t)(BENCH_TONE_AMPLITUDE * sinf(2.0f * M_PI * BENCH_TONE_HZ * t));
-            memcpy(pkt.data + i * 2, &s, 2);
+            memcpy(pkt.data + i * 2, &benchTone[benchTonePhase], 2);
+            if (++benchTonePhase >= BENCH_TONE_LEN) benchTonePhase = 0;
         }
         benchSampleIdx += samplesPerPkt;
 
@@ -865,9 +914,12 @@ static void benchStartSource() {
         DEBUG_SERIAL.println("[BENCH] error reason=espnow_inactive");
         return;
     }
+    if (!benchToneReady) benchBuildTone();
+
     benchStartUs   = esp_timer_get_time();
     benchPktIdx    = 0;
     benchSampleIdx = 0;
+    benchTonePhase = 0;
     benchTxPackets = 0;
     txQueueFull = txSendErr = txRadioFail = 0;
     benchSource    = true;

@@ -28,6 +28,21 @@ in `TODO.md` false.
 
 ---
 
+## Unreleased
+
+- **The bench tone is a lookup table now, and a C3 can source.** Generating it
+  with `sinf` per sample capped an ESP32-C3 at 37.8 packets/s against the 220.5
+  the stream needs, starving its client into 159 underruns in 90 s. The C3 has no
+  FPU, and `2.0f * M_PI * BENCH_TONE_HZ * t` was worse than it looked: `M_PI` is
+  a double, so the whole expression was evaluated in soft-float double. The radio
+  was never involved — `qfull` and `senderr` were zero throughout.
+
+  The table holds a whole number of tone periods so it wraps without a click:
+  `sampleRate / gcd(sampleRate, toneHz)`, which is 2,205 samples and 4.4 KB at
+  440 Hz / 22.05 kHz. A `static_assert` catches a tone frequency that would
+  demand a 44 KB one. **Measured after: 223 pkt/s on the C3**, with a WROOM
+  client taking 19,596 packets at 0.02% loss.
+
 ## v0.2.0 — 2026-08-20 — Clock-drift correction, measured
 
 `b335d5a…77601a2`, tagged at `77601a2`.
