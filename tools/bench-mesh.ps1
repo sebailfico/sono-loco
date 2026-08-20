@@ -247,6 +247,11 @@ if ($Ports.Count -eq 0) { throw 'No ESP32-looking serial ports found.' }
 
 Write-Host "Discovered ports: $($Ports -join ', ')"
 
+# `git describe`, the same string scripts/version.py bakes into the firmware, so
+# a board can be compared against the tree it is supposed to be running.
+$repoVersion = (& git -C $repoRoot describe --tags --always --dirty=* 2>$null)
+if (-not $repoVersion) { $repoVersion = 'unknown' }
+
 $nodes = @()
 foreach ($p in $Ports) {
     Write-Host "  identifying $p ..." -NoNewline
@@ -331,8 +336,8 @@ foreach ($n in $nodes) {
 
 foreach ($n in $nodes) {
     if ($n.Ident) {
-        Write-Host ("  {0}  {1,-14} psram={2,-8} espnow={3} bench={4}  {5}" -f `
-            $n.Port, $n.Ident['chip'], $n.Ident['psram'], $n.Ident['espnow'],
+        Write-Host ("  {0}  {1,-14} fw={2,-22} psram={3,-8} espnow={4} bench={5}  {6}" -f `
+            $n.Port, $n.Ident['chip'], $n.Ident['fw'], $n.Ident['psram'], $n.Ident['espnow'],
             $n.Ident['bench'], $n.Ident['mac'])
         if ($n.Ident['espnow'] -ne '1') {
             Write-Warning "$($n.Port) has ESP-NOW inactive -- it cannot take part"
@@ -340,6 +345,39 @@ foreach ($n in $nodes) {
     } else {
         Write-Warning "$($n.Port) never identified itself"
     }
+}
+
+# ---------------------------------------------------------------------------
+# 3b. Firmware provenance
+# ---------------------------------------------------------------------------
+# A measurement is only worth recording if it can be attributed to a commit.
+# Without -Flash the boards keep whatever they were last given, which may be
+# older than the tree, or older than each other, and nothing on screen would say
+# so. Each node reports the `git describe` string it was built from, so the
+# three ways of being wrong -- stale, dirty, mismatched -- are all visible here
+# rather than discovered afterwards when the numbers do not reproduce.
+
+Write-Host ''
+Write-Host "Repo: $repoVersion"
+$fwSeen = @{}
+foreach ($n in $nodes) {
+    $fw = $null
+    if ($n.Ident) { $fw = $n.Ident['fw'] }
+    if (-not $fw) {
+        Write-Warning "$($n.Port) reports no firmware version -- it predates commit versioning; reflash with -Flash"
+        continue
+    }
+    $fwSeen[$fw] = $true
+    if ($fw -eq 'unknown') {
+        Write-Warning "$($n.Port) was built outside a git checkout (fw=unknown) -- its results are not attributable"
+    } elseif ($fw.EndsWith('*')) {
+        Write-Warning "$($n.Port) runs a build from a dirty tree ($fw) -- the sha does not describe what is on the board"
+    } elseif ($fw -ne $repoVersion) {
+        Write-Warning "$($n.Port) runs $fw but this tree is $repoVersion -- rerun with -Flash to measure what you are reading"
+    }
+}
+if ($fwSeen.Keys.Count -gt 1) {
+    Write-Warning "Nodes disagree on firmware: $($fwSeen.Keys -join ', ') -- a mesh result across mixed builds means little"
 }
 
 # ---------------------------------------------------------------------------
@@ -367,14 +405,14 @@ Send-Cmd -Sp $sourceNode.Sp -Cmd 's'
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 $stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
 $logPath = Join-Path $logDir "bench-$stamp.log"
-$commit  = & git -C $repoRoot rev-parse --short HEAD 2>$null
 @(
     "# SonoLoco mesh bench"
     "# started  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-    "# commit   : $commit"
+    "# version  : $repoVersion"
     "# duration : $Duration s"
     "# source   : $($sourceNode.Port)"
     "# nodes    : $(($nodes | ForEach-Object { "$($_.Port)=$($_.Chip)" }) -join ' ')"
+    "# firmware : $(($nodes | ForEach-Object { "$($_.Port)=$(if ($_.Ident) { $_.Ident['fw'] } else { '?' })" }) -join ' ')"
     "#"
 ) | Out-File -FilePath $logPath -Encoding utf8
 
@@ -436,6 +474,14 @@ foreach ($n in $nodes) { Close-Port -Sp $n.Sp }
 
 Write-Host ''
 Write-Host '=== Results ===' -ForegroundColor Cyan
+
+# Repeated from the top of the run: results get copied into CHANGELOG.md, and
+# a figure without the build that produced it cannot be reproduced later.
+Write-Host ("Firmware: {0}" -f (($nodes | ForEach-Object {
+    $fw = '?'
+    if ($_.Ident -and $_.Ident['fw']) { $fw = $_.Ident['fw'] }
+    "$($_.Port)=$fw"
+}) -join '  '))
 
 $results = @()
 foreach ($n in $nodes) {

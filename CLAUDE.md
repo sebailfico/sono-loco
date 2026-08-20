@@ -32,6 +32,11 @@ code, not the docs — assume the code is the truth and fix the doc.
   in `main.cpp`. Don't widen that split into a general refactor.
 - New tuneable constants go in `include/config.h`, never inline. Per-node values
   go in `platformio.ini`.
+- The firmware version is `git describe`, injected by `scripts/version.py` at
+  build time. Never add a version constant to bump by hand. Bench results and
+  `CHANGELOG.md` entries carry that version — a measurement taken from a dirty
+  tree (trailing `*`) is not reproducible, so commit before measuring anything
+  worth recording. See D10.
 - There are two builds for three board types, on purpose. If a board needs
   different *behaviour*, detect it at runtime — don't add a build config.
 - **Anything touching the client audio path must be re-measured, not reasoned

@@ -225,3 +225,38 @@ which is what made a two-board test possible at all with the hardware to hand.
 
 **What would change this:** nothing foreseen. If bench mode ever needs to test
 the *Bluetooth* path it stops being useful, and that part stays manual.
+
+---
+
+## D10 — The version comes from git, not from a constant
+
+**Decided:** 2026-08-20. **Status:** new.
+
+`scripts/version.py` runs before every build and defines `FW_VERSION` from
+`git describe --tags --always --dirty=*`. The node prints it in its boot banner
+and reports it in `[BENCH] id fw=…`, so the bench harness records which build
+produced each measurement, and warns when a board is running something other
+than the tree in front of you.
+
+The version is derived rather than declared because the question it has to answer
+is "is this board running the code I am reading?", and a hand-maintained constant
+in `config.h` cannot answer it: it is correct only for as long as everyone
+remembers to bump it, and the failure is silent. The one thing that is always
+true and always available is what git already knows.
+
+Tags supply the human-readable part. `v0.1.0` is the first hardware-proven mesh;
+untagged commits describe themselves as `v0.1.0-3-gabc1234`, which is still an
+exact reference to a tree. The trailing `*` on a dirty build is the important
+part of the string — it means the sha does *not* describe what is on the board,
+so any number measured from that build is unreproducible, and the harness says so
+rather than letting it into `CHANGELOG.md` unnoticed.
+
+CHANGELOG entries are headed with the version they describe for the same reason:
+a baseline like "-30.5 ppm" is only useful if the firmware that produced it can
+be rebuilt.
+
+**What would change this:** nothing about the mechanism. The tagging *policy* is
+worth revisiting once there is a second person flashing boards, or an OTA path
+(`TODO.md`) that has to decide whether an image is newer than the running one —
+`git describe` output does not order without parsing, and that would be the
+moment to put a real semver in the tag and compare against it.
