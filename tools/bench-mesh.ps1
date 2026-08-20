@@ -543,10 +543,51 @@ foreach ($n in $nodes) {
     $dRsy  = [double]$last['rsy']  - [double]$first['rsy']
     $dTx   = [double]$last['tx']   - [double]$first['tx']
 
-    $jitArr   = [double[]]($s | ForEach-Object { [double]$_['jit'] })
-    $jitSlope = Get-Slope -X $tArr -Y $jitArr
-    $jitBps   = $null
-    if ($jitSlope) { $jitBps = $jitSlope.Slope }
+    # Regress the buffer level over the longest stretch of UNINTERRUPTED
+    # playback, not over the whole run.
+    #
+    # An underrun re-arms the prefill gate and refills the buffer to its full
+    # depth. Regressing across that discontinuity averages a drain and a step
+    # back up, and reports something between them: this run's whole-run figure
+    # was -7.6 ppm, while every clean segment in it read about -58 ppm, which is
+    # what an independent 180 s run and the closed-loop correction rate both
+    # agree on. A drift number that is wrong by 8x is worse than none, because it
+    # is quotable.
+    $segments = @()
+    $cur      = @()
+    $prevJit  = $null
+    $prevUnd  = $null
+    foreach ($k in $s) {
+        $jit = [double]$k['jit']
+        $und = [double]$k['und']
+        # A re-arm shows up either as the underrun counter moving or as the level
+        # stepping up by more than a packet can account for.
+        $rearmed = ($null -ne $prevUnd -and ($und -gt $prevUnd -or ($jit - $prevJit) -gt 500))
+        if ($rearmed) {
+            $segments += ,$cur
+            $cur = @()
+        }
+        $cur += ,$k
+        $prevJit = $jit
+        $prevUnd = $und
+    }
+    $segments += ,$cur
+
+    $best = $null
+    foreach ($seg in $segments) {
+        if ($null -eq $best -or $seg.Count -gt $best.Count) { $best = $seg }
+    }
+
+    $jitBps = $null
+    $jitCoverage = 0.0
+    if ($best -and $best.Count -ge 3) {
+        $segT   = [double[]]($best | ForEach-Object { [double]$_['_t'] })
+        $segJit = [double[]]($best | ForEach-Object { [double]$_['jit'] })
+        $segSlope = Get-Slope -X $segT -Y $segJit
+        if ($segSlope) { $jitBps = $segSlope.Slope }
+        if ($s.Count -gt 0) { $jitCoverage = 100.0 * $best.Count / $s.Count }
+    }
+    $rearms = $segments.Count - 1
 
     # Corrections the drift controller actually applied. With correction on this
     # replaces the buffer slope as the drift measurement: the whole point is that
@@ -566,6 +607,7 @@ foreach ($n in $nodes) {
         Span = $span; Ppm = $ppm; PpmSe = $ppmSe
         Rx = $dRx; Lost = $dLost; Ovf = $dOvf; Und = $dUnd; Dup = $dDup; Rsy = $dRsy; Tx = $dTx
         JitBps = $jitBps; JitLast = [double]$last['jit']
+        JitCoverage = $jitCoverage; Rearms = $rearms
         QFull = [double]$last['qfull']; SendErr = [double]$last['senderr']; RadioFail = [double]$last['radiofail']
         Heap = [double]$last['heap']
         IsSource = $n.IsSource
@@ -629,6 +671,14 @@ foreach ($r in $results) {
     }
     Write-Host ("{0,-6} {1,12:N1} {2,10:N1} {3} {4} {5} {6} {7}" -f `
         $r.Port, $r.Ppm, $r.PpmSe, $rel, $jb, $jitPpm, $corr, $corrPpm)
+
+    # Playback re-armed during the run, so the buffer columns describe the
+    # longest clean stretch rather than the whole thing. Say so: a drift figure
+    # is only meaningful with the span it was measured over.
+    if ($r.Rearms -gt 0) {
+        Write-Host ("       {0} re-arm(s) during the run -- buffer slope is from the longest clean segment ({1:N0}% of samples)" -f `
+            $r.Rearms, $r.JitCoverage) -ForegroundColor DarkGray
+    }
 
     # An uncertainty larger than the estimate means the log-derived figure says
     # nothing. It happens on native-USB boards, where CDC latency jitter swamps
