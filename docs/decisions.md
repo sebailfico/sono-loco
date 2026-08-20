@@ -265,8 +265,10 @@ moment to put a real semver in the tag and compare against it.
 
 ## D11 — Drift is corrected by duplicating and dropping single samples
 
-**Decided:** 2026-08-20. **Status:** new, measured in simulation, awaiting the
-600 s bench run.
+**Decided:** 2026-08-20. **Status:** measured on hardware. WROOM source,
+ESP32-C3 client, 600 s each way: -57.7 ppm uncorrected with an underrun, flat and
+underrun-free corrected, and the two independent measures of the drift agreeing
+within 1.4 ppm. See `CHANGELOG.md` v0.2.0.
 
 Two crystals, nothing synchronising them: the client consumes at a slightly
 different rate than the source produces, and the jitter buffer slowly empties or
@@ -290,7 +292,10 @@ held sample is audible, that trade changes.
 
 **It is a controller, not a constant.** -30.5 ppm is one pair of crystals at one
 temperature; a third board has a different offset, and the same board has a
-different one when it is warm. So the firmware steers on the *buffer occupancy*
+different one when it is warm. That was the argument in advance; the hardware
+then made it directly — the same WROOM source measures -30.5 ppm against the S3
+and -57.7 ppm against the C3, a factor of nearly two between two clients of one
+source. So the firmware steers on the *buffer occupancy*
 it can actually see, rather than on a number measured once. Proportional control
 on the smoothed fill error with a deadband — the deadband is what keeps it from
 chasing packet-arrival jitter, and it costs a slightly shallower buffer in
@@ -303,6 +308,24 @@ that once shifted the 16-bit framing permanently, and an edit in the middle of a
 buffer that I2S may only half accept is exactly how that bug would come back.
 One sample either side of a write whose length is already handled correctly
 cannot do that.
+
+**Two things the hardware corrected about the design, both worth keeping:**
+
+*The target is measured, not computed.* The ring is not where all the buffered
+audio lives — the DMA ring holds part of it — so the level to steer to is the
+prefill less whatever the DMA is holding. Computing that from the DMA ring's
+*capacity* assumes it sits permanently full, and it does not: measured, it holds
+about 1,880 of 2,048 bytes. The controller now takes the level it observes once
+its settle window closes. The first version steered 350 bytes too shallow, and
+before that, steering to the full prefill was 1,600 bytes out in the other
+direction.
+
+*The gain is set by the depth the buffer has to keep.* Proportional control parks
+the level at `target - (deadband + rate/kp)`, so the gain decides how deep the
+buffer runs in steady state, and that depth has to survive a radio hiccup. The
+first gain parked a -58 ppm client at ~1,290 bytes; the baseline run then
+underran on a two-packet loss with 1,304 bytes showing a second earlier. This is
+the sort of thing that is invisible in the code and obvious in a 600 s run.
 
 **What would change this:** material where a held sample is audible, a client
 whose offset exceeds the 227 ppm the controller is allowed to correct, or a

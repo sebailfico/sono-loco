@@ -28,35 +28,86 @@ in `TODO.md` false.
 
 ---
 
-## Unreleased — clock-drift correction (not yet measured on hardware)
+## v0.2.0 — 2026-08-20 — Clock-drift correction, measured
 
-**Status: implemented and simulated, unproven on boards.** The 600 s A/B bench
-run is the missing evidence and `TODO.md` carries what it has to show. Nothing
-here should be quoted as a result until it does — the last thing that looked
-right in the code and was wrong on hardware cost 24 underruns a second for
-months.
+**It holds.** WROOM source, ESP32-C3 client, 600 s each way, same boards and same
+session, `v0.1.0-7-g778986f`:
 
-- **`lib/drift/`** added: a proportional controller on the smoothed jitter-buffer
-  fill, with a deadband. It decides only; `driveClientI2S` applies the decision by
-  duplicating or dropping a single mono sample at a batch boundary. At the
-  measured 30.5 ppm that is one edit every 1.5 s — inaudible, and no resampler.
-  Why this rather than an SRC, and why a controller rather than a -30.5 ppm
-  constant: D11.
-- **15 tests** in `test/test_drift`, including hour-long closed-loop simulations
-  at ±30.5 ppm and at four other offsets, plus the degenerate case past the
-  controller's authority. The model is validated against the recorded v0.1.0
-  slope of 1.34 B/s before anything built on it is trusted. All 38 tests pass
-  on-device (`pio test -e esp32dev`).
-- Correction is **switchable at runtime** — serial `d`, or `-NoDrift` on the
-  bench harness — so one session can measure the same boards with it off and on.
-  A runtime switch rather than a build flag, for D9's reason: test the binary
-  that ships.
-- Telemetry carries `drift=`, `ins=`, `drp=` and the controller's own rate
-  estimate; the harness reports corrections and the ppm they imply next to the
-  two existing drift measures. Once the loop is closed the correction rate *is*
-  the drift measurement — a corrected buffer has no slope left to regress.
+| | uncorrected (`-NoDrift`) | corrected |
+|---|---|---|
+| buffer slope | **-2.55 B/s (-57.7 ppm)** | flat, 1,616–2,272 B |
+| underruns | 1 | **0** |
+| corrections | — | 531 inserted, 0 dropped |
+| final level | drained to 1,216 B and re-armed | 1,968 B |
 
-## Unreleased — commit-based versioning
+The two measurements agree. The uncorrected drift, -57.7 ppm, comes from
+regressing the buffer level over the longest clean segment. The corrected run's
+steady-state correction rate over its last 300 s is 1.241 samples/s = **-56.3
+ppm** — the same physical quantity arrived at from the other side, 1.4 ppm apart.
+That is the useful property of closing this loop: the correction rate *becomes*
+the drift measurement, because a corrected buffer has no slope left to regress.
+
+Note this pair drifts at -58 ppm where the WROOM/S3 pair measured -30.5 ppm, on
+the same source board. Which is the argument for a controller rather than a
+constant, made by the hardware rather than by assertion.
+
+- **`lib/drift/`** — proportional control on the smoothed jitter-buffer fill with
+  a deadband; `driveClientI2S` applies its decisions by duplicating or dropping
+  one mono sample at a batch boundary. At -58 ppm that is 1.24 edits/s. No
+  resampler, nothing per-sample in the audio path. See D11.
+- **The target is measured, not computed.** Ring occupancy plus DMA content is
+  conserved at the prefill, but the DMA ring does not sit permanently full — it
+  holds about 1,880 of its 2,048 bytes, so the natural ring level is ~2,250 where
+  the arithmetic predicts 1,952. The controller now adopts the level it observes
+  when its settle window closes (calibrated to 2,311 on the C3) and reports it as
+  `tgt=`.
+- **The gain is set by how deep the buffer must stay.** P control parks the level
+  at `target - (deadband + rate/kp)`. At the original kp=0.005 a -58 ppm client
+  parked at ~1,290 bytes — and the baseline run underran on a two-packet loss
+  with 1,304 bytes showing a second earlier. kp 0.005→0.02 and deadband 400→200
+  park the same client near 1,990. A test now asserts ≥1,500 bytes for any drift
+  up to ±80 ppm.
+- **A settle window** holds corrections off for 12 s after playback arms: the
+  2,048-byte step as the DMA primes is not drift and must not be corrected.
+- 18 drift tests, including hour-long closed-loop simulations whose model is
+  validated against the recorded v0.1.0 slope before anything built on it is
+  believed. 41 tests pass on-device.
+- Correction is switchable at runtime (serial `d`, `-NoDrift` on the harness), so
+  before and after come from the same crystals at the same temperature.
+
+### Fixed: a client declared five seconds of silence mid-stream
+
+A C3 client dropped to DISCOVERY twice in a 600 s run reporting `ESP-NOW silent
+for 5s`, while its own receive counter advanced by 221 packets every second
+throughout. `millis() - lastRxMs` is unsigned, and the receive callback runs on
+the WiFi task: it writes a fresh timestamp between `loop()`'s read of `millis()`
+and its read of `lastRxMs` often enough to matter at 220 packets/s. The
+difference wraps to ~4.29e9 and clears any threshold.
+
+    [BENCH] silence now=13822 last=13823 delta=4294967295 rx=14
+
+Each false trip re-prefills the jitter buffer — audible, and it silently corrupts
+any drift measurement taken across it, which is how it was noticed. Fixed with
+the signed idiom already used for `clientRetryAfterMs`; the A2DP warmup gate had
+the same shape and is fixed too. In the README gotcha list now.
+
+### Fixed: the bench harness quoted drift across buffer re-arms
+
+The whole-run regression reported **-7.6 ppm** for a client whose every clean
+segment read about **-58 ppm** — it was averaging a drain against the step back
+up when playback re-armed. It now regresses the longest uninterrupted segment
+and says what fraction of the run that covered. A drift figure that is wrong by
+8x is worse than no figure, because it is quotable.
+
+### Also
+
+- **ESP32-C3 supported as a client** — a third build, for the reason D4 allows
+  one: a third instruction set. It needs `ARDUINO_USB_MODE=1`, which the S3's
+  board definition supplies and the C3's does not.
+- **I2S pins are per target.** GPIO 22–25 do not exist on an ESP32-S3 and 26 is a
+  flash/PSRAM pin there; the classic WROOM map was being handed to every board.
+
+### Commit-based versioning
 
 - **Firmware version derived from git.** `esp32-code/scripts/version.py` runs as
   a PlatformIO pre-build step and defines `FW_VERSION` from

@@ -6,16 +6,18 @@ file previously carried all of it and the open list got lost inside the done one
 
 ## Current state (2026-08-20)
 
-**The ESP-NOW mesh path is proven on hardware.** A WROOM sourcing and an
-ESP32-S3 playing: 132,069 packets over 600 s, zero lost, zero overflow, zero
-underrun, zero duplicates, zero resyncs, source rate exactly 220.5 pkt/s.
-Reproduce with `./tools/bench-mesh.ps1 -Flash -Duration 600`.
+**The ESP-NOW mesh path is proven on hardware, and so is clock-drift
+correction.** A WROOM sourcing and an ESP32-C3 playing, 600 s: zero underruns,
+zero overflow, buffer held flat against a -57.7 ppm offset that drains it to an
+underrun without correction. Full numbers in `CHANGELOG.md` (v0.2.0). Reproduce
+with `./tools/bench-mesh.ps1 -Flash -Duration 600`, and add `-NoDrift` for the
+uncorrected baseline.
 
-The 38 host tests also pass on-device (`pio test -e esp32dev`): 23 for the
-jitter buffer and sequence accounting, 15 for the clock-drift controller.
+The 41 host tests also pass on-device (`pio test -e esp32dev`): 23 for the
+jitter buffer and sequence accounting, 18 for the clock-drift controller.
 
-Clock-drift correction is written and simulated but **not yet measured on
-hardware** — see below. Everything above the drift entry still holds.
+Boards on the bench: a WROOM (COM8) and an ESP32-C3 (COM10). The S3 dropped off
+USB partway through 2026-08-20 and has not been seen since.
 
 Still unproven: the Bluetooth server path, i.e. real audio from a phone
 forwarded to clients. That needs hardware nobody here has yet.
@@ -52,20 +54,12 @@ forwarded to clients. That needs hardware nobody here has yet.
       46 ms of I2S DMA).
       Adjacent rooms will slap-echo. The server needs to delay its own local
       playback to match.
-- [ ] **Clock-drift correction needs its hardware run.** Implemented and
-      simulated, not yet measured on boards: `lib/drift/` steers the jitter
-      buffer to its target depth by duplicating or dropping one mono sample at a
-      time, `pio test -e esp32dev -f test_drift` covers the closed loop against
-      the measured -30.5 ppm, and the model reproduces the recorded 1.34 B/s
-      slope before it is trusted. See D11.
-
-      What is left is the evidence: `./tools/bench-mesh.ps1 -Flash -Duration 600`
-      twice on the same boards, once with `-NoDrift` and once without. Expect the
-      uncorrected run to reproduce -30.5 ppm and the corrected one to show a flat
-      buffer with the drift appearing in the `corr` column instead. Until that is
-      recorded in `CHANGELOG.md`, this is unproven — the prefill bug was also
-      invisible in the code.
-
+- [ ] **Re-measure drift on the WROOM/S3 pair.** Correction is proven on the
+      WROOM/C3 pair (v0.2.0: -57.7 ppm uncorrected, zero underruns corrected, the
+      two measures agreeing within 1.4 ppm). The S3 measured -30.5 ppm against the
+      same source in v0.1.0, so it is a different offset on the same controller
+      and worth confirming once it is plugged back in — it was disconnected
+      partway through the session and never came back.
 - [ ] **Sample rate is assumed to be 44.1 kHz.** If A2DP negotiates 48 kHz the
       clients play at the wrong pitch. Read the actual rate from the sink and
       either follow it or resample.
@@ -85,6 +79,21 @@ forwarded to clients. That needs hardware nobody here has yet.
 
 ### Hardware reach
 
+- [ ] **The C3 cannot source the bench stream.** Measured 2026-08-20: as the
+      synthetic source it queued 37.8 pkt/s against the required 220.5 and
+      starved the client into 159 underruns in 90 s. As a *client* it is fine —
+      131,378 packets, zero underruns — which is the role it will actually have,
+      so this only blocks a C3-only pair on the bench.
+
+      The rate matches one packet per generation pass, so the generator is the
+      bottleneck, not the radio (`qfull=0`, `senderr=0`). `benchServiceSource`
+      calls `sinf` per sample and `2.0f * M_PI * BENCH_TONE_HZ * t` promotes to
+      *double* because `M_PI` is a double — soft-float double on a chip with no
+      FPU.
+
+      The fix is a lookup table rather than a faster `sinf`: 2,205 samples is
+      exactly 44 periods of 440 Hz at 22.05 kHz, so it wraps seamlessly, costs
+      4.4 KB, and takes float out of the bench TX path on every board.
 - [ ] **Expose a client-only runtime mode**, so a WROOM can be a real client
       node. Bench mode already proves a WROOM runs ESP-NOW fine as long as
       Bluetooth is never started — it sourced the whole 600 s test. The firmware

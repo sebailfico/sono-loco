@@ -55,8 +55,13 @@ What to read in its output:
   the offset is a property of that pair of crystals at that temperature, so a
   corrected run today against an uncorrected one from last week proves nothing.
 - **Time to exhaustion** — at the measured drift, how long before the jitter
-  buffer overflows or underruns. This is the number that matters for the
-  clock-drift work in `TODO.md`.
+  buffer overflows or underruns. With correction on this should not appear at
+  all; if it does, the drift is beyond what the controller is allowed to correct.
+- **Re-arm notice** — if playback re-armed during the run, the buffer columns
+  describe the longest uninterrupted stretch and the harness says what fraction
+  of the run that was. It regresses that segment rather than the whole run on
+  purpose: a re-arm steps the level back up, and averaging a drain against that
+  step reported -7.6 ppm for a client that was really drifting at -58 ppm.
 
 Drift precision improves with run length. 45 s is enough to see whether audio
 flows; use 600 s or more before trusting a ppm figure.

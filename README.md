@@ -97,13 +97,14 @@ duplicated or resynced**. Run it yourself with `./tools/bench-mesh.ps1 -Flash`.
 forwarded to clients. No board on the bench can do it: the WROOM has no PSRAM and
 the S3 has no BT Classic, so that needs a WROVER.
 
-Also still open: the clocks drift. Measured over 600 s at **−30.5 ppm** between
-these two boards, which drains a client's jitter buffer in about 18 minutes.
-A controller for it now exists (`lib/drift/`, D11) — it duplicates or drops one
-mono sample at a time to hold the buffer at its target depth, and the closed loop
-is covered by simulation in `pio test -f test_drift`. It has **not yet been
-measured on hardware**, so treat it as unproven until `CHANGELOG.md` says
-otherwise; see `TODO.md` for exactly which run is missing.
+**Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
+measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the
+same WROOM and an ESP32-C3, enough to drain a client's jitter buffer to an
+underrun within a 600 s run. `lib/drift/` holds the buffer at depth by
+duplicating or dropping one mono sample at a time, roughly one edit a second at
+that offset. Measured over 600 s each way on the same boards: zero underruns
+corrected, and the correction rate agrees with the uncorrected drift to within
+1.4 ppm. See `CHANGELOG.md` and D11.
 
 Where things are written down, so they stay in one place each:
 
