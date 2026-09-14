@@ -30,6 +30,30 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **The mesh is on channel 11, and there is an air monitor to say why.**
+  `tools/airmon/` is a standalone sniffer for a spare classic ESP32 (COM15):
+  promiscuous mode, one line a second — airtime, SonoLoco's own ESP-NOW frames
+  and their RSSI, beacons by SSID, foreign data by transmitter, FCS-failed
+  frames — and a 13-channel survey on `s`. `capture.py` logs it with PC time;
+  `correlate.py` lays that against a bench log second by second.
+
+  First survey: the whole band empty except channel 1, where the house router
+  sits at -54 dBm. First correlated run (`bench-20260914-161403` against
+  `air-20260914-161319`, mesh on channel 1 at 6 Mbps): client loss tracks
+  the seconds the monitor saw hundreds of *undecodable* frames — a Wi-Fi 6
+  router streaming HE frames to a phone, which an ESP32 sees as a preamble
+  and a checksum failure. Correlation with FCS-failed frames +0.24..+0.38
+  per client, with decodable data frames near zero: the interferer is
+  traffic the mesh's radios cannot even read. Then `ESPNOW_CHANNEL` 1 → 11,
+  same source, same clients, the monitor left on channel 1 to watch the
+  router carry on: **S3 0 lost, C3 0 lost** over 132,069 packets, WROVERs
+  11 and 5. Forty minutes earlier on channel 1 the same S3 and C3 had lost
+  837 and 312.
+
+  This closes the question of whether four clients can share one broadcast
+  (yes) and opens the real one — a building where every channel is busy —
+  under "Surviving the wild" in `TODO.md`. Frequency hopping was considered
+  there and rejected in favour of survey-and-pick plus redundancy.
 - **Four clients at once, and the multi-client mystery has a cause: channel 1.**
   Five boards on the bench for the first time (WROOM source, two WROVER-Es,
   S3, C3), 600 s each, all on one clean tree.
