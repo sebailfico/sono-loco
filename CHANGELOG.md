@@ -64,9 +64,12 @@ in `TODO.md` false.
   Then the measurement the "Bandwidth" item had waited a month for, and it
   is bad: with the BT radio streaming, **~215 frames/s handed to the radio,
   ~170/s on the air** at the monitor 30 cm away, **~153/s at the client with
-  24% loss**, underruns every second, 144 buffer re-arms in 150 s. Audibly:
-  laggy and crackly. That is BT/WiFi coexistence taking a fifth of the
-  ESP-NOW frames, and the send callback calling every one of them a success.
+  24% loss**, underruns every second, 144 buffer re-arms in 150 s. And the
+  server's *own* output — the TPA on WROVER2 — crackled, while the clients'
+  MAX98357A boards produced nothing at all (unverified hardware, first item
+  after this one in `TODO.md`). That is BT/WiFi coexistence on one chip
+  hurting both radios: BT short by 2.5%, audible locally; ESP-NOW short by a
+  fifth, with the send callback calling every frame a success.
   The plan is the first item in `TODO.md`; the short version is fewer frames
   (ADPCM at 55/s) and a coexistence preference, and if those are not enough,
   a two-chip server.
