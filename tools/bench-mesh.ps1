@@ -132,11 +132,22 @@ function Get-ChipOnPort {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $out = & $py $et --port $Port --no-stub chip_id 2>&1 | Out-String
+        # --connect-attempts 20, twice. The WROOM on COM8 started failing its
+        # auto-reset into the bootloader on 2026-09-14 -- "Wrong boot mode
+        # detected (0x13)", i.e. EN pulsed but IO0 was not low at the time --
+        # about three tries in four with esptool's default attempts, and the
+        # harness silently dropped the baseline source from the run. Each
+        # connect attempt is a fresh reset cycle, so more of them in one
+        # invocation is the cheap fix; a board that still fails is genuinely
+        # not entering download mode and needs BOOT held by hand.
+        foreach ($attempt in 1..2) {
+            $out = & $py $et --port $Port --no-stub --connect-attempts 20 chip_id 2>&1 | Out-String
+            if ($out -match 'Chip is ([^\r\n(]+)') { return $matches[1].Trim() }
+            Start-Sleep -Milliseconds 500
+        }
     } finally {
         $ErrorActionPreference = $prevEap
     }
-    if ($out -match 'Chip is ([^\r\n(]+)') { return $matches[1].Trim() }
     return $null
 }
 
@@ -264,6 +275,13 @@ $nodes = @()
 foreach ($p in $Ports) {
     Write-Host "  identifying $p ..." -NoNewline
     $chip = Get-ChipOnPort -Port $p
+    if (-not $chip) {
+        # Not the same as an unsupported chip: nothing answered esptool. Most
+        # likely the board is not entering download mode (see Get-ChipOnPort);
+        # hold BOOT while this runs, or pass -Ports without it.
+        Write-Host " did not enter download mode, skipping" -ForegroundColor Yellow
+        continue
+    }
     $envName = Get-EnvForChip -Chip $chip
     if (-not $envName) {
         Write-Host " $chip -- no firmware build for this chip, skipping" -ForegroundColor Yellow
