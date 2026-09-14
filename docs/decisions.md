@@ -115,6 +115,18 @@ actually streaming is the open item in `TODO.md`. Also learned the hard way:
 coexistence forbids `WIFI_PS_NONE` on a BT node (README gotcha), so a BT node
 runs WiFi with modem sleep on, while a BT-free node still turns it off.
 
+**Amended 2026-09-14, evening:** BT and WiFi *together* now has two numbers.
+Memory: a phone connecting needs more than the 15.5 KB of internal DRAM the
+node had; after releasing the BLE half of the controller, fixing a WiFi TX
+trim that had never applied, and moving what could move to PSRAM, it has 43 KB
+and holds 18–32 KB while streaming. Radio: with A2DP streaming, about a fifth
+of the ESP-NOW frames handed to the radio never reach the air intact — 215/s
+sent, ~170/s seen by a monitor 30 cm away, ~153/s at a client. The
+coexistence arbiter is real and it is the binding constraint on a one-chip
+server. Fewer frames (ADPCM) and a coexistence preference are the next things
+to measure; a two-chip server is the fallback that removes the question. See
+`TODO.md`.
+
 **What would change this:** shrinking the mesh's RAM footprint far enough that
 BT and WiFi coexist without PSRAM — unlikely, the 80 KB is the WiFi driver's own
 buffers, and the static RX buffers cannot be moved to PSRAM because they must be

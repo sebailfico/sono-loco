@@ -100,12 +100,14 @@ router, not to each other; `tools/airmon/` is the sniffer that showed which.
 What a building full of routers does to it is the open question, and the plan
 for it is "Surviving the wild" in `TODO.md`.
 
-**The Bluetooth server path is still unproven** — audio taken from a phone and
-forwarded to clients. As of 2026-09-14 there is finally a board that can do it: a
-WROVER-E on COM12, which boots into `SERVER capable`, brings up ESP-NOW and BT
-together and sits in DISCOVERY with 15.5 KB of internal heap free. The first
-thing that boot found was a boot loop (see the gotcha on `WIFI_PS_NONE`); the
-phone-to-client walkthrough in `docs/bench-test.md` has not been run yet.
+**The Bluetooth server path carries audio, badly.** As of 2026-09-14 evening a
+phone streams into a WROVER-E, which plays it locally and forwards it over
+ESP-NOW — after a boot loop (`WIFI_PS_NONE` gotcha) and a crash on connect
+(15 KB of internal DRAM was not enough for one L2CAP link; it is 43 KB now).
+What comes out of the clients is crackly: with the BT radio streaming, a fifth
+of the ESP-NOW frames never make it onto the air, and the client sees 24%
+loss. That is BT/WiFi coexistence on one chip, it is measured, and it is the
+first item in `TODO.md`.
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the

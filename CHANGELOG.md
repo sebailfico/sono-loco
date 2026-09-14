@@ -30,6 +30,46 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **A phone has streamed through a SonoLoco server for the first time — and
+  the first thing it did was crash it.** Two connection attempts to WROVER2,
+  same crash both times: `assert failed: hash_map_set (data != NULL)` out of
+  `btu_start_timer` during L2CAP link setup on HCI connection-complete. An
+  allocation returning NULL with 4 MB of PSRAM idle, because the BT
+  controller and every FreeRTOS object live in internal DRAM only, and the
+  node had 15.5 KB of it. Four changes, measured on the same board:
+
+  | | before | after |
+  |---|---|---|
+  | free after WiFi init | 109,304 | 125,736 |
+  | free after BT start | **15,564** | **43,264** |
+  | largest free block | 14,324 | 25,588 |
+
+  The WiFi TX "trim" had never trimmed anything — this core builds the driver
+  with *static* TX buffers, and the code set the dynamic count, a field the
+  driver never reads; `static_tx_buf_num` 8 → 2, AMPDU and CSI off. The BT
+  controller is now brought up Classic-only with the BLE half released, the
+  way the A2DP library itself does on non-Arduino builds. The jitter ring
+  lives in PSRAM where there is PSRAM, and the TX queue is 16 deep (8 was
+  tried and dropped 23 packets at an audio restart; 32 was 6.7 KB for a
+  counter that had never moved).
+
+  With that: phone `24:5a:b5:32:3f:5d` paired, audio started and stopped six
+  times, the node went SERVER → DISCOVERY → SERVER across a disconnect and
+  reconnect, connect and disconnect tones played, and the heap held at
+  **28–32 KB free while streaming, 18–21 KB with ESP-NOW forwarding on top**.
+  The SERVER status line now carries `tx=`, the count of frames handed to the
+  radio, because without it a server that plays locally and one that also
+  broadcasts print the same line.
+
+  Then the measurement the "Bandwidth" item had waited a month for, and it
+  is bad: with the BT radio streaming, **~215 frames/s handed to the radio,
+  ~170/s on the air** at the monitor 30 cm away, **~153/s at the client with
+  24% loss**, underruns every second, 144 buffer re-arms in 150 s. Audibly:
+  laggy and crackly. That is BT/WiFi coexistence taking a fifth of the
+  ESP-NOW frames, and the send callback calling every one of them a success.
+  The plan is the first item in `TODO.md`; the short version is fewer frames
+  (ADPCM at 55/s) and a coexistence preference, and if those are not enough,
+  a two-chip server.
 - **The mesh is on channel 11, and there is an air monitor to say why.**
   `tools/airmon/` is a standalone sniffer for a spare classic ESP32 (COM15):
   promiscuous mode, one line a second — airtime, SonoLoco's own ESP-NOW frames

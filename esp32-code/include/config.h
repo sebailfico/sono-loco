@@ -168,10 +168,11 @@
 
 // FreeRTOS queue depth for the ESP-NOW TX task (packets buffered before dropping).
 // FreeRTOS queue storage is internal DRAM, ~210 bytes a slot. 32 was ~6.7 KB
-// for a queue whose qfull counter has never left zero: the A2DP callback hands
-// over a chunk or two of packets at a time and the TX task drains at radio
-// speed. 8 is 36 ms of audio. If qfull ever climbs, this is where to look.
-#define ESPNOW_TX_QUEUE_DEPTH  8
+// for a queue whose qfull counter had never left zero on the bench. 8 was
+// tried on 2026-09-14 and dropped 23 packets the first time a phone paused
+// and resumed: the A2DP decoder hands over a burst when audio restarts. 16 is
+// 72 ms of audio, 3.4 KB, and qfull is on the SERVER status line to watch.
+#define ESPNOW_TX_QUEUE_DEPTH  16
 
 // Hold ESP-NOW TX for this long after BT audio starts, so the A2DP pipeline has
 // settled before the radio starts competing with it.
