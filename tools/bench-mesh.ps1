@@ -273,12 +273,25 @@ if (-not $repoVersion) { $repoVersion = 'unknown' }
 
 $nodes = @()
 foreach ($p in $Ports) {
+    if (-not $Flash) {
+        # esptool is only needed to pick a build to flash. Without -Flash the
+        # board's own [BENCH] id line reports its chip, and esptool's reset
+        # into download mode is the one thing a tired devkit can fail at --
+        # the WROOM on COM8 was dropped from two runs that way on 2026-09-14
+        # while it was running the right firmware all along.
+        Write-Host "  $p (chip from bench ident)"
+        $nodes += [pscustomobject]@{
+            Port = $p; Chip = '?'; Env = $null
+            Sp = $null; Buffer = ''; Samples = @(); Ident = $null; IsSource = $false
+        }
+        continue
+    }
     Write-Host "  identifying $p ..." -NoNewline
     $chip = Get-ChipOnPort -Port $p
     if (-not $chip) {
         # Not the same as an unsupported chip: nothing answered esptool. Most
         # likely the board is not entering download mode (see Get-ChipOnPort);
-        # hold BOOT while this runs, or pass -Ports without it.
+        # hold BOOT while this runs, or run without -Flash.
         Write-Host " did not enter download mode, skipping" -ForegroundColor Yellow
         continue
     }
@@ -359,6 +372,14 @@ foreach ($n in $nodes) {
         if ($null -eq $n.Sp) { $n.Sp = Open-Port -Port $n.Port }
     }
 }
+
+foreach ($n in $nodes) {
+    if ($n.Ident -and $n.Chip -eq '?') { $n.Chip = $n.Ident['chip'] }
+}
+# A port that never identified itself and was never seen by esptool is not a
+# SonoLoco node at all -- some other serial device -- and has no place in the
+# results table.
+$nodes = @($nodes | Where-Object { $_.Ident -or $_.Chip -ne '?' })
 
 foreach ($n in $nodes) {
     if ($n.Ident) {
