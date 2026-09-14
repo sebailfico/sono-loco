@@ -478,3 +478,43 @@ client that is already doing I2S, drift correction and a radio.
 building (it will not be), a need for actual confidentiality rather than
 separation, or a decision to give each mesh its own channel — at which point the
 id stays but stops being the only thing keeping the two apart.
+
+---
+
+## D13 — ESP-NOW frames go out at 6 Mbps, not the 1 Mbps default
+
+**Decided:** 2026-09-14, on one back-to-back measurement. **Status:** holding,
+range untested.
+
+ESP-NOW sends broadcast frames at 1 Mbps DSSS unless `esp_wifi_config_espnow_rate`
+says otherwise. That is the most robust rate 802.11 has — the best receiver
+sensitivity, and DSSS lets a strong receiver decode straight through a weaker
+interferer — and it is also the slowest: a 206-byte SonoLoco frame is about
+2.2 ms of air, and 220.5 of them a second is roughly half the channel. Half the
+channel, on channel 1, with neighbours.
+
+Measured on five boards, WROOM sourcing to two WROVERs, an S3 and a C3, 600 s
+each, same afternoon, same positions. At 1 Mbps the four clients lost 0 / 280 /
+2,955 / 14,079 packets — the strong receivers decoded through the interference
+and the weak ones did not. At 6 Mbps OFDM they lost 86 / 708 / 1,493 / 1,495:
+total loss 4.6× lower, the worst board 9× better, the two best boards
+slightly worse, and the C3 and S3 now losing the *same* frames, which is what a
+short OFDM frame under a burst of interference does — it dies for everyone or
+for no one. When the interference stopped, all four were clean at 6 Mbps.
+
+So 6 Mbps trades a few dB of sensitivity for a sixth of the airtime. On a
+bench that is the right trade. The open question is whether it still is two
+rooms away, where the few dB may be the difference between hearing the source
+and not — `TODO.md` has the range test.
+
+**What was considered:** 2 Mbps (halves the airtime, keeps DSSS capture — worth
+measuring if OFDM loses at range); MCS0 (6.5 Mbps HT, same sensitivity class as
+6 Mbps, no advantage without 40 MHz); anything faster (11n MCS3+ buys airtime
+nobody needs and sensitivity everybody does). Changing the channel is not an
+alternative to this, it is the other half of it: see the channel item in
+`TODO.md`.
+
+**What would change this:** a range measurement showing 1 Mbps reaching a room
+that 6 Mbps does not — then 2 Mbps is the next thing to try, not a return to 1.
+Or ADPCM (the bandwidth item in `TODO.md`) shrinking the frames to the point
+where 1 Mbps airtime stops mattering.

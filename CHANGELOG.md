@@ -30,6 +30,43 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **Four clients at once, and the multi-client mystery has a cause: channel 1.**
+  Five boards on the bench for the first time (WROOM source, two WROVER-Es,
+  S3, C3), 600 s each, all on one clean tree.
+
+  `v0.2.0-8-g45550a3`, 1 Mbps (the ESP-NOW default), WROOM sourcing 132,079
+  packets at 220.5/s with clean counters — and the four receivers lost
+  WROVER-1 **0**, WROVER-2 280 (0.21%), S3 2,955 (2.24%), C3 **14,079
+  (10.7%)** with 196 underruns. The loss came in multi-second bursts at the
+  same instants on every board (the C3 down to 11 of 220 packets in a second
+  while WROVER-1 took all 220), the C3's own clock ticking evenly through
+  them. Not the source, not a stall: something else on the air, and each
+  board losing according to how well it hears the WROOM over it. A 206-byte
+  frame at 1 Mbps is about 2.2 ms, and 220.5 of them a second is roughly
+  half of channel 1 — the mesh had been running on the busiest channel there
+  is at the most collision-prone rate there is.
+
+  `v0.2.0-10-g539b37d`, same boards, same source, **6 Mbps OFDM**
+  (`ESPNOW_PHY_RATE`, D13), immediately after: C3 1,495 (1.13%), S3 1,493,
+  WROVER-2 708, WROVER-1 86. Total loss 4.6× lower; and the C3 and S3 now
+  lost *identical* counts every minute (193/194, 208/205, 202/202 …) — the
+  same frames — because a shorter OFDM frame either survives for everyone or
+  dies for everyone. Then, seven and a half minutes in, it stopped: the last
+  two minutes were zero loss on all four clients, and a 180 s run straight
+  after gave WROVERs 0, C3 and S3 the same 25 frames. Four clients on one
+  broadcast is fine. The neighbourhood is not, at some hours.
+
+  Drift, incidentally, is now measured for both WROVERs against the WROOM:
+  correction held both flat at +18/+15 ppm (two 600 s runs agreeing within
+  0.6 ppm), and against a C3 source at +44/+42 ppm. Ignore the drift columns
+  on a lossy node — missing packets look like drift to the controller.
+- **The bench harness no longer needs esptool to know what a board is.**
+  Without `-Flash` it opens every port and takes the chip from the board's own
+  `[BENCH] id` line; with `-Flash` it identifies with `--connect-attempts 20`,
+  twice, and says "did not enter download mode" rather than "no firmware
+  build for this chip" when nothing answered. The WROOM on COM8 started
+  failing its auto-reset into download mode about three tries in four today
+  and had been silently dropped from two runs.
 - **The first WROVER is on the bench (COM12, WROVER-E, 4 MB PSRAM), and the
   server-capable boot works — after one fix.** The very first boot was a boot
   loop: `abort()` in `coex_core_enable`, from `esp_bt_controller_enable`. The

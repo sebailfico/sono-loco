@@ -4,7 +4,7 @@ What is **open**. Completed work is in `CHANGELOG.md`, standing design choices
 and their reasoning are in `docs/decisions.md`. Keep those three separate — this
 file previously carried all of it and the open list got lost inside the done one.
 
-## Current state (2026-08-26)
+## Current state (2026-09-14)
 
 **The ESP-NOW mesh path is proven on hardware, and so is clock-drift
 correction**, isolated pair by isolated pair: WROOM+C3 and WROOM+S3 each PASS
@@ -18,14 +18,14 @@ The 41 host tests also pass on-device (`pio test -e esp32dev`): 23 for the
 jitter buffer and sequence accounting, 18 for the clock-drift controller.
 
 Boards on the bench: a WROOM (COM8), an ESP32-C3 (COM10), an ESP32-S3
-(COM9) and, since 2026-09-14, a WROVER-E (COM12) — the S3 is back; what looked like a hardware dropout was a leftover
-on-device unit-test binary left flashed from an earlier `pio test -e esp32s3`
-run, not a fault. Two of the three now have a DAC wired: the WROOM (was
-already working) and, as of today, the C3 — bench mode's tone is confirmed
-audible on its output. The S3 still has no DAC soldered.
+(COM9) and, since 2026-09-14, two WROVER-Es (COM12, and COM13 with a DAC).
+DACs are wired on the WROOM, the C3 and the COM13 WROVER; the S3 and the
+COM12 WROVER have none. The WROOM's auto-reset into download mode has become
+unreliable (see "Bench" below); run the harness without `-Flash` and flash it
+by hand with retries.
 
-**Running two clients at once is not yet proven** — see "Multi-client
-reliability" below; each pair is clean alone.
+**Four clients at once is proven when the air is quiet** — see "Multi-client
+reliability" below, which is no longer about the mesh and now about channel 1.
 
 Still unproven: the Bluetooth server path, i.e. real audio from a phone
 forwarded to clients. The WROVER that can do it arrived 2026-09-14 and boots
@@ -100,34 +100,33 @@ walkthrough has not been run yet.
 
 ### Multi-client reliability
 
-- [ ] **Two simultaneous clients degrade in a way neither does alone.** First
-      tested 2026-08-26, having never had three boards on the bench at once
-      before: WROOM (COM8, source) + ESP32-C3 (COM10) + ESP32-S3 (COM9)
-      together, 600 s, `-Flash -Source COM8`. Both clients came back WARN —
-      C3: 26 lost, ovf=14, 4 re-arms, drift correction reading ~199 ppm; S3:
-      327 lost, ovf=12, 4 re-arms, ~199 ppm. No brownouts or resets in the raw
-      capture, so the boards themselves stayed up; this is a stream-health
-      problem, not a crash.
-
-      The ~199 ppm figure on *both* chips, nearly identical, is the tell — it
-      does not match either board's known drift (C3 -57.7 ppm, S3 -30.5 ppm
-      from earlier single-client runs) and two different crystals do not
-      coincidentally drift at the same rate. Immediately re-run isolated on
-      the same boards, same session, same dirty tree (v0.2.0-5-g9c371f9*):
-      WROOM+S3 alone — PASS, 0.02% loss, 0 ovf/und/dup/rsy, corrected -19.7 ppm.
-      WROOM+C3 alone — PASS, 0.00% loss, 0 ovf/und/dup/rsy, corrected -40.7 ppm
-      (1 re-arm, 89% clean coverage). Both pairs are healthy alone; only the
-      three-way combination is not.
-
-      Not yet isolated: whether this is RF self-interference between two
-      receiving radios placed close together, a limit in how broadcast
-      reception behaves with more than one simultaneous listener, or an
-      artifact of the harness/host polling three serial ports at once instead
-      of two. Spreading the two client boards physically apart and re-running
-      the three-way bench would distinguish RF proximity from the other two
-      candidates. This matters beyond the bench: the product is multiple
-      rooms listening at once, so if this is a real mesh limit rather than a
-      bench artifact, it is more urgent than anything else in this file.
+- [ ] **Find out what is on channel 1, and probably leave it.** The "two
+      clients degrade each other" finding of 2026-08-26 (C3 26 lost, S3 327,
+      both reading a bogus ~199 ppm) is **not a mesh limit**. Measured
+      2026-09-14 with four clients on one WROOM source, see `CHANGELOG.md`:
+      loss arrives in multi-second bursts that hit every receiver at the same
+      instants, scaled by how well each one hears the source (WROVER 0 → C3
+      10.7%), and it stopped mid-run at about 15:10 — the last two minutes of
+      that run and a 180 s run straight after were clean on all four clients
+      (WROVERs 0 lost, C3 and S3 the same 25 frames). Something else is
+      transmitting on channel 1 and winning collisions. Still to do:
+      - See what it is. `netsh wlan show networks mode=bssid` on the PC lists
+        every AP with its channel, but needs Windows Location services on.
+        Or a bench command that has a node scan and print the channels.
+      - Move `ESPNOW_CHANNEL` off 1 (the default for half the routers ever
+        sold) to whatever the scan shows empty, and re-run the four-client
+        600 s bench during the noisy part of the day. Ties into the
+        per-mesh-channel item under "Mesh isolation".
+      - Keep the C3 and S3 in mind as the canaries: they lose identical frame
+        sets, so they are either the weakest receivers or the closest to the
+        noise. Moving them apart and re-running would say which.
+- [ ] **Range-test 6 Mbps against 1 Mbps.** `ESPNOW_PHY_RATE` is now 6 Mbps
+      OFDM (D13) on the strength of one back-to-back comparison under
+      interference: total loss 4.6× lower, worst board 9× better, but the two
+      WROVERs that were clean at 1 Mbps picked up 86 and 708 lost — the OFDM
+      sensitivity cost is real and was measured at one metre. A house is not
+      one metre. Walk a client into the next room and the one after, at each
+      rate, 600 s each, before trusting either number.
 
 ### Mesh isolation
 
@@ -177,9 +176,9 @@ proof and polish.
       the RF contention between two nearby meshes as well as the logical
       crosstalk, and the id is already the obvious thing to derive the channel
       from. The cost is discovery: a client can no longer sit on `ESPNOW_CHANNEL`
-      and listen, it has to scan. Do this after "Multi-client reliability" above
-      says whether radio proximity is a real limit — if two clients degrade each
-      other in one room, the answer changes what this is worth.
+      and listen, it has to scan. "Multi-client reliability" above has now
+      said that radio proximity is not the limit but channel 1 is — which makes
+      this worth more, not less.
 - [ ] **Provisioning without a serial console.** `g<name>` needs a USB cable and
       pairing needs physical access to a button; neither is what somebody with
       six speakers in four rooms wants. A phone app over BLE, or a temporary

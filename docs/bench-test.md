@@ -117,7 +117,14 @@ Each step has a pass criterion readable directly from the serial log.
 ## What you need
 
 For the **automated** mesh test: two or more boards on this PC, any mix. Bench
-mode does not use Bluetooth, so a WROOM counts.
+mode does not use Bluetooth, so a WROOM counts. Five at once has been done.
+
+If a board keeps being skipped with "did not enter download mode", its
+auto-reset is the problem (the WROOM on COM8, since 2026-09-14). Flash it by
+hand — `pio run -e esp32dev --target upload --upload-port COM8`, repeating
+until "Hash of data verified", or with BOOT held — and run the harness
+**without `-Flash`**: it then identifies boards from their own ident line and
+never asks esptool to reset anything.
 
 For the **manual** test of the Bluetooth path: at least one **WROVER**, plus a
 phone. The WROOM cannot be an A2DP server (no PSRAM, D3) and neither can the S3
