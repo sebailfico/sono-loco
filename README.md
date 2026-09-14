@@ -104,10 +104,11 @@ for it is "Surviving the wild" in `TODO.md`.
 phone streams into a WROVER-E, which plays it locally and forwards it over
 ESP-NOW — after a boot loop (`WIFI_PS_NONE` gotcha) and a crash on connect
 (15 KB of internal DRAM was not enough for one L2CAP link; it is 43 KB now).
-What comes out of the clients is crackly: with the BT radio streaming, a fifth
-of the ESP-NOW frames never make it onto the air, and the client sees 24%
-loss. That is BT/WiFi coexistence on one chip, it is measured, and it is the
-first item in `TODO.md`.
+What comes out of the server's own speaker crackles, and with the BT radio
+streaming a fifth of the ESP-NOW frames never make it onto the air (24% loss at
+the client). That is BT/WiFi coexistence on one chip hurting both radios, it is
+measured, and it is the first item in `TODO.md`. The clients' MAX98357A boards
+have not made a sound yet — that is the second.
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the

@@ -36,10 +36,12 @@ walkthrough has not been run yet.
 ## Blocking
 
 - [ ] **A server streaming over Bluetooth loses a fifth of its ESP-NOW frames
-      at the radio.** This is the whole product's path, first exercised on
-      2026-09-14 evening (phone → WROVER2 → WROVER1 with a MAX98357A), and it
-      is what the audio "laggy, crackly" verdict was. Three logs recorded
-      together (`logs/server-20260914-231730-COM13.log`, `client-…-COM12.log`, `air-…-ch11.log`):
+      at the radio — and its own local playback crackles.** This is the whole
+      product's path, first exercised on 2026-09-14 evening (phone → WROVER2
+      → WROVER1 with a MAX98357A). **The crackle was heard on WROVER2's own
+      TPA output**, i.e. the BT side is losing frames; the clients' MAX98357A
+      boards produced nothing at all (see the next item), so the 24% mesh
+      loss below has not been heard yet. Three logs recorded together (`logs/server-20260914-231730-COM13.log`, `client-…-COM12.log`, `air-…-ch11.log`):
       - server: `tx=` climbing **~215/s**, `senderr=0 radiofail=0` — the
         driver reports every frame sent. Also 2.5% below the 220.5/s that
         44.1 kHz implies, so the A2DP side is losing a little too.
@@ -71,13 +73,22 @@ walkthrough has not been run yet.
          is €2) that only does ESP-NOW. No coexistence at all, at the cost of
          one module per server. Record the decision in `docs/decisions.md`
          if it comes to that; D3 already says what would change it.
-      Also confirm on which output the crackle was heard: WROVER2's own TPA
-      (then BT is losing frames too) or the clients' MAX98357As (then it is
-      the 24%).
-- [ ] **The MAX98357A boards have not been heard yet.** WROVER1 (COM12) and
-      the S3 (COM9) are wired to them. In the first 90 s window nothing was
-      being received; in the last one WROVER1 was receiving and playing (24%
-      loss). Whether sound came out of it is not recorded. Cheapest proof:
+      The crackle being local means the coexistence hurts both directions:
+      BT loses ~2.5% of its frames (a gap every ~40 ms — a crackle), ESP-NOW
+      loses ~20%. So a coexistence *preference* (1.) only moves the damage
+      between the two; fewer WiFi transmissions (2.) or two chips (3.) are
+      the real candidates. **First test tomorrow, before any of that:** pair
+      the phone to `SonoLoco-WROOM` (COM8, default mode — no PSRAM, so WiFi
+      never starts) and listen. Clean there and crackly on WROVER2 pins the
+      crackle on coexistence, not on the WROVER's PSRAM cache workaround or
+      the forwarding callback in the BT task. Crackly on both means the
+      problem predates the mesh. Needs the phone: notify.
+- [ ] **The MAX98357A boards are silent.** WROVER1 (COM12) and the S3
+      (COM9) are wired to them. In the last window WROVER1 was receiving and
+      driving I2S (144 re-arms, 24% loss) and **no sound came out** — the
+      user confirmed it. So either the wiring (SD floating is right for
+      mono; VIN on 5 V; GAIN floating), the power, or the I2S signal never
+      reached the amp. Cheapest proof, no phone needed:
       bench mode, WROVER2 as source (`-Source COM13`), the 6000-amplitude
       tone is unmissable. The S3's I2S pins 4/5/6 have never driven a DAC.
 - [ ] **Tones on every board, and loud enough for the amp they are on.** The
