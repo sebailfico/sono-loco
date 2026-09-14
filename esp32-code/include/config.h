@@ -140,7 +140,15 @@
 // ESP-NOW Mesh
 // ============================================================================
 // Fixed channel — must be the same on every node.
-#define ESPNOW_CHANNEL       1
+//
+// 11, not 1. A survey with tools/airmon on 2026-09-14 found the whole 2.4 GHz
+// band in this house empty except channel 1, where the house router sits at
+// -54 dBm — and every packet the mesh had ever lost was lost to that router's
+// traffic (bench-20260914-161403 against air-20260914-161319: loss tracks the
+// seconds the monitor saw hundreds of undecodable HE frames). Channel 11 is
+// 50 MHz away from it. If the router moves, this should too; a per-mesh
+// channel is in TODO.md.
+#define ESPNOW_CHANNEL       11
 
 // PHY rate for ESP-NOW frames. The IDF default for broadcast is 1 Mbps DSSS
 // with a long preamble, at which a 206-byte packet occupies about 2.2 ms of
