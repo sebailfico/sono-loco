@@ -41,6 +41,7 @@
 
 #ifdef ENABLE_BLUETOOTH
 #include "BluetoothA2DPSink.h"
+#include <esp_bt.h>
 #endif
 
 // ============================================================================
@@ -394,7 +395,13 @@ static_assert(JITTER_PREFILL > CLIENT_DMA_CAPACITY_BYTES,
 static_assert(JITTER_PREFILL < JITTER_BUF_SIZE,
               "JITTER_PREFILL must fit in the jitter buffer");
 
-static uint8_t      jStorage[JITTER_BUF_SIZE];
+// The ring's storage. A static array would sit in internal DRAM on every
+// board; on a board with PSRAM it goes there instead, because the server
+// path needs the internal bytes for the BT stack and the ring is only ever
+// touched from task context (the ESP-NOW receive callback and loop()), where
+// PSRAM is fine. On a WROOM/S3/C3 it stays static.
+static uint8_t      jStorageInternal[JITTER_BUF_SIZE];
+static uint8_t     *jStorage = jStorageInternal;
 static JitterBuffer jbuf;
 static SeqTracker   seqTracker(SEQ_RESYNC_THRESHOLD, MAX_GAP_FILL_PKTS);
 
@@ -575,7 +582,14 @@ static void setupESPNow() {
     // one frame in flight.
     wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
     wcfg.static_rx_buf_num  = WIFI_STATIC_RX_BUFFERS;
-    wcfg.dynamic_tx_buf_num = WIFI_DYNAMIC_TX_BUFFERS;
+    wcfg.static_tx_buf_num  = WIFI_STATIC_TX_BUFFERS;
+    // ESP-NOW frames are single management frames: no aggregation, no block
+    // ack, and nobody here reads channel state information. Each of these
+    // costs internal DRAM at init on a node that is about to need every byte
+    // of it for the BT stack.
+    wcfg.ampdu_rx_enable = 0;
+    wcfg.ampdu_tx_enable = 0;
+    wcfg.csi_enable      = 0;
 
     esp_err_t ret = esp_wifi_init(&wcfg);
     if (ret != ESP_OK) {
@@ -749,8 +763,46 @@ static void btAudioChanged(esp_a2d_audio_state_t state, void *) {
     }
 }
 
+/**
+ * Bring the BT controller up in Classic-only mode, before the A2DP library
+ * gets to it.
+ *
+ * Left to itself the library calls the Arduino core's btStart(), which
+ * initialises the controller in dual mode (BLE + Classic) because that is what
+ * the core's sdkconfig selects. The BLE half then holds internal DRAM for
+ * three BLE connections this firmware never makes -- and internal DRAM is the
+ * one thing a WROVER server is short of: with WiFi and BT up it had 15 KB left,
+ * and the first phone to connect took it to zero (assert in Bluedroid's
+ * hash_map_set, 2026-09-14). Releasing the BLE memory first and initialising
+ * Classic-only is what the library itself does on non-Arduino builds.
+ *
+ * The library's start() finds the controller already ENABLED and leaves it
+ * alone; its end(false) never touches the controller, so a CLIENT -> SERVER
+ * restart finds it still up. BLE is gone for good after this -- a provisioning
+ * scheme over BLE (TODO.md) would have to give some of this memory back.
+ */
+static void bringUpBtController() {
+    esp_bt_controller_status_t st = esp_bt_controller_get_status();
+    if (st == ESP_BT_CONTROLLER_STATUS_ENABLED) return;
+    if (st == ESP_BT_CONTROLLER_STATUS_IDLE) {
+        esp_bt_controller_mem_release(ESP_BT_MODE_BLE);   // no-op if already done
+        esp_bt_controller_config_t cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        cfg.mode = ESP_BT_MODE_CLASSIC_BT;
+        esp_err_t r = esp_bt_controller_init(&cfg);
+        if (r != ESP_OK) {
+            LOG_ERROR("BT controller init failed: " + String(esp_err_to_name(r)));
+            return;
+        }
+        while (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) delay(10);
+    }
+    esp_err_t r = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
+    if (r != ESP_OK) LOG_ERROR("BT controller enable failed: " + String(esp_err_to_name(r)));
+}
+
 static void startBluetooth() {
     if (btSinkStarted) return;
+
+    bringUpBtController();
 
     i2s_pin_config_t pins = {
         .mck_io_num   = I2S_PIN_NO_CHANGE,
@@ -768,6 +820,8 @@ static void startBluetooth() {
     a2dpSink.start(BT_DEVICE_NAME);
     btSinkStarted = true;
     LOG_INFO("BT discoverable as: " BT_DEVICE_NAME);
+    LOG_INFO("Heap after BT start: " + String(ESP.getFreeHeap()) + " bytes, maxalloc " +
+             String(ESP.getMaxAllocHeap()));
 }
 
 static void stopBluetooth() {
@@ -1603,6 +1657,10 @@ void setup() {
 
     // Must happen before ESP-NOW comes up: the recv callback starts pushing into
     // this buffer as soon as the radio is listening.
+    if (psramFound()) {
+        uint8_t *ext = (uint8_t *)ps_malloc(JITTER_BUF_SIZE);
+        if (ext) jStorage = ext;
+    }
     if (!jbuf.init(jStorage, JITTER_BUF_SIZE)) {
         LOG_ERROR("Jitter buffer init failed — JITTER_BUF_SIZE must be a power of two");
     }
