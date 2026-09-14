@@ -104,6 +104,17 @@ It is stored in NVS rather than RTC memory, unlike bench mode, because it is a
 power blinks. Bench mode staying volatile is equally deliberate — a board left in
 a test mode by a power cut is a trap.
 
+**Amended 2026-09-14, first WROVER on the bench:** BT and WiFi together works
+as designed — `SERVER capable`, ESP-NOW up, BT discoverable — with 15.5 KB of
+internal DRAM free in DISCOVERY. That is the first real number for the "BT +
+WiFi together" heap question and it is smaller than the ~80 KB reasoning above
+implies for a board with PSRAM: PSRAM absorbs large allocations, but the WiFi
+static RX buffers, the BT controller and every allocation below the
+always-internal threshold still come out of DRAM. Whether it survives a phone
+actually streaming is the open item in `TODO.md`. Also learned the hard way:
+coexistence forbids `WIFI_PS_NONE` on a BT node (README gotcha), so a BT node
+runs WiFi with modem sleep on, while a BT-free node still turns it off.
+
 **What would change this:** shrinking the mesh's RAM footprint far enough that
 BT and WiFi coexist without PSRAM — unlikely, the 80 KB is the WiFi driver's own
 buffers, and the static RX buffers cannot be moved to PSRAM because they must be
