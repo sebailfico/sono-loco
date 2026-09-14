@@ -62,6 +62,7 @@ Phone ──BT A2DP──► ESP32 ──I2S──► PCM5102 ──► TPA3116 
                      └── 4-tap FIR, then downsample 44.1kHz stereo → 22.05kHz mono
                                 │
                            ESP-NOW broadcast (200-byte packets, ~220/sec, 44 KB/s)
+                           stamped with this household's 16-bit mesh id
                                 │
                      ┌──────────┴──────────┐
                      ▼                     ▼
@@ -105,6 +106,14 @@ duplicating or dropping one mono sample at a time, roughly one edit a second at
 that offset. Measured over 600 s each way on the same boards: zero underruns
 corrected, and the correction rate agrees with the uncorrected drift to within
 1.4 ppm. See `CHANGELOG.md` and D11.
+
+**Meshes are separated by a mesh id**, as of 2026-09-02: every packet carries a
+16-bit id derived from a mesh name, and a client ignores anything that is not
+its own, so two SonoLoco installations in radio range no longer join each
+other's music. Name a mesh with `g<name>` over serial; move a node into one by
+holding BOOT for three seconds at each end, with tones on the node saying what
+happened. See D12 — and note none of it has been measured on hardware yet: two
+meshes in the air, and the button itself, are both still unpressed.
 
 Where things are written down, so they stay in one place each:
 
@@ -222,6 +231,40 @@ build_flags =
 Everything else is in `esp32-code/include/config.h` and is the same on every
 node — most importantly `ESPNOW_CHANNEL`, which **must** match across the mesh.
 
+The **mesh name** is the exception to both: it is per household rather than per
+node or per build, so it lives in NVS on the board and `config.h` only supplies
+the factory default (`MESH_NAME`). Every packet carries the 16-bit id it hashes
+to, and a client ignores every packet that is not its own — which is what keeps
+your neighbour's three speakers out of your stream.
+
+Naming a mesh needs a console, so it is what the first server gets set up with:
+
+```
+g Casa Rossi     # over serial: name this mesh, stored in NVS
+```
+
+Moving a node into a mesh afterwards needs no console and no typing — it is a
+**three-second hold of the BOOT button at each end**, and a node on a wall is
+exactly the case that has to work:
+
+1. Hold BOOT on the server whose mesh you are joining. It beeps twice and
+   *offers* its mesh for 60 s.
+2. Hold BOOT on the node you are moving. It beeps twice, adopts the offer, and
+   plays the rising three-note tone when it has joined. A falling tone means the
+   window closed with no offer heard — press again.
+
+Both presses are required. A node that adopted whatever stream it happened to
+hear could be captured by a neighbour who simply played music during the window;
+an offer has to be made by somebody standing at the other mesh. The same two
+halves are on the serial console as `o` (offer) and `p` (listen), which is how
+you move a *server* into somebody else's mesh — the button on a server-capable
+node always offers.
+
+Nodes only hear each other if their ids match, and a mismatch looks exactly like
+being out of range — `mesh=` on the identify line and `fgn=` (foreign packets
+dropped) in the status line are how you tell the two apart. See D12 in
+`docs/decisions.md`.
+
 ### Build & Upload
 
 There is **one build per instruction set** — three of them — and one environment
@@ -314,6 +357,9 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `r` | print a telemetry line now |
 | `d` | toggle clock-drift correction (on by default) |
 | `c` | toggle client-only mode and reboot — the node then never starts Bluetooth, which is what lets a WROOM be a mesh client. Kept in NVS, so it survives a power cut |
+| `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once — no reboot, because nothing about the id is decided at boot |
+| `p` | listen for 60 s and join the mesh that offers itself — the speaker half of pairing. Same as a three-second BOOT hold on a node that cannot be a server |
+| `o` | offer this mesh for 60 s, so a listening node can join it — the server half. Same as a three-second BOOT hold on a server-capable node |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
 A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs
@@ -333,12 +379,19 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   sequence accounting (`seqtracker.h`). Pure logic, no Arduino or ESP-IDF, so it
   can be tested on a PC. This is where both of the worst bugs in this project
   lived.
+- `esp32-code/lib/mesh/` — the mesh name to mesh id derivation. Pure arithmetic
+  on a string, and in a library because two nodes disagreeing about what a name
+  hashes to produces silence with nothing in the log — the one failure mode
+  worth pinning on the host rather than chasing on a bench. See D12.
 - `esp32-code/lib/drift/` — the clock-drift controller. Decides when a client
   should duplicate or drop a sample to hold its buffer at depth; it never touches
   I2S or the ring buffer itself, which is what makes the closed loop simulable on
   a PC. See D11.
 - `esp32-code/test/test_jitter/` — host tests for the ring buffer and sequence
   accounting. Each one corresponds to a real bug or a real invariant.
+- `esp32-code/test/test_mesh/` — host tests for mesh identity, including known
+  names pinned to known ids: changing the hash would split every deployed mesh
+  silently, so it should take a failing test to do it.
 - `esp32-code/test/test_drift/` — host tests for the controller, including
   hour-long closed-loop simulations at the drift measured on these boards. The
   model is checked against the recorded 1.34 B/s slope before anything built on
@@ -390,6 +443,20 @@ Each of these was a real bug. Don't re-introduce them.
   `bool btStarted()` at global scope and the collision is a hard compile error.
 - **Role state must be cleared on every entry to DISCOVERY,** not just when leaving
   CLIENT. A stale `senderLocked` makes a node ignore every future server forever.
+- **The mesh id must be checked before the sender lock, not after.** A client
+  locks onto the first node it hears; if a neighbour's packet reaches that lock
+  before the id comparison, the node pins itself to a mesh it will then ignore
+  every packet from, and stays deaf to its own household until it next falls
+  back to DISCOVERY. Same shape as the stale-`senderLocked` bug above.
+- **A pairing beacon must be filtered out before the sequence tracker.** A
+  beacon is an audio packet with no payload and `MESH_BEACON_SEQ` in the
+  sequence field; let one reach `SeqTracker` and it computes a gap of tens of
+  thousands, charges a resync and re-arms the jitter buffer — an audible
+  interruption caused by a node that was only saying hello.
+- **Pairing is a long press while running, never a press held through a reset.**
+  BOOT is a strapping pin: held low across a reset it puts the chip into the ROM
+  download mode, where no firmware runs at all and nothing can react to the
+  button. (It is GPIO 9 on a C3 devkit and GPIO 0 on the others.)
 - **Never put two `build_flags` keys in one `platformio.ini` section.** Duplicate keys
   in a single INI section are a hard `DuplicateOptionError` — the whole project stops
   loading, not just that environment. Extend a base section instead.

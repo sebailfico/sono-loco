@@ -176,8 +176,18 @@ it hears and ignores everything else until it returns to DISCOVERY. The lock mus
 be cleared on *every* entry to DISCOVERY — a stale lock made a node ignore every
 future server permanently, which was a real bug.
 
-**What would change this:** wanting more than one independent audio zone in one
-home. That needs a group identifier in the packet header, not a peer list.
+**Amended 2026-09-02 — the group identifier now exists.** Every packet carries a
+16-bit mesh id and a client drops anything that is not its own, so two
+households in radio range no longer join each other's music. Nothing about this
+decision is undone by it: the destination is still the broadcast address, there
+is still no peer list, and the lock is still first-sender — it is now
+first-sender *within my mesh*. The mesh check runs **before** the lock, so a
+neighbour's server can never take it. See D12.
+
+**What would change this:** wanting a client to follow one *specific* node
+rather than the first one in its mesh — two servers in one household, say, one
+per floor. That is addressing, and a peer list finally becomes the honest
+answer.
 
 ---
 
@@ -348,3 +358,112 @@ the sort of thing that is invisible in the code and obvious in a 600 s run.
 whose offset exceeds the 227 ppm the controller is allowed to correct, or a
 sample rate that stops being fixed at 22.05 kHz (`TODO.md` — if A2DP negotiates
 48 kHz, the whole rate assumption changes and an SRC may be needed anyway).
+
+---
+
+## D12 — A mesh is a 16-bit id in every packet, derived from a name
+
+**Decided:** 2026-09-02. **Status:** new. Compiles and is covered by host tests;
+not yet measured on hardware with two meshes in the air at once.
+
+Two SonoLoco installations within radio range hear each other perfectly: the
+channel is fixed, the destination is the broadcast address, and a client locked
+onto whichever server it heard first (D6). Which house's music a client played
+was decided by who powered up first.
+
+Every packet now begins with a 16-bit mesh id, and a client drops a packet whose
+id is not its own before it looks at anything else.
+
+**Why a field in the header, not a peer list or a channel.** Two bytes take the
+frame from 204 to 206 of the 250 ESP-NOW allows, and cost nothing measurable at
+220 packets/s. A peer list would undo what makes this project work at all — no
+node knows about any other, so a new board just works (D6). A channel per mesh
+would separate the RF as well as the logic, which is genuinely attractive, but a
+client can then no longer sit on a fixed channel to discover and has to scan; it
+stays an open question in `TODO.md` rather than a thing done in passing.
+
+**Why a name, hashed, rather than a number.** People own the mesh, not the id:
+"our mesh is called Casa Rossi" is something a person can say, remember and type
+into a second board. The id is FNV-1a over the normalised name, folded to 16
+bits — see `lib/mesh/`. The cost is a 1-in-65536 chance that two neighbouring
+names collide, which pairing avoids entirely by copying the id off the air
+instead of deriving it.
+
+The normalisation is not cosmetic. Two nodes must agree that " Casa  Rossi " and
+"casa rossi" are the same mesh, because a disagreement is *silence with nothing
+in the log* — a client with the wrong id is indistinguishable from a client out
+of range. That is why the derivation lives in a library with host tests instead
+of inline in `main.cpp`, and why the tests pin known names to known ids: a
+future change to the hash would split every deployed mesh silently, upgraded
+boards computing one id from the stored name and not-yet-upgraded ones another.
+
+**Why NVS, and why that is a stronger argument than it was for client-only
+mode.** The mesh id is per *household*, so unlike `ROOM_NAME` (D8) it cannot
+live in `platformio.ini`: it has to be settable on a board somebody already owns
+and has already screwed to a wall. It also has to survive a power cut, because a
+node that came back on the factory default would silently rejoin whichever
+neighbour is still on that default.
+
+**The default is shared, deliberately.** A fresh set of boards all carry
+`MESH_NAME` from `config.h`, so one household still flashes and it works. Two
+households that both accept the default are in one mesh, exactly as they are
+today — the second one presses a button. Per-device random ids would isolate
+everybody out of the box and make *every* install a pairing exercise, to fix a
+problem only the second household in earshot actually has.
+
+**Pairing takes a press at each end, and adopts an id rather than a name.** Hold
+the button on a node of the mesh being joined and it *offers* itself for 60 s;
+hold the button on the node being moved and it *listens*, adopting the first
+offer it hears. Copying an id cannot land in the wrong mesh through a name
+collision, and it needs no console — which is the point, since the board it runs
+on is on a wall. The name is lost in the process (only the id travels on the
+wire), so a paired node logs `(paired)` where a named one logs its name.
+
+The first version adopted the first foreign *stream* heard, which was one press
+and a real hole: a neighbour who merely started playing music during the window
+would capture the node, and nothing about that requires them to intend it. With
+an offer required, somebody has to be standing at the other mesh pressing its
+button inside the same minute.
+
+Which half a press performs follows the node's role rather than asking: a node
+that can be a server offers the mesh, a speaker joins one. That matches where
+the two boxes physically are, and the serial console keeps both halves (`o` and
+`p`) for the cases the button cannot express — moving a server into another
+mesh, most obviously. With one caveat there: a node actively serving a phone
+does not listen at all, because the receive path bails out in SERVER mode
+(D6). Move such a node by naming its mesh with `g`, or disconnect the phone
+first.
+
+**A beacon is an audio packet with no payload**, carrying `MESH_BEACON_SEQ` in
+the sequence field and the mesh id in the header, which is the entire message.
+Reusing the audio layout meant the wire format did not have to break twice, and
+it goes out through the existing queue and send gate rather than a second
+transmit path that could rot. Both halves of the test matter: length alone would
+promote any truncated frame to a beacon, and the magic alone would make one
+audio packet in 65536 — a false beacon every five minutes at 220 packets/s — an
+invitation to join a stranger. A beacon must also be dropped *before* the
+sequence tracker sees it, or its sequence number reads as a stream restart.
+
+**The tones are not decoration.** Two beeps when a window opens, the rising
+three-note tone on adoption, a falling one when a window closes empty. Pairing
+is used by somebody holding a button on a box with no screen and no console, and
+without them the button is indistinguishable from a button that does nothing.
+They play only in DISCOVERY: in CLIENT mode the I2S driver is being fed by the
+jitter buffer, and on a SERVER the A2DP task owns it — the conflict `TODO.md`
+already tracks for the connect and disconnect tones.
+
+It is a long press **while running**, never a press held through a reset. The
+BOOT button these devkits use is a strapping pin — held across a reset it puts
+the chip into the ROM download mode, where none of this firmware runs at all.
+
+**This is isolation, not privacy.** ESP-NOW encrypts only unicast frames, with a
+per-peer LMK; a broadcast frame cannot be encrypted at all, which is the
+topology this design rests on. So the id keeps a neighbour's *player* out, not a
+determined neighbour's *receiver* — anyone running modified firmware can still
+listen. Fixing that means encrypting the payload under a mesh-derived key, on a
+client that is already doing I2S, drift correction and a radio.
+
+**What would change this:** more than 65,536 plausible households in one
+building (it will not be), a need for actual confidentiality rather than
+separation, or a decision to give each mesh its own channel — at which point the
+id stays but stops being the only thing keeping the two apart.

@@ -32,6 +32,12 @@ What to read in its output:
   reproduce, and nothing else on screen would reveal it. Rerun with `-Flash` if
   a node does not match the tree, and commit before measuring anything you intend
   to record. See D10.
+- **Mesh line** — each node prints the `mesh=` id it is using, and the harness
+  warns when they disagree. Take that warning seriously before reading anything
+  else: nodes on different meshes ignore each other by design, and the result is
+  a client reporting `rx=0`, which looks exactly like a client out of range or a
+  source that never started. `fgn=` in the telemetry is the tell — packets heard
+  and dropped as somebody else's.
 - **Stream table** — `lost`, `ovf`, `und`, `dup`, `rsy` should all be 0. `rx`
   should be within a few packets of the source's `tx`.
 - **Source line** — packets per second should be 220.5. `qfull`, `senderr` and
@@ -65,6 +71,42 @@ What to read in its output:
 
 Drift precision improves with run length. 45 s is enough to see whether audio
 flows; use 600 s or more before trusting a ppm figure.
+
+## Checking mesh isolation
+
+Two households in one building is the case the mesh id exists for (D12), and it
+takes three boards to test: two in one mesh, one pretending to be next door.
+
+1. Put the source and one client on a mesh of their own. In a serial monitor on
+   each, type `gcasa rossi` and confirm the `[MESH] mesh=6F59 name=casa rossi`
+   line that comes back matches on both.
+2. Leave the third board on the default (`gsonoloco` restores it — the reply
+   should read `mesh=CF09`).
+3. Run the harness as usual. It will warn that the nodes are on different
+   meshes, which is the point of this run rather than a problem with it.
+
+**Pass:** the matched pair is as clean as a normal run — zero
+`lost/ovf/und/dup/rsy` — and the odd node out reports `rx=0` with `fgn=` climbing
+at roughly 220/s. A stationary `fgn=` on that node means it is not hearing the
+source at all, which is a different fault and not evidence of isolation.
+
+Then put it back with `gcasa rossi` and watch it join within a few seconds, no
+reboot.
+
+To test pairing instead of typing the name, remember it needs a press at **both**
+ends: `o` on a node already in the mesh (or a three-second BOOT hold on a
+server-capable one) to offer it, then `p` on the node being moved (or a
+three-second hold there — GPIO 9 on a C3, GPIO 0 on the others). Expect
+`[MESH] offering mesh=…` on one and `[MESH] paired mesh=…` on the other within a
+second, plus two beeps at each press and the rising tone on the node that
+joined, if it has a DAC. Power-cycle it afterwards to confirm the adopted id
+survived: surviving a power cut is the whole reason it is in NVS and not RTC
+memory.
+
+Worth checking deliberately, since it is the property the two presses exist for:
+with **no** offer open, a listening node must ignore a foreign stream entirely.
+Start the source on another mesh, press `p` on the odd node out, and confirm it
+reports `listening closed, no offer heard` 60 s later rather than joining.
 
 ## Manual walkthrough
 

@@ -344,9 +344,9 @@ foreach ($n in $nodes) {
 
 foreach ($n in $nodes) {
     if ($n.Ident) {
-        Write-Host ("  {0}  {1,-14} fw={2,-22} psram={3,-8} espnow={4} bench={5}  {6}" -f `
+        Write-Host ("  {0}  {1,-14} fw={2,-22} psram={3,-8} espnow={4} bench={5} mesh={6}  {7}" -f `
             $n.Port, $n.Ident['chip'], $n.Ident['fw'], $n.Ident['psram'], $n.Ident['espnow'],
-            $n.Ident['bench'], $n.Ident['mac'])
+            $n.Ident['bench'], $n.Ident['mesh'], $n.Ident['mac'])
         if ($n.Ident['espnow'] -ne '1') {
             Write-Warning "$($n.Port) has ESP-NOW inactive -- it cannot take part"
         }
@@ -386,6 +386,28 @@ foreach ($n in $nodes) {
 }
 if ($fwSeen.Keys.Count -gt 1) {
     Write-Warning "Nodes disagree on firmware: $($fwSeen.Keys -join ', ') -- a mesh result across mixed builds means little"
+}
+
+# ---------------------------------------------------------------------------
+# 3c. Mesh identity
+# ---------------------------------------------------------------------------
+# Two nodes hear each other only if their mesh ids match, and a mismatch is
+# invisible in every other number this harness collects: the client reports no
+# packets at all, exactly as it would if it were out of range or if the source
+# had never started. One comparison here beats diagnosing that after a 600 s run.
+
+$meshSeen = @{}
+foreach ($n in $nodes) {
+    $mesh = $null
+    if ($n.Ident) { $mesh = $n.Ident['mesh'] }
+    if (-not $mesh) {
+        Write-Warning "$($n.Port) reports no mesh id -- its firmware predates mesh isolation; reflash with -Flash"
+        continue
+    }
+    $meshSeen[$mesh] = $true
+}
+if ($meshSeen.Keys.Count -gt 1) {
+    Write-Warning "Nodes are on different meshes ($($meshSeen.Keys -join ', ')) -- they cannot hear each other. Put them on one with the 'g<name>' command, or pair them, and rerun."
 }
 
 # ---------------------------------------------------------------------------

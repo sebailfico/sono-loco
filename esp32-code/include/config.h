@@ -49,11 +49,11 @@
 // differently; these are only defaults.
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
-// Provisional, and deliberately conservative: free on both an S3 devkit and a
-// C3 devkitm-1, clear of the strapping pins (0/2/3/8/9/45/46), the native USB
-// pair (18/19 on a C3, 19/20 on an S3), UART0, and the flash and octal-PSRAM
-// banks (26-37 on an S3). Nothing is soldered to either board yet -- when a DAC
-// goes on, confirm these against that board's pinout rather than trusting them.
+// Free on both an S3 devkit and a C3 devkitm-1, clear of the strapping pins
+// (0/2/3/8/9/45/46), the native USB pair (18/19 on a C3, 19/20 on an S3),
+// UART0, and the flash and octal-PSRAM banks (26-37 on an S3).
+// Confirmed 2026-08-26: wired and working on a C3 -- bench mode's tone was
+// audible on its DAC. Still provisional on the S3, which has no DAC yet.
 #define I2S_BCK_PIN  4
 #define I2S_WS_PIN   5
 #define I2S_DATA_PIN 6
@@ -79,6 +79,62 @@
 // own rate — there is deliberately no separate TONE_SAMPLE_RATE to drift from it.
 #define TONE_AMPLITUDE   500     // peak amplitude of a 16-bit tone sample
 #define TONE_FADE_MS     5       // ramp in/out, kills the click at tone edges
+
+// ============================================================================
+// Mesh Identity — which nodes belong to whose household
+// ============================================================================
+// Every packet carries a 16-bit mesh id, derived from a human-typed mesh name,
+// and a client ignores anything that is not its own. Without it two SonoLoco
+// installations in radio range join each other's music: the radio is shared,
+// the channel is fixed and the destination is the broadcast address, so a
+// neighbour's server is indistinguishable from yours. See D12 and lib/mesh/.
+//
+// This is NOT ROOM_NAME's counterpart in platformio.ini (D8). ROOM_NAME is per
+// node, so it belongs to a build environment; the mesh name is per *household*
+// and has to be settable on a board somebody already owns, so the live value
+// lives in NVS and is set over serial ('g') or by pairing ('p' / a long press).
+// What is below is only the factory default, used until a node is told
+// otherwise — which means two households that both accept the default are in
+// the same mesh, exactly as they are today. Pairing is what separates them.
+#ifndef MESH_NAME
+#define MESH_NAME "sonoloco"
+#endif
+
+// Long-press-to-pair button. The devkit BOOT button on every board here, since
+// it is the only one that exists; set to -1 to disable the button entirely and
+// pair over serial only.
+//
+// It is a long press *while running*, never "hold it down at boot": BOOT is a
+// strapping pin, and holding it through a reset puts the chip into the ROM
+// download mode instead of into anything this firmware could react to.
+// Guarded, so -DMESH_PAIR_BUTTON_PIN=… in platformio.ini overrides it cleanly
+// rather than colliding with the definition below.
+#ifndef MESH_PAIR_BUTTON_PIN
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+// C3 devkitm-1 wires BOOT to GPIO 9; the classic devkits and the S3 use GPIO 0.
+#define MESH_PAIR_BUTTON_PIN  9
+#else
+#define MESH_PAIR_BUTTON_PIN  0
+#endif
+#endif
+
+// How long the button must be held to start pairing. Long enough that it cannot
+// be confused with the reset-adjacent fumbling that BOOT normally sees.
+#define MESH_PAIR_HOLD_MS     3000
+
+// How long a press stays live, at both ends.
+//
+// Pairing takes two presses: one on a node of the mesh being joined, which then
+// offers itself, and one on the node being moved, which listens. Both windows
+// have to be open at the same moment, so this is the time to walk from one to
+// the other -- and it is also why a neighbour cannot capture a node by playing
+// music at it. They would have to be holding their button inside this window.
+#define MESH_PAIR_WINDOW_MS   60000
+
+// How often an offering node repeats its beacon, ms. It is 5/s against the
+// stream's 220/s, so it costs nothing measurable even if a server offers while
+// it is playing; the listening node adopts on the first one it hears.
+#define MESH_BEACON_INTERVAL_MS  200
 
 // ============================================================================
 // ESP-NOW Mesh
