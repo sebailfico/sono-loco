@@ -166,8 +166,12 @@
 // At 22050Hz mono 16-bit: 200 bytes = ~4.5ms of audio per packet (~220 pkt/s)
 #define ESPNOW_PAYLOAD_SIZE  200
 
-// FreeRTOS queue depth for the ESP-NOW TX task (packets buffered before dropping)
-#define ESPNOW_TX_QUEUE_DEPTH  32
+// FreeRTOS queue depth for the ESP-NOW TX task (packets buffered before dropping).
+// FreeRTOS queue storage is internal DRAM, ~210 bytes a slot. 32 was ~6.7 KB
+// for a queue whose qfull counter has never left zero: the A2DP callback hands
+// over a chunk or two of packets at a time and the TX task drains at radio
+// speed. 8 is 36 ms of audio. If qfull ever climbs, this is where to look.
+#define ESPNOW_TX_QUEUE_DEPTH  8
 
 // Hold ESP-NOW TX for this long after BT audio starts, so the A2DP pipeline has
 // settled before the radio starts competing with it.
@@ -181,8 +185,12 @@
 #define WIFI_STATIC_RX_BUFFERS   10
 
 // Transmit side is gated on the send-complete semaphore, so at most one frame is
-// ever in flight. 4 is plenty; the default 32 would just waste heap.
-#define WIFI_DYNAMIC_TX_BUFFERS  4
+// ever in flight. This core builds the WiFi driver with *static* TX buffers
+// (CONFIG_ESP32_WIFI_STATIC_TX_BUFFER=y, 8 of them, ~1.6 KB each, allocated at
+// init in internal DRAM); the dynamic count it used to set here was a field the
+// driver never reads. 2 is one in flight and one being filled. Found while
+// chasing the WROVER's BT-connect crash, 2026-09-14.
+#define WIFI_STATIC_TX_BUFFERS   2
 
 // ============================================================================
 // Audio Downsampling (SERVER → CLIENT over ESP-NOW)
