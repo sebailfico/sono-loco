@@ -541,13 +541,13 @@ static void setupESPNow() {
     // - WROOM (no PSRAM, BT enabled)  → skip WiFi; acts as BT speaker only
     // - S3    (PSRAM,  BT disabled)   → init WiFi; acts as ESP-NOW client
     // - WROVER (PSRAM, BT enabled)    → init WiFi; fully interchangeable
-#ifdef ENABLE_BLUETOOTH
     // Bench mode never starts Bluetooth, so there is no coexistence problem and
     // no reason to refuse WiFi — this is what lets a WROOM be tested at all.
     // The guard is about BT and WiFi running *together*. Bench mode and
     // client-only mode both mean Bluetooth is never started, so neither needs
     // PSRAM to run the mesh — which is exactly what makes a WROOM a usable
     // client rather than a standalone speaker. See the D3 amendment.
+#ifdef ENABLE_BLUETOOTH
     const bool btWillStart = btAllowed();
     if (btWillStart && ESP.getPsramSize() == 0) {
         LOG_WARN("No PSRAM detected — WiFi/ESP-NOW disabled to protect BT heap.");
@@ -558,6 +558,8 @@ static void setupESPNow() {
     if (!btWillStart && ESP.getPsramSize() == 0) {
         LOG_INFO("No PSRAM, but Bluetooth is off this boot, so ESP-NOW is safe here.");
     }
+#else
+    const bool btWillStart = false;   // no BT Classic on this chip
 #endif
 
     // esp_wifi_init() needs the netif layer and a default event loop in place.
@@ -586,7 +588,19 @@ static void setupESPNow() {
 
     // Modem sleep parks the radio between beacons and makes ESP-NOW reception
     // miss packets. A continuous audio stream needs the receiver always on.
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    //
+    // But NOT on a node that runs Bluetooth. The IDF coexistence layer requires
+    // WiFi modem sleep while the BT controller is enabled, and it enforces that
+    // with abort(), not an error code. Measured on the first WROVER (2026-09-14):
+    // PS_NONE set here, then BT started  -> abort() in coex_core_enable, boot loop;
+    // BT started, then PS_NONE set       -> abort() in pm_set_sleep_type, boot loop.
+    // So it is not an ordering question -- a BT node keeps the IDF default
+    // (WIFI_PS_MIN_MODEM). Whether that actually costs a BT node any ESP-NOW
+    // packets is untested: modem sleep is documented to engage only while
+    // associated with an AP, which this mesh never is. See TODO.
+    if (!btWillStart) {
+        esp_wifi_set_ps(WIFI_PS_NONE);
+    }
 
     // Fixed channel — must match on all nodes
     esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
@@ -1731,6 +1745,7 @@ void loop() {
         } else if (currentMode == MODE_SERVER) {
             LOG_INFO(String("Status: mode=") + modeStr +
                      " heap=" + String(ESP.getFreeHeap()) +
+                     " maxalloc=" + String(ESP.getMaxAllocHeap()) +
                      " qfull=" + String(txQueueFull) +
                      " senderr=" + String(txSendErr) +
                      " radiofail=" + String(txRadioFail));
@@ -1740,6 +1755,7 @@ void loop() {
             // correctly refuses looks exactly like no stream at all otherwise.
             LOG_INFO(String("Status: mode=") + modeStr +
                      " heap=" + String(ESP.getFreeHeap()) +
+                     " maxalloc=" + String(ESP.getMaxAllocHeap()) +
                      " mesh=" + String(meshId, HEX) +
                      " fgn=" + String(rxForeign));
         }

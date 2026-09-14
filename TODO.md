@@ -17,8 +17,8 @@ uncorrected baseline.
 The 41 host tests also pass on-device (`pio test -e esp32dev`): 23 for the
 jitter buffer and sequence accounting, 18 for the clock-drift controller.
 
-Boards on the bench: a WROOM (COM8), an ESP32-C3 (COM10), and an ESP32-S3
-(COM9) — the S3 is back; what looked like a hardware dropout was a leftover
+Boards on the bench: a WROOM (COM8), an ESP32-C3 (COM10), an ESP32-S3
+(COM9) and, since 2026-09-14, a WROVER-E (COM12) — the S3 is back; what looked like a hardware dropout was a leftover
 on-device unit-test binary left flashed from an earlier `pio test -e esp32s3`
 run, not a fault. Two of the three now have a DAC wired: the WROOM (was
 already working) and, as of today, the C3 — bench mode's tone is confirmed
@@ -28,15 +28,33 @@ audible on its output. The S3 still has no DAC soldered.
 reliability" below; each pair is clean alone.
 
 Still unproven: the Bluetooth server path, i.e. real audio from a phone
-forwarded to clients. That needs a WROVER, which nobody here has yet.
+forwarded to clients. The WROVER that can do it arrived 2026-09-14 and boots
+into SERVER capable (after one coexistence fix, see `CHANGELOG.md`); the manual
+walkthrough has not been run yet.
 
 ---
 
 ## Blocking
 
-- [ ] **Buy a WROVER.** It is the only module that can be a server (BT Classic +
-      PSRAM), and without one the A2DP half of the system cannot be tested at
-      all. The WROOM on the bench has no PSRAM; the S3 has no BT Classic.
+- [ ] **Run the manual Bluetooth walkthrough on the WROVER** (`docs/bench-test.md`,
+      steps 2–3): phone → `SonoLoco-WROVER` → a client. This is the one path
+      the project exists for and it has never carried audio. Watch `heap=` and
+      `maxalloc=` on the SERVER status line while streaming: the node sits at
+      **15.5 KB of internal DRAM free** in DISCOVERY with BT + WiFi up, before
+      a phone has connected or the SBC decoder has allocated anything. If that
+      goes to zero the fix is in the memory options (e.g.
+      `CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST`, not set in the Arduino core's
+      sdkconfig) or the WiFi buffer counts in `config.h`, not in `main.cpp`.
+- [ ] **Measure whether modem sleep costs a BT node any ESP-NOW packets.** A
+      node that runs Bluetooth now keeps the IDF default `WIFI_PS_MIN_MODEM`,
+      because `WIFI_PS_NONE` aborts the coexistence layer (README gotcha). The
+      comment in `setupESPNow()` says modem sleep makes reception miss
+      packets, but that was never measured, and IDF documents modem sleep as
+      engaging only while associated with an AP — which this mesh never is. The
+      test: WROVER in *normal* mode (not bench — bench never starts BT, so it
+      gets `PS_NONE` like everyone else) as a CLIENT of a bench source, 600 s,
+      compare `lost`/`und` against the baseline. If it costs packets, the
+      next thing to try is `esp_now_set_wake_window()`.
 - [ ] **Prepare a known test audio sample to stream over Bluetooth into the
       server board**, instead of testing the still-unproven BT path against
       whatever happens to be on someone's phone. Bench mode already solved

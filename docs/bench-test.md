@@ -120,9 +120,9 @@ For the **automated** mesh test: two or more boards on this PC, any mix. Bench
 mode does not use Bluetooth, so a WROOM counts.
 
 For the **manual** test of the Bluetooth path: at least one **WROVER**, plus a
-phone. Neither board currently on the bench can be an A2DP server — the WROOM has
-no PSRAM (D3) and the S3 has no BT Classic — so that half cannot be tested until
-a WROVER is bought. This is the outstanding hardware purchase in `TODO.md`.
+phone. The WROOM cannot be an A2DP server (no PSRAM, D3) and neither can the S3
+or C3 (no BT Classic). A WROVER-E has been on COM12 since 2026-09-14 and boots
+`SERVER capable`; the walkthrough below has not yet been run against it.
 
 A PCM5102 on each node if you want to hear anything; the counters work without
 one.

@@ -95,8 +95,11 @@ playing, **132,069 packets over 600 s with zero lost, overflowed, underrun,
 duplicated or resynced**. Run it yourself with `./tools/bench-mesh.ps1 -Flash`.
 
 **The Bluetooth server path is still unproven** — audio taken from a phone and
-forwarded to clients. No board on the bench can do it: the WROOM has no PSRAM and
-the S3 has no BT Classic, so that needs a WROVER.
+forwarded to clients. As of 2026-09-14 there is finally a board that can do it: a
+WROVER-E on COM12, which boots into `SERVER capable`, brings up ESP-NOW and BT
+together and sits in DISCOVERY with 15.5 KB of internal heap free. The first
+thing that boot found was a boot loop (see the gotcha on `WIFI_PS_NONE`); the
+phone-to-client walkthrough in `docs/bench-test.md` has not been run yet.
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the
@@ -273,11 +276,12 @@ name per board that might be plugged in:
 | Environment   | Board        | Port | Build | Role |
 |---------------|--------------|------|-------|------|
 | `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
-| `esp32wrover` | ESP32 WROVER | COM7 | `esp32_classic` | SERVER or CLIENT — the reference node. **None attached yet**, so the port is a placeholder |
+| `esp32wrover` | ESP32 WROVER-E | COM12 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 |
 | `esp32s3`     | ESP32-S3     | COM9 | `esp32s3_client` | CLIENT only (no BT Classic) |
 | `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
 
-Ports confirmed 2026-08-19 with `pio device list` and `esptool chip_id`.
+Ports confirmed with `pio device list` and `esptool chip_id` (2026-08-19; the
+WROVER on 2026-09-14).
 `tools/bench-mesh.ps1` does not depend on them — it discovers ports and
 identifies each chip at run time, so a new board needs no edit here.
 
@@ -473,6 +477,14 @@ Each of these was a real bug. Don't re-introduce them.
   `.rtc.data` is re-initialised from the image on every boot that runs the
   bootloader, so the flag reads back as zero and the node reboots into normal
   mode instead.
+- **A node that runs Bluetooth cannot turn WiFi power save off.** The IDF
+  coexistence layer requires modem sleep while the BT controller is enabled and
+  enforces it with `abort()`: `esp_wifi_set_ps(WIFI_PS_NONE)` before BT starts
+  dies in `coex_core_enable`, after BT starts it dies in `pm_set_sleep_type`
+  from the WiFi task. Either way a boot loop with no message but a backtrace.
+  Found on the first boot of the first WROVER — the WROOM never reached this
+  code because it bails before WiFi, and the S3/C3 have no BT. `setupESPNow()`
+  now only sets `WIFI_PS_NONE` on a boot that will never start Bluetooth.
 - **A `build_flags` in an `[env:...]` section replaces the parent's, it does not
   add to it.** Writing `build_flags = -DROOM_NAME='"Kitchen"'` under
   `extends = esp32_classic` silently drops `-DENABLE_BLUETOOTH` and the node

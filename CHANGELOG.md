@@ -30,6 +30,23 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **The first WROVER is on the bench (COM12, WROVER-E, 4 MB PSRAM), and the
+  server-capable boot works — after one fix.** The very first boot was a boot
+  loop: `abort()` in `coex_core_enable`, from `esp_bt_controller_enable`. The
+  IDF coexistence layer requires WiFi modem sleep while the BT controller is
+  enabled, and `setupESPNow()` had been calling `esp_wifi_set_ps(WIFI_PS_NONE)`
+  since the mesh was first written — code that no board had ever executed with
+  Bluetooth about to start, because the WROOM bails before WiFi and the S3/C3
+  have no BT. Moving the call after BT start aborts too (`pm_set_sleep_type`
+  in the WiFi task), so it is not an ordering question: `WIFI_PS_NONE` is now
+  set only on a boot that will never start Bluetooth. With that, the WROVER
+  boots `SERVER capable`, brings up ESP-NOW and BT and holds in DISCOVERY.
+  First number for the BT + WiFi heap question: **15.5 KB of internal DRAM
+  free, largest block 14.3 KB** before a phone connects (`ESP.getFreeHeap()` is `MALLOC_CAP_INTERNAL`
+  on this core, so the 4 MB of PSRAM is not in that figure). `maxalloc=` now
+  appears on the SERVER and DISCOVERY status lines as well as CLIENT, since
+  that is the node it matters on. Whether modem sleep costs a BT node any
+  ESP-NOW packets is now measurable and is in `TODO.md`.
 - **Two SonoLoco households in radio range no longer join each other's
   music.** Every ESP-NOW packet now carries a 16-bit mesh id and a client drops
   anything that is not its own, so which stream a client plays is no longer
