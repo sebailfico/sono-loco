@@ -93,6 +93,9 @@ PCM5102, notification sounds, volume.
 **The ESP-NOW mesh works**, as of 2026-08-19: a WROOM sourcing and an ESP32-S3
 playing, **132,069 packets over 600 s with zero lost, overflowed, underrun,
 duplicated or resynced**. Run it yourself with `./tools/bench-mesh.ps1 -Flash`.
+As of 2026-09-14 it works with **four clients at once** (two WROVERs, S3, C3)
+when the air is quiet; when it is not, what you see is channel 1, not the mesh
+— see `TODO.md`.
 
 **The Bluetooth server path is still unproven** — audio taken from a phone and
 forwarded to clients. As of 2026-09-14 there is finally a board that can do it: a
@@ -477,6 +480,13 @@ Each of these was a real bug. Don't re-introduce them.
   `.rtc.data` is re-initialised from the image on every boot that runs the
   bootloader, so the flag reads back as zero and the node reboots into normal
   mode instead.
+- **ESP-NOW broadcasts at 1 Mbps unless told otherwise, and at 220 packets/s
+  that is half the channel.** The default rate for ESP-NOW frames is 1 Mbps
+  DSSS with a long preamble; a 206-byte frame is ~2.2 ms of air. With
+  anything else on channel 1 the weakest receiver loses one packet in ten and
+  the strongest loses none, in bursts every board sees at the same moment,
+  which looks exactly like "clients degrade each other" until you check the
+  timestamps. `ESPNOW_PHY_RATE` sets 6 Mbps; measured, see `CHANGELOG.md`.
 - **A node that runs Bluetooth cannot turn WiFi power save off.** The IDF
   coexistence layer requires modem sleep while the BT controller is enabled and
   enforces it with `abort()`: `esp_wifi_set_ps(WIFI_PS_NONE)` before BT starts

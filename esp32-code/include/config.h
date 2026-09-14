@@ -151,7 +151,7 @@
 // winning the collisions. 6 Mbps OFDM cuts the airtime about six-fold for a
 // few dB of receiver sensitivity, which a house does not miss. Every chip on
 // the bench (ESP32, S3, C3) decodes 802.11g. Applies to what this node
-// *sends*, so it is set on every node because any node can be a source.
+// *sends*, so it is set on every node because any node can be a source. See D13.
 #define ESPNOW_PHY_RATE      WIFI_PHY_RATE_6M
 
 // Audio payload per packet (bytes). Must be ≤ 250 (ESP-NOW max).
