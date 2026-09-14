@@ -604,6 +604,12 @@ static void setupESPNow() {
 
     // Fixed channel — must match on all nodes
     esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+    // After esp_wifi_start(), per the IDF header. See ESPNOW_PHY_RATE.
+    ret = esp_wifi_config_espnow_rate(WIFI_IF_STA, ESPNOW_PHY_RATE);
+    if (ret != ESP_OK) {
+        LOG_WARN("ESP-NOW rate config failed: " + String(esp_err_to_name(ret)) + " — staying at the 1 Mbps default");
+    }
     LOG_INFO("Heap after WiFi init: " + String(ESP.getFreeHeap()) + " bytes");
 
     if (esp_now_init() != ESP_OK) {

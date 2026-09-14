@@ -142,6 +142,18 @@
 // Fixed channel — must be the same on every node.
 #define ESPNOW_CHANNEL       1
 
+// PHY rate for ESP-NOW frames. The IDF default for broadcast is 1 Mbps DSSS
+// with a long preamble, at which a 206-byte packet occupies about 2.2 ms of
+// air -- times 220.5 packets/s is roughly half the channel, on the most
+// crowded 2.4 GHz channel there is. A 600 s run with four clients on
+// 2026-09-14 lost 10.7% on the C3 and 2.2% on the S3 in multi-second bursts
+// that hit every board at the same moments, i.e. somebody else's traffic
+// winning the collisions. 6 Mbps OFDM cuts the airtime about six-fold for a
+// few dB of receiver sensitivity, which a house does not miss. Every chip on
+// the bench (ESP32, S3, C3) decodes 802.11g. Applies to what this node
+// *sends*, so it is set on every node because any node can be a source.
+#define ESPNOW_PHY_RATE      WIFI_PHY_RATE_6M
+
 // Audio payload per packet (bytes). Must be ≤ 250 (ESP-NOW max).
 // At 22050Hz mono 16-bit: 200 bytes = ~4.5ms of audio per packet (~220 pkt/s)
 #define ESPNOW_PAYLOAD_SIZE  200
