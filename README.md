@@ -280,6 +280,7 @@ name per board that might be plugged in:
 |---------------|--------------|------|-------|------|
 | `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
 | `esp32wrover` | ESP32 WROVER-E | COM12 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 |
+| `esp32wrover2` | ESP32 WROVER-E + DAC | COM13 | `esp32_classic` | Same binary, second name so a phone can tell the two apart |
 | `esp32s3`     | ESP32-S3     | COM9 | `esp32s3_client` | CLIENT only (no BT Classic) |
 | `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
 
