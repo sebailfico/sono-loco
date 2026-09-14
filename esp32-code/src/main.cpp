@@ -378,6 +378,10 @@ static unsigned long     audioStartMs = 0;       // when BT audio last started
 // at that rate causes the very dropouts it would be reporting.
 static volatile uint32_t txQueueFull  = 0;
 static volatile uint32_t txSendErr    = 0;
+// Frames handed to the radio, from whichever source (A2DP or the bench tone).
+// The SERVER status line prints it: without it there was no way to tell a
+// server that decodes and plays locally from one that also broadcasts.
+static volatile uint32_t txSent       = 0;
 static volatile uint32_t txRadioFail  = 0;
 
 // --- RX (CLIENT mode) ---
@@ -440,6 +444,8 @@ static void espnowTxTask(void *) {
         if (err != ESP_OK) {
             txSendErr++;
             xSemaphoreGive(txDone);   // no callback will come; release the gate
+        } else {
+            txSent++;
         }
     }
 }
@@ -1810,6 +1816,7 @@ void loop() {
             LOG_INFO(String("Status: mode=") + modeStr +
                      " heap=" + String(ESP.getFreeHeap()) +
                      " maxalloc=" + String(ESP.getMaxAllocHeap()) +
+                     " tx=" + String(txSent) +
                      " qfull=" + String(txQueueFull) +
                      " senderr=" + String(txSendErr) +
                      " radiofail=" + String(txRadioFail));

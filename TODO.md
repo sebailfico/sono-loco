@@ -35,15 +35,62 @@ walkthrough has not been run yet.
 
 ## Blocking
 
-- [ ] **Run the manual Bluetooth walkthrough on the WROVER** (`docs/bench-test.md`,
-      steps 2–3): phone → `SonoLoco-WROVER` → a client. This is the one path
-      the project exists for and it has never carried audio. Watch `heap=` and
-      `maxalloc=` on the SERVER status line while streaming: the node sits at
-      **15.5 KB of internal DRAM free** in DISCOVERY with BT + WiFi up, before
-      a phone has connected or the SBC decoder has allocated anything. If that
-      goes to zero the fix is in the memory options (e.g.
-      `CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST`, not set in the Arduino core's
-      sdkconfig) or the WiFi buffer counts in `config.h`, not in `main.cpp`.
+- [ ] **A server streaming over Bluetooth loses a fifth of its ESP-NOW frames
+      at the radio.** This is the whole product's path, first exercised on
+      2026-09-14 evening (phone → WROVER2 → WROVER1 with a MAX98357A), and it
+      is what the audio "laggy, crackly" verdict was. Three logs recorded
+      together (`logs/server-20260914-231730-COM13.log`, `client-…-COM12.log`, `air-…-ch11.log`):
+      - server: `tx=` climbing **~215/s**, `senderr=0 radiofail=0` — the
+        driver reports every frame sent. Also 2.5% below the 220.5/s that
+        44.1 kHz implies, so the A2DP side is losing a little too.
+      - air monitor on channel 11, 30 cm away at -24 dBm: **~170
+        ESP-NOW frames/s**. It saw 219–221 of 220.5 from a bench source that
+        afternoon, so it is not the monitor.
+      - client: **rx ~153/s, `lost` 24%**, `und` every second, "Jitter buffer
+        ready — starting I2S" 144 times in 150 s. A gap every few packets is
+        the crackle; a 90 ms prefill after each re-arm is the lag.
+      Nothing else changed between the clean 0-loss channel-11 bench run and
+      this one except that the source's BT radio was streaming A2DP. That is
+      the BT/WiFi coexistence cost the "Bandwidth" item said needed a WROVER
+      to measure: the arbiter lets BT have the radio, WiFi frames get aborted
+      or mangled, and the ESP-NOW send callback still reports success for a
+      broadcast. Things to try, cheapest first, each measured the same way
+      (server `tx=`, monitor `espnow=`, client `rx=`/`lost=`):
+      1. `esp_coex_preference_set(ESP_COEX_PREFER_WIFI)` before BT starts
+         (IDF 4.4 API). Expect fewer lost ESP-NOW frames and more lost A2DP
+         frames; the server's local output will say whether the phone side
+         still holds. `ESP_COEX_PREFER_BALANCE` is today's default.
+      2. **Fewer frames.** The arbiter cost is per WiFi transmission, not per
+         byte: 250-byte payloads are 176/s instead of 220; IMA ADPCM at
+         today's 22.05 k mono is **55/s** — four times fewer radio hand-offs
+         for the same audio. This moves the ADPCM item from "nice" to "the
+         fix", and it is `lib/`-shaped with host tests. Do mono ADPCM before
+         stereo ADPCM: stereo at 44.1 k puts the count straight back to 220.
+      3. If neither is enough: a **two-chip server** — one ESP32 is the A2DP
+         sink and plays locally, hands PCM over I2S to a second chip (a C3
+         is €2) that only does ESP-NOW. No coexistence at all, at the cost of
+         one module per server. Record the decision in `docs/decisions.md`
+         if it comes to that; D3 already says what would change it.
+      Also confirm on which output the crackle was heard: WROVER2's own TPA
+      (then BT is losing frames too) or the clients' MAX98357As (then it is
+      the 24%).
+- [ ] **The MAX98357A boards have not been heard yet.** WROVER1 (COM12) and
+      the S3 (COM9) are wired to them. In the first 90 s window nothing was
+      being received; in the last one WROVER1 was receiving and playing (24%
+      loss). Whether sound came out of it is not recorded. Cheapest proof:
+      bench mode, WROVER2 as source (`-Source COM13`), the 6000-amplitude
+      tone is unmissable. The S3's I2S pins 4/5/6 have never driven a DAC.
+- [ ] **Tones on every board, and loud enough for the amp they are on.** The
+      user wants the startup tone on every node, DAC or not, BT or not — a
+      client-only build plays nothing at boot today because the startup tone
+      sits under `ENABLE_BLUETOOTH` on the old assumption that only BT nodes
+      have a DAC. And `TONE_AMPLITUDE` 500 (-36 dBFS, chosen for the TPA's
+      gain) is under a milliwatt into a MAX98357A at 9 dB. Plan: startup tone
+      unconditional (it needs the tone I2S init, which is compiled on every
+      build); `TONE_AMPLITUDE` behind `#ifndef` so `platformio.ini` can set
+      `-DTONE_AMPLITUDE=4000` on the MAX98357A nodes (`esp32wrover`,
+      `esp32s3`), the way I2S pins already can. A short "joined the mesh"
+      tone on entering CLIENT would fit the same mechanism.
 - [ ] **Measure whether modem sleep costs a BT node any ESP-NOW packets.** A
       node that runs Bluetooth now keeps the IDF default `WIFI_PS_MIN_MODEM`,
       because `WIFI_PS_NONE` aborts the coexistence layer (README gotcha). The
@@ -239,8 +286,10 @@ proof and polish.
 
 - [ ] 44 KB/s of ESP-NOW while BT Classic shares the same radio is thin. IMA
       ADPCM (4:1, cheap) would bring it to ~11 KB/s. This is also what would buy
-      back the headroom to revisit D5. Do the bench test first — measure whether
-      bandwidth is actually the binding constraint before optimising it.
+      back the headroom to revisit D5. **Measured 2026-09-14 evening: the
+      radio is the binding constraint the moment BT streams** — see the first
+      "Blocking" item. What matters is frame *count*, so ADPCM's 55 frames/s
+      is the point, not its bytes.
 
       Half-measured. `./tools/bench-mesh.ps1 -Flash -Duration 300` (v0.2.0-5-
       g9c371f9, clean tree, WROOM on COM8 + ESP32-C3 on COM10) shows pure
@@ -254,9 +303,8 @@ proof and polish.
       Bluetooth — that's what lets a WROOM take part at all (D3) — so this
       measured zero airtime contention because there was none to measure.
       Whether BT Classic actually stealing airtime from ESP-NOW degrades the
-      client is still open, and needs a WROVER sourcing real A2DP audio while
-      ESP-NOW streams to a client at the same time. Same hardware gap as "Buy
-      a WROVER" above — still blocking, still the only way to test this.
+      client is now answered: yes, ~20% of frames at the source. Numbers and
+      the plan are under "Blocking".
 
 ### Audio quality
 
