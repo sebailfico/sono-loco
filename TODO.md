@@ -7,12 +7,10 @@ file previously carried all of it and the open list got lost inside the done one
 ## Current state (2026-09-14)
 
 **The ESP-NOW mesh path is proven on hardware, and so is clock-drift
-correction**, isolated pair by isolated pair: WROOM+C3 and WROOM+S3 each PASS
-clean 600 s runs with zero lost/ovf/und/dup/rsy and drift held by correction.
-Full numbers in `CHANGELOG.md` (v0.2.0) and today's re-measurements in the
-"Multi-client reliability" item below. Reproduce with
-`./tools/bench-mesh.ps1 -Flash -Duration 600`, and add `-NoDrift` for the
-uncorrected baseline.
+correction**: WROOM sourcing to four clients, 600 s, zero lost on the S3 and
+C3 and drift held on all four. Full numbers in `CHANGELOG.md`. Reproduce with
+`./tools/bench-mesh.ps1 -Duration 600 -Source COM8` (see `docs/bench-test.md`
+for why not `-Flash`), and add `-NoDrift` for the uncorrected baseline.
 
 The 41 host tests also pass on-device (`pio test -e esp32dev`): 23 for the
 jitter buffer and sequence accounting, 18 for the clock-drift controller.
@@ -24,8 +22,9 @@ COM12 WROVER have none. The WROOM's auto-reset into download mode has become
 unreliable (see "Bench" below); run the harness without `-Flash` and flash it
 by hand with retries.
 
-**Four clients at once is proven when the air is quiet** — see "Multi-client
-reliability" below, which is no longer about the mesh and now about channel 1.
+**Four clients at once is proven** — zero loss on the S3 and C3 over 600 s on
+channel 11 with the house router busy on channel 1. What is *not* proven is a
+building; see "Surviving the wild" below, which is the real list.
 
 Still unproven: the Bluetooth server path, i.e. real audio from a phone
 forwarded to clients. The WROVER that can do it arrived 2026-09-14 and boots
@@ -98,35 +97,80 @@ walkthrough has not been run yet.
       clients play at the wrong pitch. Read the actual rate from the sink and
       either follow it or resample.
 
-### Multi-client reliability
+### Surviving the wild
 
-- [ ] **Find out what is on channel 1, and probably leave it.** The "two
-      clients degrade each other" finding of 2026-08-26 (C3 26 lost, S3 327,
-      both reading a bogus ~199 ppm) is **not a mesh limit**. Measured
-      2026-09-14 with four clients on one WROOM source, see `CHANGELOG.md`:
-      loss arrives in multi-second bursts that hit every receiver at the same
-      instants, scaled by how well each one hears the source (WROVER 0 → C3
-      10.7%), and it stopped mid-run at about 15:10 — the last two minutes of
-      that run and a 180 s run straight after were clean on all four clients
-      (WROVERs 0 lost, C3 and S3 the same 25 frames). Something else is
-      transmitting on channel 1 and winning collisions. Still to do:
-      - See what it is. `netsh wlan show networks mode=bssid` on the PC lists
-        every AP with its channel, but needs Windows Location services on.
-        Or a bench command that has a node scan and print the channels.
-      - Move `ESPNOW_CHANNEL` off 1 (the default for half the routers ever
-        sold) to whatever the scan shows empty, and re-run the four-client
-        600 s bench during the noisy part of the day. Ties into the
-        per-mesh-channel item under "Mesh isolation".
-      - Keep the C3 and S3 in mind as the canaries: they lose identical frame
-        sets, so they are either the weakest receivers or the closest to the
-        noise. Moving them apart and re-running would say which.
+The product is a mesh of speakers in somebody's flat, in a building full of
+other people's routers. The bench is one room with one router, and even that
+was enough to take 10.7% of the packets off the weakest client. Everything
+here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
+
+1. **Loss is other people's traffic, not the mesh.** Four clients on one
+   broadcast are clean when the channel is quiet. `tools/airmon` on a spare
+   WROOM showed the band empty except channel 1 with the house router at
+   -54 dBm, and every burst of client loss lined up with a burst of
+   undecodable frames at the monitor — a Wi-Fi 6 router streaming to a
+   phone, which an ESP32 can only count. Same afternoon, mesh moved to
+   channel 11, same router traffic on channel 1: S3 and C3 zero lost.
+2. **Broadcast has no retransmission.** A frame lost in the air is a hole
+   in the audio. Today that hole is silence, and 196 underruns in a run is
+   what it sounds like.
+3. **Airtime is the lever the mesh actually controls.** 1 → 6 Mbps cut the
+   loss under the same interference 4.6× (D13). Shorter frames collide less.
+
+- [ ] **Channel agility — necessary, not sufficient.** In a seven-storey
+      building every channel carries something; the best a survey can do is
+      pick the least loaded one, and it should: on this bench that was the
+      difference between 837 lost and 0. At boot the source surveys (the
+      survey in `tools/airmon/src/main.cpp` is the measurement half), picks
+      the emptiest of 1/6/11 — or of all 13 — and announces it; clients scan
+      for the mesh's beacon instead of sitting on `ESPNOW_CHANNEL`. Re-survey
+      only between streams, never while audio flows. This subsumes the
+      per-mesh-channel item under "Mesh isolation". **What it does not do:**
+      make the least-loaded channel quiet. Frequency *hopping* was considered
+      and rejected: with a known static interferer a hop schedule visits the
+      bad channel 1/13 of the time, the receiver is deaf for about a
+      millisecond per hop, a client that loses the schedule has to rescan,
+      and a WROVER server is already hopping its BT radio under the
+      coexistence arbiter. Hopping is for a band you cannot survey; this one
+      can be surveyed.
+- [ ] **Redundancy, so a lost frame is not a hole.** The only thing that
+      recovers a broadcast frame nobody heard is having sent the data twice.
+      Cheapest form: each packet carries its own block and the previous one
+      (2× payload; with ADPCM 4:1 that is still half of today's bytes and a
+      third of today's airtime at 6 Mbps). Any single lost packet is
+      recovered from its successor with one packet of extra latency. Next
+      form up: XOR parity every N packets, recovering one loss per group for
+      1/N overhead. Measure on the bench with the monitor watching and the
+      router deliberately loaded (a phone video is a repeatable enough
+      "wild"): the counter that matters becomes `und`, not `lost`.
+- [ ] **Concealment instead of silence.** Bursts longer than the redundancy
+      window will still happen — 214 consecutive-ish packets in one second
+      were seen at 1 Mbps. Repeat-and-fade the last block on a gap rather
+      than zero-fill; the drift controller already knows how to insert.
+      This is what stops a 20 ms hole being a click.
+- [ ] **Buffer for bursts, and decide who waits.** A deeper jitter buffer
+      rides out longer bursts at the cost of latency, and latency is only a
+      problem relative to the server's own local playback (every client is
+      delayed equally). Consider delaying the server's local output to match
+      the clients — the "rooms will not sound alike" item under "Audio
+      quality" is the same decision from the other side.
+- [ ] **Smaller frames.** ADPCM (the "Bandwidth" item) is not just for BT
+      coexistence any more: a 50-byte payload at 6 Mbps is a tenth of the
+      airtime of today's 200 bytes at 1 Mbps. Every collision the mesh does
+      not have is one it does not need to recover from.
+- [ ] **Test in an actual building.** Take the boards and the monitor to the
+      hometown flat. Survey first, then a 600 s run on the channel the survey
+      picks, with `-NoDrift` off and the monitor logging beside it, and
+      keep both logs. Until then every number in this file is one room, one
+      router.
 - [ ] **Range-test 6 Mbps against 1 Mbps.** `ESPNOW_PHY_RATE` is now 6 Mbps
       OFDM (D13) on the strength of one back-to-back comparison under
       interference: total loss 4.6× lower, worst board 9× better, but the two
       WROVERs that were clean at 1 Mbps picked up 86 and 708 lost — the OFDM
-      sensitivity cost is real and was measured at one metre. A house is not
+      sensitivity cost is real and was measured at one metre. A flat is not
       one metre. Walk a client into the next room and the one after, at each
-      rate, 600 s each, before trusting either number.
+      rate, 600 s each, before trusting either number. If 6 Mbps loses at
+      range, 2 Mbps is the next thing to try, not a return to 1.
 
 ### Mesh isolation
 
@@ -172,13 +216,10 @@ proof and polish.
       something. A slow idle beacon — one a second, say, outside pairing too —
       would let a client show that its mesh exists. Weigh it against the radio
       time it costs and against giving a neighbour a constant signal to see.
-- [ ] **Decide whether each mesh should get its own WiFi channel.** It would cut
-      the RF contention between two nearby meshes as well as the logical
-      crosstalk, and the id is already the obvious thing to derive the channel
-      from. The cost is discovery: a client can no longer sit on `ESPNOW_CHANNEL`
-      and listen, it has to scan. "Multi-client reliability" above has now
-      said that radio proximity is not the limit but channel 1 is — which makes
-      this worth more, not less.
+- [ ] **Each mesh on its own channel** is now a corollary of channel agility
+      under "Surviving the wild": once clients scan for their mesh's beacon,
+      two meshes end up on different channels for free whenever the survey
+      says so, and the id keeps them apart when it does not.
 - [ ] **Provisioning without a serial console.** `g<name>` needs a USB cable and
       pairing needs physical access to a button; neither is what somebody with
       six speakers in four rooms wants. A phone app over BLE, or a temporary

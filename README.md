@@ -93,9 +93,12 @@ PCM5102, notification sounds, volume.
 **The ESP-NOW mesh works**, as of 2026-08-19: a WROOM sourcing and an ESP32-S3
 playing, **132,069 packets over 600 s with zero lost, overflowed, underrun,
 duplicated or resynced**. Run it yourself with `./tools/bench-mesh.ps1 -Flash`.
-As of 2026-09-14 it works with **four clients at once** (two WROVERs, S3, C3)
-when the air is quiet; when it is not, what you see is channel 1, not the mesh
-— see `TODO.md`.
+As of 2026-09-14 it works with **four clients at once** (two WROVERs, S3, C3):
+zero loss on the S3 and C3 over 600 s on channel 11 while the house router was
+busy on channel 1. On channel 1 the same boards had lost up to 10% — to the
+router, not to each other; `tools/airmon/` is the sniffer that showed which.
+What a building full of routers does to it is the open question, and the plan
+for it is "Surviving the wild" in `TODO.md`.
 
 **The Bluetooth server path is still unproven** — audio taken from a phone and
 forwarded to clients. As of 2026-09-14 there is finally a board that can do it: a
@@ -407,6 +410,9 @@ further; the exception below is argued in `docs/decisions.md` (D7).
 - `esp32-code/scripts/version.py` — a PlatformIO pre-build step that defines
   `FW_VERSION` from `git describe`. There is no version constant to bump by hand;
   see D10.
+- `tools/airmon/` — a standalone sniffer for a spare classic ESP32: what is on
+  the channel, second by second, and a 13-channel survey. `capture.py` logs it,
+  `correlate.py` lines it up with a bench log.
 - `tools/bench-mesh.ps1` — the automated multi-board mesh test: discover, flash,
   stream, measure drift, report. Scales to any number of boards.
 - `tools/test-client-only.ps1` — checks that a BT-capable board really works as a
