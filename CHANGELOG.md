@@ -30,6 +30,74 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **Two SonoLoco households in radio range no longer join each other's
+  music.** Every ESP-NOW packet now carries a 16-bit mesh id and a client drops
+  anything that is not its own, so which stream a client plays is no longer
+  decided by whoever powered up first. The packet header goes from 4 bytes to 6
+  (204 → 206 of the 250 ESP-NOW allows, no measurable bandwidth cost), and the
+  id is compared **before** the first-sender lock — a neighbour's server that
+  took the lock would leave a node deaf to its own household until it next fell
+  back to DISCOVERY.
+
+  The id is FNV-1a over a normalised mesh name, folded to 16 bits, in
+  `lib/mesh/` with nine host tests: two nodes disagreeing about what "Casa
+  Rossi" hashes to produces silence with nothing in the log, which is the one
+  failure mode worth pinning on a host rather than chasing on a bench. Known
+  names are pinned to known ids there, so changing the hash — which would split
+  every deployed mesh silently — takes a deliberately failing test.
+
+  Set it with `g<name>` over serial, or adopt a neighbouring mesh with `p` or a
+  three-second hold of the BOOT button. Both persist in NVS, because a node that
+  came back on the factory default after a power cut would silently rejoin
+  whichever neighbour is still on it. The default `MESH_NAME` stays shared, so
+  one household still flashes and it works; the second household presses a
+  button. See D12, and D6 for what this amends.
+
+  Dropped foreign packets are counted and reported as `fgn=` in the telemetry
+  and status lines — the difference between "the neighbours are audible and
+  correctly ignored" and "nothing is arriving at all", which are identical in
+  every other number this firmware prints. `bench-mesh.ps1` reports each node's
+  `mesh=` and warns when they disagree, since a mismatch otherwise looks exactly
+  like a client out of range.
+
+  **The wire format changed, so flash every node together.** A mixed mesh is
+  not a degraded mesh, it is a broken one: an old receiver reads the new mesh id
+  as a sequence number and the new sequence number as a payload length.
+
+  Not yet measured on hardware with two meshes in the air, and the button has
+  never been pressed — both are in `TODO.md` with the runs to do.
+- **Pairing takes a press at each end, and says out loud what happened.** Hold
+  the button on a node of the mesh being joined and it *offers* itself for 60 s;
+  hold it on the node being moved and it *listens* and adopts. Which half a
+  press performs follows the node role — a server-capable node offers, a speaker
+  joins — so there is nothing for the user to choose, and both halves are on the
+  serial console (`o` and `p`) for what the button cannot express.
+
+  This closes a hole the first version had: adopting the first foreign *stream*
+  heard meant a neighbour could capture a node by doing nothing more deliberate
+  than playing music inside the window. An offer now has to be made by somebody
+  standing at the other mesh, pressing its button, in the same minute.
+
+  An offer is broadcast as a beacon: an audio packet with no payload and
+  `MESH_BEACON_SEQ` in the sequence field, 5/s, through the existing transmit
+  queue — so the wire format did not break twice and there is no second send
+  path to keep correct. It is dropped before the sequence tracker on the way in,
+  because a beacon reaching `SeqTracker` reads as a stream restart and would
+  re-arm the jitter buffer audibly. Three host tests cover the predicate,
+  including the one audio packet in 65536 whose sequence number is the magic.
+
+  The tones are the acknowledgement: two beeps when a window opens, the rising
+  three-note tone on joining, a falling one when a window closes empty. Pairing
+  is done by somebody holding a button on a box with no screen, and without them
+  the button is indistinguishable from one that does nothing. They play only in
+  DISCOVERY — in CLIENT the jitter buffer is feeding I2S, and on a SERVER the
+  A2DP task owns it.
+- **A mesh client's DAC output is confirmed working for the first time, on the
+  C3.** Every prior client verification was packets-and-counters only — a
+  healthy jitter buffer says nothing about whether audio actually comes out.
+  Wired per `config.h`'s provisional S3/C3 pin map (BCK/WS/DATA on GPIO 4/5/6)
+  and confirmed by ear: bench mode's synthetic tone was audible on the C3's
+  PCM5102 output. The S3 still has no DAC soldered.
 - **Heap telemetry reports the largest allocatable block**, not just free heap.
   Free heap alone cannot answer the question `TODO.md` asks about `String`
   logging: fragmentation shows as the biggest block shrinking while the total

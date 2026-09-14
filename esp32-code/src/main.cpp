@@ -36,6 +36,7 @@
 // with `pio test -e native` — see test/test_jitter.
 #include "drift.h"
 #include "jitter.h"
+#include "mesh.h"
 #include "seqtracker.h"
 
 #ifdef ENABLE_BLUETOOTH
@@ -97,6 +98,8 @@ static bool        clientOnly = false;
 
 static const char *PREF_NAMESPACE = "sonoloco";
 static const char *PREF_CLIENT_ONLY = "clientonly";
+static const char *PREF_MESH_ID = "meshid";
+static const char *PREF_MESH_NAME = "meshname";
 
 /**
  * Whether this boot may run the Bluetooth stack at all.
@@ -109,6 +112,104 @@ static const char *PREF_CLIENT_ONLY = "clientonly";
  */
 static inline bool btAllowed() {
     return !benchMode && !clientOnly;
+}
+
+// ============================================================================
+// Mesh identity
+// ============================================================================
+//
+// Which household a node belongs to. Every packet carries the 16-bit id and a
+// client drops anything that is not its own, so two SonoLoco installations in
+// radio range stop joining each other's music -- see D12 and lib/mesh/, which
+// holds the name-to-id derivation and its host tests.
+//
+// In NVS rather than in the build, and for a stronger reason than client-only
+// mode: this is the one setting that has to be changeable on a board somebody
+// already owns and has already screwed to a wall. Two nodes are in the same
+// mesh if and only if this number matches, so it also has to survive a power
+// cut -- a node that came back on the factory default would silently rejoin
+// whichever neighbour is still on it.
+//
+// The *name* is stored alongside the id purely so the logs can say "casa rossi"
+// instead of "6F59". It is empty on a node that was paired rather than named,
+// because only the id travels on the wire and there is nothing to invert it to.
+static uint16_t meshId = MESH_ID_UNSET;
+static char     meshName[MESH_NAME_MAX + 1] = {0};
+
+// Pairing: adopt the mesh of the next foreign stream heard. `pairCandidate` is
+// written from the ESP-NOW receive callback and committed in loop(), for the
+// same reason the rest of that callback only ever touches counters -- a flash
+// write there stalls the radio.
+static volatile bool     pairing            = false;
+static unsigned long     pairingUntilMs     = 0;
+static volatile uint16_t pairCandidate      = MESH_ID_UNSET;
+static volatile bool     pairCandidateReady = false;
+
+// The other half of the handshake: this node is announcing its own mesh so a
+// node being moved can adopt it. Both windows have to be open at once, which is
+// what makes pairing require a person at each end.
+static bool          offering        = false;
+static unsigned long offeringUntilMs = 0;
+static unsigned long lastBeaconMs    = 0;
+
+// Packets dropped because they belong to somebody else's mesh. Worth counting
+// rather than ignoring: it is the difference between "the neighbours are
+// audible but correctly ignored" and "nothing is arriving at all", which look
+// identical from every other number this firmware reports.
+static volatile uint32_t rxForeign = 0;
+
+/** Read the configured mesh identity out of NVS. Called once, before the radio. */
+static void meshLoadIdentity() {
+    prefs.begin(PREF_NAMESPACE, true);
+    prefs.getString(PREF_MESH_NAME, meshName, sizeof(meshName));
+    const uint16_t storedId = prefs.getUShort(PREF_MESH_ID, MESH_ID_UNSET);
+    prefs.end();
+
+    // A stored name wins over a stored id, because the name is what the id was
+    // derived from. They only ever disagree if the hash itself changed, and in
+    // that case every node re-deriving from its name still agrees with every
+    // other -- which is the outcome to prefer over half the house keeping an id
+    // nobody can reproduce.
+    meshId = meshIdFromName(meshName);
+    if (meshId == MESH_ID_UNSET) meshId = storedId;   // paired, not named
+    if (meshId == MESH_ID_UNSET) {                    // never configured at all
+        meshNormaliseName(MESH_NAME, meshName, sizeof(meshName));
+        meshId = meshIdFromName(meshName);
+    }
+}
+
+/** The name for logs. Never empty, so a format string cannot print a bare gap. */
+static const char *meshNameForLog() {
+    return meshName[0] ? meshName : "(paired)";
+}
+
+/** Adopt a name: store it, store the id it derives, and start using both. */
+static bool meshSetName(const char *name) {
+    char norm[MESH_NAME_MAX + 1];
+    meshNormaliseName(name, norm, sizeof(norm));
+    const uint16_t id = meshIdFromName(norm);
+    if (id == MESH_ID_UNSET) return false;   // empty or whitespace only
+
+    prefs.begin(PREF_NAMESPACE, false);
+    prefs.putString(PREF_MESH_NAME, norm);
+    prefs.putUShort(PREF_MESH_ID, id);
+    prefs.end();
+
+    strncpy(meshName, norm, sizeof(meshName) - 1);
+    meshName[sizeof(meshName) - 1] = '\0';
+    meshId = id;
+    return true;
+}
+
+/** Adopt an id heard on the air. The name is cleared: it cannot be recovered. */
+static void meshAdoptId(uint16_t id) {
+    prefs.begin(PREF_NAMESPACE, false);
+    prefs.remove(PREF_MESH_NAME);
+    prefs.putUShort(PREF_MESH_ID, id);
+    prefs.end();
+
+    meshName[0] = '\0';
+    meshId      = id;
 }
 
 // ============================================================================
@@ -240,13 +341,17 @@ void deinitI2SForTones() {
 // ESP-NOW — shared by all nodes
 // ============================================================================
 
-#define ESPNOW_HEADER_SIZE 4   // seq (2) + len (2)
+#define ESPNOW_HEADER_SIZE 6   // group (2) + seq (2) + len (2)
 
+// `group` is first because it is the field that decides whether the rest is
+// even ours to look at -- a receiver rejects a neighbour's packet having read
+// two bytes.
 typedef struct __attribute__((packed)) {
+    uint16_t group;
     uint16_t seq;
     uint16_t len;
     uint8_t  data[ESPNOW_PAYLOAD_SIZE];
-} AudioPacket;  // 204 bytes total, well under the 250-byte ESP-NOW limit
+} AudioPacket;  // 206 bytes total, well under the 250-byte ESP-NOW limit
 
 static_assert(ESPNOW_HEADER_SIZE + ESPNOW_PAYLOAD_SIZE <= 250,
               "ESP-NOW cannot send more than 250 bytes per frame");
@@ -350,18 +455,46 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     // happened to hear while serving, and that lock outlives SERVER mode.
     if (currentMode == MODE_SERVER) return;
 
+    // The received buffer has no alignment guarantee; copy the header out
+    // instead of casting to a struct pointer.
+    uint16_t group, seq, plen;
+    memcpy(&group, data,     2);
+    memcpy(&seq,   data + 2, 2);
+    memcpy(&plen,  data + 4, 2);
+
+    const bool beacon = meshIsBeacon(seq, plen);
+
+    // Whose mesh is this? Checked BEFORE the sender lock below, and the order is
+    // the whole point: a neighbour's server that took the lock would leave this
+    // node ignoring its own household until it next fell back to DISCOVERY.
+    if (group != meshId) {
+        // Adoption happens only from a beacon -- somebody is holding the button
+        // on a node of that mesh right now. Adopting from any foreign *stream*,
+        // as this first did, let a neighbour capture a node by doing nothing
+        // more deliberate than playing music inside the pairing window.
+        //
+        // Only the intent is recorded here: the NVS write happens in loop(),
+        // because this is the WiFi task and a flash erase here would stall the
+        // radio mid-stream.
+        if (beacon && pairing && !pairCandidateReady) {
+            pairCandidate      = group;
+            pairCandidateReady = true;
+        }
+        rxForeign++;
+        return;
+    }
+
+    // Our own mesh offering itself to somebody else. Nothing to do, and it must
+    // not fall through: MESH_BEACON_SEQ arriving at the sequence tracker looks
+    // like a stream restart and would charge a resync and re-arm the buffer.
+    if (beacon) return;
+
     if (!senderLocked) {
         memcpy(lockedSender, srcMac, 6);
         senderLocked = true;
     } else if (memcmp(lockedSender, srcMac, 6) != 0) {
         return;   // a second server is broadcasting — ignore it
     }
-
-    // The received buffer has no alignment guarantee; copy the header out
-    // instead of casting to a struct pointer.
-    uint16_t seq, plen;
-    memcpy(&seq,  data,     2);
-    memcpy(&plen, data + 2, 2);
 
     // Trust the wire for nothing: clamp to what was actually received, to our
     // own payload limit, and to an even byte count so 16-bit framing survives.
@@ -560,8 +693,9 @@ static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
 
         if (accumLen >= ESPNOW_PAYLOAD_SIZE) {
             AudioPacket pkt;
-            pkt.seq = txSeq++;
-            pkt.len = ESPNOW_PAYLOAD_SIZE;
+            pkt.group = meshId;
+            pkt.seq   = txSeq++;
+            pkt.len   = ESPNOW_PAYLOAD_SIZE;
             memcpy(pkt.data, accumBuf, ESPNOW_PAYLOAD_SIZE);
             if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
             accumLen = 0;
@@ -778,6 +912,7 @@ static void resetRxState() {
     rxCount      = 0;
     rxOverflow   = 0;
     rxUnderrun   = 0;
+    rxForeign    = 0;
 }
 
 static void enterDiscovery() {
@@ -854,6 +989,205 @@ static void enterClient() {
 
     currentMode = MODE_CLIENT;
     LOG_INFO("Free heap: " + String(ESP.getFreeHeap()) + " bytes");
+}
+
+// ============================================================================
+// Pairing — joining a mesh with a button press at each end
+// ============================================================================
+//
+// Naming a mesh needs a serial console, which a node screwed to a wall does not
+// have. Pairing is the alternative, and it takes a press at both ends: hold the
+// button on a node of the mesh being joined and it *offers* itself for a
+// minute, hold the button on the node being moved and it *listens*, adopting
+// the first offer it hears.
+//
+// Two presses on purpose. Adopting from any foreign stream -- which is what the
+// first version did -- let a neighbour capture a node by doing nothing more
+// deliberate than playing music during the window. An offer has to be made by
+// somebody standing at the other mesh, pressing its button, in the same minute.
+//
+// Which half a press performs follows the node's role, so there is nothing for
+// the user to choose: a node that can be a server offers the mesh, a speaker
+// joins one. Both halves are also available over serial ('o' and 'p'), which is
+// how the cases the button cannot express are reached -- moving a server into
+// somebody else's mesh, most obviously.
+//
+// Adoption copies an id off the air, so unlike a typed name it cannot land in
+// the wrong mesh through a hash collision. What it cannot recover is the name:
+// only the id travels, so a paired node logs "(paired)" from then on.
+
+enum MeshFeedback { MESH_FB_OPEN, MESH_FB_PAIRED, MESH_FB_CLOSED };
+
+/**
+ * Say what just happened, on the speaker the node already has.
+ *
+ * This is the only acknowledgement a user without a serial console ever gets,
+ * and pairing without it is a button that appears to do nothing.
+ *
+ * Only in DISCOVERY. In CLIENT mode the I2S driver is configured for the mesh
+ * stream and the jitter buffer is feeding it; on a SERVER the A2DP task owns
+ * it, and writing tones into a driver another task is driving is the conflict
+ * `TODO.md` already has an open item about. Both are also cases where the user
+ * can hear perfectly well that the node is alive.
+ */
+static void meshPlayFeedback(MeshFeedback what) {
+    if (currentMode != MODE_DISCOVERY) return;
+
+    // Whoever already owns the driver keeps it. On a BT-capable node sitting in
+    // DISCOVERY that is the A2DP sink, which is exactly what the connect and
+    // disconnect tones are written into; installing a second driver over it
+    // fails, and the tone would be lost.
+#ifdef ENABLE_BLUETOOTH
+    const bool someoneElseOwnsI2S = btSinkStarted || clientI2SActive;
+#else
+    const bool someoneElseOwnsI2S = clientI2SActive;
+#endif
+    if (!someoneElseOwnsI2S) initI2SForTones();
+
+    switch (what) {
+        case MESH_FB_OPEN:   playStartupSound();      break;   // two beeps: I am listening
+        case MESH_FB_PAIRED: playConnectedSound();    break;   // rising: joined
+        case MESH_FB_CLOSED: playDisconnectedSound(); break;   // falling: nothing heard
+    }
+
+    if (!someoneElseOwnsI2S) deinitI2SForTones();
+}
+
+/** Listen for an offer, and adopt the first one heard. */
+static void meshStartPairing() {
+    // Stop playing first. This node is about to belong to a different mesh, and
+    // the press has to be audible: music stopping and then two beeps is what
+    // tells somebody with no console that the button registered.
+    if (currentMode == MODE_CLIENT) enterDiscovery();
+
+    pairCandidate      = MESH_ID_UNSET;
+    pairCandidateReady = false;
+    pairingUntilMs     = millis() + MESH_PAIR_WINDOW_MS;
+    pairing            = true;
+    DEBUG_SERIAL.printf("[MESH] listening %lus for an offer (current mesh=%04X %s)\n",
+                        (unsigned long)(MESH_PAIR_WINDOW_MS / 1000),
+                        meshId, meshNameForLog());
+    meshPlayFeedback(MESH_FB_OPEN);
+}
+
+/** Announce this node's mesh, so a node being moved can adopt it. */
+static void meshStartOffering() {
+    offeringUntilMs = millis() + MESH_PAIR_WINDOW_MS;
+    lastBeaconMs    = 0;          // first beacon goes out on the next loop pass
+    offering        = true;
+    DEBUG_SERIAL.printf("[MESH] offering mesh=%04X %s for %lus\n",
+                        meshId, meshNameForLog(),
+                        (unsigned long)(MESH_PAIR_WINDOW_MS / 1000));
+    meshPlayFeedback(MESH_FB_OPEN);
+}
+
+/**
+ * Send the beacons while an offer is open. Called from loop() in every mode.
+ *
+ * A beacon is an audio packet with no payload (see `meshIsBeacon`), so it goes
+ * out through the same queue and the same send gate as everything else -- there
+ * is no second transmit path to keep correct. At 5/s against a stream's 220/s
+ * it costs nothing measurable, which is what lets a server offer while it is
+ * still playing.
+ */
+static void meshServiceOffer() {
+    if (!offering) return;
+
+    if ((long)(millis() - offeringUntilMs) >= 0) {
+        offering = false;
+        DEBUG_SERIAL.printf("[MESH] offer closed mesh=%04X\n", meshId);
+        // No tone: an offer closing says nothing about whether anybody joined,
+        // and the node that made it is quite likely mid-stream.
+        return;
+    }
+
+    if (!espnowActive || txQueue == nullptr) return;
+    if (lastBeaconMs != 0 &&
+        (long)(millis() - lastBeaconMs) < (long)MESH_BEACON_INTERVAL_MS) return;
+    lastBeaconMs = millis();
+
+    AudioPacket pkt;
+    pkt.group = meshId;
+    pkt.seq   = MESH_BEACON_SEQ;
+    pkt.len   = 0;                 // the mesh id in the header is the whole message
+    if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
+}
+
+/**
+ * Commit or expire a listening window. Called from loop() in every mode.
+ *
+ * An adopted node drops straight back to DISCOVERY: it may be holding a locked
+ * sender and a half-full jitter buffer from the mesh it just left, and none of
+ * that means anything any more. A bench source is exempted because it is
+ * transmitting, not listening, and DISCOVERY would be a mode change in the
+ * middle of a measurement.
+ */
+static void meshServicePairing() {
+    if (!pairing) return;
+
+    if (pairCandidateReady) {
+        const uint16_t id = pairCandidate;
+        pairing            = false;
+        pairCandidateReady = false;
+        if (id != MESH_ID_UNSET) {
+            meshAdoptId(id);
+            DEBUG_SERIAL.printf("[MESH] paired mesh=%04X\n", meshId);
+            if (!benchSource) enterDiscovery();
+            meshPlayFeedback(MESH_FB_PAIRED);
+        }
+        return;
+    }
+
+    // Signed, like every other deadline compared against millis() here.
+    if ((long)(millis() - pairingUntilMs) >= 0) {
+        pairing = false;
+        DEBUG_SERIAL.printf("[MESH] listening closed, no offer heard (mesh=%04X %s)\n",
+                            meshId, meshNameForLog());
+        meshPlayFeedback(MESH_FB_CLOSED);
+    }
+}
+
+/**
+ * The long press.
+ *
+ * A press *while running*, never a press held through a reset: the BOOT button
+ * these boards use is a strapping pin, and holding it across a reset puts the
+ * chip into the ROM download mode, where no firmware runs at all.
+ *
+ * No debounce beyond the hold itself. A bounce is milliseconds and interrupts
+ * the press, which restarts a timer that has to reach three seconds.
+ */
+static void meshServiceButton() {
+#if MESH_PAIR_BUTTON_PIN >= 0
+    static bool          held           = false;
+    static unsigned long heldSinceMs    = 0;
+    static bool          firedThisPress = false;
+
+    const bool down = (digitalRead(MESH_PAIR_BUTTON_PIN) == LOW);
+
+    if (!down) {
+        held           = false;
+        firedThisPress = false;
+        return;
+    }
+
+    if (!held) {
+        held        = true;
+        heldSinceMs = millis();
+        return;
+    }
+
+    if (!firedThisPress &&
+        (long)(millis() - heldSinceMs) >= (long)MESH_PAIR_HOLD_MS) {
+        firedThisPress = true;   // one window per press, not one per loop pass
+        // Role decides which half of the handshake a press is. A node that can
+        // be a server holds the mesh others join; a speaker is what gets moved.
+        // Nothing for the user to pick, and it matches where the two boxes
+        // physically are.
+        if (btAllowed()) meshStartOffering();
+        else             meshStartPairing();
+    }
+#endif
 }
 
 // ============================================================================
@@ -938,8 +1272,9 @@ static void benchServiceSource() {
         if (now < due) return;
 
         AudioPacket pkt;
-        pkt.seq = txSeq++;
-        pkt.len = ESPNOW_PAYLOAD_SIZE;
+        pkt.group = meshId;
+        pkt.seq   = txSeq++;
+        pkt.len   = ESPNOW_PAYLOAD_SIZE;
         // Table lookup, wrapping by comparison rather than modulo: no division
         // and no float anywhere in the transmit path.
         for (uint32_t i = 0; i < samplesPerPkt; i++) {
@@ -994,7 +1329,7 @@ static void benchReport() {
                                                         : "CLIENT";
     DEBUG_SERIAL.printf(
         "[BENCH] ms=%lu role=%s mode=%s heap=%lu jit=%d rx=%lu lost=%lu ovf=%lu "
-        "und=%lu dup=%lu rsy=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu "
+        "und=%lu dup=%lu rsy=%lu fgn=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu "
         "drift=%d ins=%lu drp=%lu dr=%.3f tgt=%d srx=%ld maxalloc=%lu\n",
         (unsigned long)millis(),
         benchSource ? "SOURCE" : "SINK",
@@ -1007,6 +1342,10 @@ static void benchReport() {
         (unsigned long)rxUnderrun,
         (unsigned long)seqTracker.dupe,
         (unsigned long)seqTracker.resync,
+        // Packets that were another mesh's and were dropped unread. Zero on a
+        // bench with one household in it, and the evidence that isolation is
+        // doing something the moment there are two.
+        (unsigned long)rxForeign,
         (unsigned long)benchTxPackets,
         (unsigned long)txQueueFull,
         (unsigned long)txSendErr,
@@ -1037,7 +1376,8 @@ static void benchIdentify() {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     DEBUG_SERIAL.printf(
         "[BENCH] id fw=%s chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
-        "bench=%d bt=%d espnow=%d drift=%d conly=%d name=%s\n",
+        "bench=%d bt=%d espnow=%d drift=%d conly=%d mesh=%04X meshname=%s "
+        "name=%s\n",
         FW_VERSION,
         ESP.getChipModel(),
         (unsigned long)ESP.getPsramSize(),
@@ -1051,7 +1391,34 @@ static void benchIdentify() {
         espnowActive ? 1 : 0,
         driftEnabled ? 1 : 0,
         clientOnly ? 1 : 0,
+        meshId,
+        meshNameForLog(),
         ROOM_NAME);
+}
+
+/**
+ * Read the rest of a command line, for the one command that takes an argument.
+ *
+ * Bounded by a short deadline rather than by a newline alone, so a bare `g`
+ * typed into a serial monitor that sends no line ending still answers instead
+ * of hanging. It costs a quarter second of blocked loop() on that one
+ * keystroke, which is why nothing in the audio path may use this.
+ */
+static size_t benchReadLine(char *out, size_t outSize) {
+    size_t n = 0;
+    const unsigned long deadline = millis() + 250;
+    while ((long)(millis() - deadline) < 0) {
+        while (DEBUG_SERIAL.available()) {
+            const int c = DEBUG_SERIAL.read();
+            if (c == '\n' || c == '\r') {
+                out[n] = '\0';
+                return n;
+            }
+            if (n + 1 < outSize) out[n++] = (char)c;
+        }
+    }
+    out[n] = '\0';
+    return n;
 }
 
 /**
@@ -1061,6 +1428,9 @@ static void benchIdentify() {
  *   s  start sourcing    x  stop sourcing              r  report now
  *   d  toggle clock-drift correction
  *   c  toggle client-only mode and reboot (persists across power cuts)
+ *   g  print the mesh identity; `g<name>` sets it (persists, no reboot)
+ *   p  listen for an offer and join that mesh (the speaker half of pairing)
+ *   o  offer this mesh to a node that is listening (the server half)
  */
 static void benchServiceSerial() {
     while (DEBUG_SERIAL.available()) {
@@ -1093,6 +1463,28 @@ static void benchServiceSerial() {
                 ESP.restart();
                 break;
             }
+            case 'g': {
+                // The only command with an argument, hence the line read. No
+                // reboot, unlike client-only mode: nothing about the mesh id is
+                // decided in setup() -- a transmitter stamps it per packet and a
+                // receiver compares it per packet.
+                char line[MESH_NAME_MAX * 2 + 2];
+                benchReadLine(line, sizeof(line));
+                if (line[0] != '\0') {
+                    if (meshSetName(line)) {
+                        // Whatever this node was receiving, it was receiving it
+                        // from a mesh it no longer belongs to.
+                        if (!benchSource) enterDiscovery();
+                    } else {
+                        DEBUG_SERIAL.println("[MESH] error reason=empty_name");
+                    }
+                }
+                DEBUG_SERIAL.printf("[MESH] mesh=%04X name=%s\n",
+                                    meshId, meshNameForLog());
+                break;
+            }
+            case 'p': meshStartPairing();  break;
+            case 'o': meshStartOffering(); break;
             case 'b':
                 benchMagic = BENCH_MAGIC;
                 DEBUG_SERIAL.println("[BENCH] rebooting into bench mode");
@@ -1127,6 +1519,17 @@ void setup() {
     clientOnly = prefs.getBool(PREF_CLIENT_ONLY, false);
     prefs.end();
 
+    // Before the radio, because the receive callback compares every packet
+    // against meshId from the first one that arrives.
+    meshLoadIdentity();
+
+#if MESH_PAIR_BUTTON_PIN >= 0
+    // The BOOT button on these devkits has an external pull-up already; asking
+    // for the internal one as well costs nothing and makes the pin safe if this
+    // is later moved to a bare GPIO with a button to ground.
+    pinMode(MESH_PAIR_BUTTON_PIN, INPUT_PULLUP);
+#endif
+
     DEBUG_SERIAL.println();
     DEBUG_SERIAL.println("================================");
     DEBUG_SERIAL.println("  SonoLoco — Multi-Room Audio");
@@ -1140,6 +1543,7 @@ void setup() {
 #else
     DEBUG_SERIAL.println("  Mode: CLIENT only (no BT Classic on this chip)");
 #endif
+    DEBUG_SERIAL.printf("  Mesh: %s (id %04X)\n", meshNameForLog(), meshId);
     DEBUG_SERIAL.println("================================");
     DEBUG_SERIAL.println();
 
@@ -1203,6 +1607,9 @@ void loop() {
     // put into bench mode in the first place.
     benchServiceSerial();
     benchServiceSource();
+    meshServiceButton();
+    meshServicePairing();
+    meshServiceOffer();
 
     switch (currentMode) {
 
@@ -1319,7 +1726,8 @@ void loop() {
                      " ovf=" + String(rxOverflow) +
                      " und=" + String(rxUnderrun) +
                      " dup=" + String(seqTracker.dupe) +
-                     " rsy=" + String(seqTracker.resync));
+                     " rsy=" + String(seqTracker.resync) +
+                     " fgn=" + String(rxForeign));
         } else if (currentMode == MODE_SERVER) {
             LOG_INFO(String("Status: mode=") + modeStr +
                      " heap=" + String(ESP.getFreeHeap()) +
@@ -1327,8 +1735,13 @@ void loop() {
                      " senderr=" + String(txSendErr) +
                      " radiofail=" + String(txRadioFail));
         } else {
+            // fgn on the DISCOVERY line too, because this is where a node sits
+            // when its mesh id is wrong: a stream it can hear perfectly and
+            // correctly refuses looks exactly like no stream at all otherwise.
             LOG_INFO(String("Status: mode=") + modeStr +
-                     " heap=" + String(ESP.getFreeHeap()));
+                     " heap=" + String(ESP.getFreeHeap()) +
+                     " mesh=" + String(meshId, HEX) +
+                     " fgn=" + String(rxForeign));
         }
     }
 #endif
