@@ -92,8 +92,8 @@ crackled — both under "Blocking" below.
       unknown. If it comes back, run `listen.py --serial` at once and compare
       the `a` window with the clean ones (`logs/a2dp-20260928-173606-user-
       music.log`): packet size and rate, and the idle histogram. The "very
-      distorted" sound at high volume the same day was the TPA3116 clipping
-      on 12 V, not the stream (README, Hardware Tips). The ESP-NOW side ran
+      distorted" sound at high volume the same day was the amp's supply
+      running below 12 V, not the stream. The ESP-NOW side ran
       at the full 220.6 frames/s from the PC; nothing was listening to
       measure the air loss.
 - [ ] **The MAX98357A boards are silent.** WROVER1 (COM12) and the S3

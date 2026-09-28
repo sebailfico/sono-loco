@@ -66,9 +66,7 @@ in `TODO.md` false.
   first" — which is the next item in `TODO.md`.
 
   Separately, "very distorted above 50–60% volume" on two different speakers
-  was the TPA3116 clipping on its 12 V supply: 2.1 Vrms from the PCM5102 at
-  26 dB gain wants far more swing than 12 V gives, and on the library's volume
-  curve the clip point lands at 55–60%. A higher supply voltage fixed it.
+  was the TPA3116's supply running below its 12 V. At 12 V it is fine.
 
 - **A phone has streamed through a SonoLoco server for the first time — and
   the first thing it did was crash it.** Two connection attempts to WROVER2,

@@ -178,8 +178,8 @@ Traps, each of which cost a run on 2026-09-28:
 - **Opening the serial port can reset the node** — and drop the link under
   test. `ser.py` sets DTR and RTS false *before* the port opens; `pio device
   monitor` does not.
-- **Loud and distorted is not a firmware problem** until the supply says so:
-  the TPA3116 clips on 12 V well before 100% (README, Hardware Tips).
+- **Loud and distorted is not a firmware problem** until the amp's supply has
+  been checked: an undervolted TPA3116 distorted from 50–60% up.
 
 `mon.py COM19` logs the `a` window every 2 s to `logs/a2dp-<time>.log` while
 somebody plays real music — for "it crackled just then".

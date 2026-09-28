@@ -109,8 +109,8 @@ the air (24% loss at the client) — BT/WiFi coexistence on one chip, measured,
 and the first item in `TODO.md`. The server's *own* speaker crackled too; as of
 2026-09-28 the PC can stream a test tone to a server and listen to it through
 its microphone (`tools/btlisten/`), which found two things. The loud-volume
-distortion was the TPA3116 clipping on a 12 V supply (fixed by a higher supply,
-see Hardware Tips). And the crackle itself — a ~3 ms hole in the audio at every
+distortion was the amp's supply running below its 12 V — nothing to do with
+the stream. And the crackle itself — a ~3 ms hole in the audio at every
 A2DP packet, measured once — did not come back after a reboot, with forwarding
 on or off; what is left is a few late packets at the start of playback,
 counted by the board itself. The clients' MAX98357A boards have not made a
@@ -180,7 +180,7 @@ see the bandwidth note in `TODO.md`.
 | Microcontroller | ESP32 WROVER | ~€7 |
 | DAC | PCM5102 I2S module | ~€3 |
 | Amplifier | TPA3116 Class D 2x50W | ~€10 |
-| Power Supply | 12–24 V DC adapter — more volts, more clean volume (Hardware Tips) | ~€10 |
+| Power Supply | 12V DC adapter | ~€10 |
 | **Total** | | **~€30** |
 
 ### Wiring Diagram
@@ -222,17 +222,9 @@ see the bandwidth note in `TODO.md`.
 - Use separate power supplies for ESP32 and amplifier
 - Add decoupling capacitors (100nF + 10µF) near ESP32 and DAC
 
-**If it distorts above a certain volume, the amp is clipping.** The PCM5102
-puts out up to 2.1 Vrms. A TPA3116 at 26 dB gain on 12 V can swing about
-7.8 Vrms, so it clips once the DAC is above roughly −15 dB of full scale — on
-the A2DP library's volume curve (0 dB at 100%, about 3.5 dB per 10%) that is
-**55–60% on the phone**, earlier with an efficient speaker. Measured
-2026-09-28: 60% on one speaker, 50% on a louder one, then "very distorted".
-- **Raise the supply voltage** (the TPA3116 takes up to ~24 V). This is the fix
-  that adds clean volume, and the one that cured it on the bench.
-- Or lower the gain: the module's gain jumper (20/26/32/36 dB), or a resistor
-  divider between DAC and amp input. No more volume, but no clipping and less
-  hiss.
+**If it turns harsh and distorted above some volume, check the amp's supply
+first.** On 2026-09-28 a TPA3116 fed below its 12 V distorted from 50–60%
+upwards, on two different speakers; at 12 V it was fine.
 
 **To reduce volume with TPA3116:**
 - Check for gain jumpers on your TPA3116 module (20dB/26dB/32dB)
