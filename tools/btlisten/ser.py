@@ -9,6 +9,13 @@ reset drops the Bluetooth link under test.
 import sys, time
 import serial
 
+# The firmware logs arrows and the Windows console is cp1252: print what it
+# can rather than die mid-run with UnicodeEncodeError.
+try:
+    sys.stdout.reconfigure(errors='replace')
+except AttributeError:
+    pass
+
 
 def open_port(port):
     sp = serial.Serial()

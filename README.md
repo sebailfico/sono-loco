@@ -112,8 +112,9 @@ its microphone (`tools/btlisten/`), which found two things. The loud-volume
 distortion was the amp's supply running below its 12 V — nothing to do with
 the stream. And the crackle itself — a ~3 ms hole in the audio at every
 A2DP packet, measured once — did not come back after a reboot, with forwarding
-on or off; what is left is a few late packets at the start of playback,
-counted by the board itself. The clients' MAX98357A boards have not made a
+on or off. The server's own I2S ring was also half a packet deep; at 46 ms
+(v0.2.0-22) the board and the mic both find no holes where the old ring left
+13–22 ms ones. The clients' MAX98357A boards have not made a
 sound yet — that is the second item.
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
@@ -384,9 +385,10 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once — no reboot, because nothing about the id is decided at boot |
 | `p` | listen for 60 s and join the mesh that offers itself — the speaker half of pairing. Same as a three-second BOOT hold on a node that cannot be a server |
 | `o` | offer this mesh for 60 s, so a listening node can join it — the server half. Same as a three-second BOOT hold on a server-capable node |
-| `a` | BT server: print and reset the A2DP timing window — packets/s, packet size, how long the BT task sat idle between packets. An idle longer than the 11.6 ms I2S DMA ring is a gap in the local output |
+| `a` | BT server: print and reset the A2DP timing window — packets/s, packet size, and a histogram of the gaps between I2S writes. A gap longer than the DMA ring is a hole in the local output, counted as `late` |
 | `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
 | `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
+| `q` | BT server: `q<frames>` reinstalls the local I2S DMA ring with that buffer length (8 buffers; 256 = 46 ms is the default, 64 = the library's 11.6 ms), between streams only. Bare `q` prints it |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
 A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs

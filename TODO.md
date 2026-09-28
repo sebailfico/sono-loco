@@ -90,8 +90,8 @@ crackled — both under "Blocking" below.
       dips/s. So the WROOM test above is answered on the same board and does
       not pin it on coexistence; what put the node in the crackling state is
       unknown. If it comes back, run `listen.py --serial` at once and compare
-      the `a` window with the clean ones (`logs/a2dp-20260928-173606-user-
-      music.log`): packet size and rate, and the idle histogram. The "very
+      the `a` window with the clean ones in `CHANGELOG.md`: packet size and
+      rate, `late`, and the gap histogram. The "very
       distorted" sound at high volume the same day was the amp's supply
       running below 12 V, not the stream. The ESP-NOW side ran
       at the full 220.6 frames/s from the PC; nothing was listening to
@@ -125,25 +125,13 @@ crackled — both under "Blocking" below.
       gets `PS_NONE` like everyone else) as a CLIENT of a bench source, 600 s,
       compare `lost`/`und` against the baseline. If it costs packets, the
       next thing to try is `esp_now_set_wake_window()`.
-- [ ] **The server's local output underruns at the start of playback.** The
-      A2DP library writes each decoded packet to I2S from the BT task, into
-      the default DMA ring of 8 × 64 frames = 11.6 ms — half of one 23.2 ms
-      packet from Windows. In steady play the task waits 5–10 ms between
-      packets, so the margin is 2–6 ms; in the first ~8 s after play it
-      waited 10–27 ms about nine times (`a2dp-20260928-173606`), and with
-      forwarding on a few more every few seconds — "a bit crispy at first"
-      by ear. Two things to do, then re-measure with `listen.py` and `mon.py`:
-      1. **Count the callback's time.** `cbmax` reaches 5 ms with forwarding
-         on (decimation plus whatever the TX task preempts), and that drains
-         the ring as much as idle does. Histogram *write end → next write
-         start*, not only the idle part, or the board under-reports its own
-         gaps.
-      2. **Deepen the ring** with `a2dpSink.set_i2s_config()`: 8 × 256 frames
-         is 46 ms, the size the tone path already uses, and costs ~6 KB of
-         internal DRAM on a node that had 24–29 KB free while streaming and
-         forwarding. The latency is free — the server has to delay its local
-         output to meet the clients anyway (Timing / sync). The constants go
-         in `config.h`.
+- [ ] **Connect a phone to a server on the 46 ms ring.** The deeper I2S
+      ring costs 6 KB of internal DRAM: 23.2 KB free while streaming from
+      the PC and forwarding, against 29.4 KB before. The last time a server
+      ran short of internal DRAM it was a *phone* connecting that crashed it
+      (2026-09-14, 15.5 KB free). Pair the phone, play, pause, disconnect,
+      reconnect, and watch `heap=` in the `a` window; if it gets tight,
+      `q128` (23 ms) is the fallback to measure next.
 - [ ] **Solder a DAC to the S3** and pick its I2S pins — `config.h` hardcodes the
       WROOM/WROVER pins (26/25/22) for every board. Until then the S3 is verified
       only as far as "packets arrive and the buffer stays healthy", with no audio
@@ -165,8 +153,9 @@ crackled — both under "Blocking" below.
 ### Timing / sync
 
 - [ ] **Server and clients are not time-aligned.** The server plays through A2DP
-      with tens of ms latency; clients play after ~137 ms (91 ms prefill plus
-      46 ms of I2S DMA).
+      with its own 46 ms I2S ring (prefilled at every stream start) plus
+      whatever the BT stack holds; clients play after ~137 ms (91 ms prefill
+      plus 46 ms of I2S DMA).
       Adjacent rooms will slap-echo. The server needs to delay its own local
       playback to match.
 - [ ] **Re-measure drift on the WROOM/S3 pair.** Correction is proven on the

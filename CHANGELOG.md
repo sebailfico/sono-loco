@@ -30,6 +30,33 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **The server's own output no longer runs dry between Bluetooth packets.**
+  The A2DP library played on its default I2S ring of 8 × 64 frames, 11.6 ms,
+  half of one 23.2 ms packet from Windows. It is now 8 × 256, 46 ms
+  (`SERVER_DMA_BUF_LEN`), filled with silence at the start of every stream —
+  a ring deeper than a packet no longer fills itself, and without the prefill
+  it would run just in time. Measured on WROVER2, `v0.2.0-22-gc02cc85`, the
+  PC streaming a tone, forwarding on, both depths in one Bluetooth session
+  (`q64` / `q256` between runs):
+
+  | ring | board: late | board: longest gap | mic: holes | tone length |
+  |---|---|---|---|---|
+  | 46 ms | 0, 0, 0 | 32.3, 35.6, 37.9 ms | 0, 0, 0 | 6.01 s |
+  | 11.6 ms | 3, 6 | 31.9, 24.9 ms | 1 of 22 ms; 2 of up to 14 ms | 6.04, 6.03 s |
+
+  The two instruments agree to the millisecond: a 31.9 ms gap on the old ring
+  is 20.3 ms of zeros and the mic heard a 22 ms hole; 24.9 ms is 13.3 and it
+  heard 14. On the new ring gaps as long pass silently. Cost: 6 KB of internal
+  DRAM (23.2 KB free streaming and forwarding, from 29.4) and 46 ms of local
+  latency, which the server needs anyway to meet its clients.
+
+  The board's gap count was fixed on the way (`b8273ae`): it had measured
+  only the wait for the next packet, missing the up to 5 ms the forwarding
+  callback spends in the same task, so it undercounted. And the first `q`
+  froze the audio (`c02cc85`): the library leaves I2S running across a
+  suspend and does not restart it on resume, so a driver swapped in stopped
+  stayed stopped, and the BT task blocked in `i2s_write()` for good.
+
 - **The Bluetooth half has a test signal, and the PC can listen to it.**
   `tools/btlisten/listen.py` makes the PC the A2DP source: it plays a 997 Hz
   tone into a paired server and records the speaker with the laptop's own

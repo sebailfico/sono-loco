@@ -134,7 +134,11 @@ python tools/btlisten/listen.py --serial COM19 --pre f --label no-forwarding
 Each run is ~11 s, writes `logs/listen-<time>-<label>.wav` and a plot beside it,
 and prints the node's `a` window for the same seconds. `--pre f` toggles
 forwarding before the run (send it again to turn it back on); `--pre w` stops
-WiFi until the next reboot.
+WiFi until the next reboot. To compare I2S ring depths in one session, send
+`q64` (the library's old 11.6 ms) or `q256` (the default, 46 ms) over serial
+*between* runs — it is refused while a stream is running, and Windows keeps a
+stream open for 2–3 s after the last sound, so retry until it answers
+`install=ESP_OK`.
 
 **What clean looks like** (the control through the laptop's own speaker, and
 WROVER2 on 2026-09-28 after a reboot): tone **997.00 Hz**, **6.02 s** long,
@@ -148,16 +152,22 @@ second longer to play than it was.
 The `a` window, one line per run:
 
 ```
-[A2DP] win=11.8s pk=467 pk/s=39.6 B/s=162297 pkB=4096..4096 idlemax=18.1ms
-       writemax=17.1ms cbmax=5.39ms fwd=1 wifi=1 idle5ms=0,458,5,3,0,0,0,0 tx=4357
+[A2DP] win=11.9s pk=467 pk/s=39.4 pkB=4096..4096 ring=11.6ms late=3 nb=0
+       gapmax=31.9ms idlemax=30.8ms cbmax=1.91ms writemax=23.2ms fwd=1 wifi=1
+       heap=29404 gap5ms=0,456,9,0,0,0,1,0 tx=17580
 ```
 
-`idle5ms` is a histogram in 5 ms buckets of how long the BT task waited for the
-next packet after writing the previous one to I2S. The library's DMA ring holds
-11.6 ms, so anything past the second bucket is a stretch of zeros on the
-speaker. **Known gap:** the wait is measured from our stream callback, and with
-forwarding on that callback itself takes up to 5 ms (`cbmax`), which drains the
-ring too and is not in the histogram. Add the two before calling a window clean.
+`gap5ms` is a histogram in 5 ms buckets of the time between one `i2s_write()`
+and the next: waiting for the packet, decoding it, and forwarding it in our
+callback (`cbmax`). While that runs, only the DMA ring plays, so a gap longer
+than `ring` is a stretch of zeros on the speaker, counted as `late`. The line
+above is the old 11.6 ms ring: 3 late, and the 31.9 ms gap is the 22 ms hole
+the mic heard in the same run (31.9 − 11.6 = 20.3). `nb` counts writes that did
+not block — moments the ring was not full, when `late` undercounts; a few per
+run on the 46 ms ring are the ring refilling after a long gap. (Until
+`b8273ae` the histogram was of the idle part only, which missed the callback's
+time; windows logged before that, such as `a2dp-20260928-173606`, say
+`idle5ms` and undercount.)
 
 Traps, each of which cost a run on 2026-09-28:
 

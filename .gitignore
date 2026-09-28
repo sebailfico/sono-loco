@@ -39,3 +39,4 @@ logs/
 
 # Python venvs for the host-side tools (tools/btlisten/)
 .venv*/
+__pycache__/
