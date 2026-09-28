@@ -23,13 +23,14 @@ control: 997.00 Hz, zero dips. Anything the node adds on top is the node's.
 With --serial, the node's A2DP window (the `a` command) is reset as playback
 starts and printed at the end, so each recording comes with the board's own
 view of the same seconds. --pre sends commands first: `f` toggles forwarding
-to the mesh, `w` stops WiFi until reboot.
+to the mesh, `w` stops WiFi until reboot. --at 3.5:j sends one mid-playback:
+`j` plays the connect jingle as a connection would, `J` the old unguarded way.
 
 Recordings go to logs/listen-<time>[-label].wav, with a plot of 250 ms of the
 tone beside it. Needs numpy, scipy, sounddevice, pyserial and matplotlib; see
 requirements.txt next to this file.
 """
-import argparse, datetime, os, sys, time, wave
+import argparse, datetime, os, sys, threading, time, wave
 import numpy as np
 import sounddevice as sd
 
@@ -183,6 +184,8 @@ def main():
     ap.add_argument('--mic', default='Microphone', help='input endpoint name (substring)')
     ap.add_argument('--serial', metavar='COMn', help="the node's port, for its A2DP window")
     ap.add_argument('--pre', default='', help='serial commands to send first, e.g. f')
+    ap.add_argument('--at', action='append', default=[], metavar='SEC:CMD',
+                    help='send CMD over serial SEC seconds into playback, e.g. 3.5:j')
     ap.add_argument('--label', default='', help='folded into the file name')
     ap.add_argument('--lead', type=float, default=1.5)
     ap.add_argument('--tone', type=float, default=6.0)
@@ -206,9 +209,14 @@ def main():
             ser.talk(sp, a.pre, 0.5)
     print(f'{datetime.datetime.now():%H:%M:%S} playing {len(sig) / fs_out:.1f} s '
           f'to {a.device!r} at {a.level:.0f} dBFS')
-    # The board's window is reset as late as possible, right as playback opens.
-    x, fs = record(sig, fs_out, a.device, a.mic,
-                   on_start=(lambda: sp.write(b'a')) if sp else None)
+    # The board's window is reset as late as possible, right as playback opens;
+    # --at commands are timed from the same moment.
+    def on_start():
+        sp.write(b'a')
+        for spec in a.at:
+            sec, cmd = spec.split(':', 1)
+            threading.Timer(float(sec), sp.write, args=(cmd.encode(),)).start()
+    x, fs = record(sig, fs_out, a.device, a.mic, on_start=on_start if sp else None)
     if sp:
         sp.reset_input_buffer()
         ser.talk(sp, 'a', 0.6)
