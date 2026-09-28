@@ -96,26 +96,12 @@ crackled — both under "Blocking" below.
       running below 12 V, not the stream. The ESP-NOW side ran
       at the full 220.6 frames/s from the PC; nothing was listening to
       measure the air loss.
-- [ ] **The MAX98357A boards are silent.** WROVER1 (COM20 now) and the S3
-      (COM9) are wired to them. **2026-09-28 it is narrowed to the amp side:**
-      WROVER1 as the Bluetooth server, laptop streaming, was in SERVER at
-      43 packets/s with i2s_write() blocking ~23 ms per packet — the I2S
-      clock was running and draining at real time — and its mesh stream,
-      which is taken *after* the A2DP volume, was audible on WROVER2. Yet the
-      MAX98357A was silent on two different speakers (a small car-unit one, a
-      20" TV one). So the samples leave GPIO 26/22/25 (BCLK/LRC/DIN) at a
-      sane level and die between there and the speaker. Check, in order:
-      1. **SD.** Below 0.16 V the chip is shut down, and it has an internal
-         pull-down. The Adafruit board adds a 1 MΩ pull-up that holds SD near
-         0.45 V ((L+R)/2); many clones do not, and on those "SD floating" —
-         what this item used to call right — is permanently off. Measure SD
-         to GND while playing; if it is ~0 V, tie it to 3.3 V (left channel)
-         or through ~1 MΩ to VIN (mix).
-      2. VIN–GND on the amp board while playing (2.5–5.5 V), and a ground
-         shared with the ESP32.
-      3. BCLK→26, LRC→22, DIN→25 by GPIO number, not by the dev board's
-         D-labels; BCLK and LRC swapped is silence.
-      The S3's I2S pins 4/5/6 have never driven a DAC.
+- [ ] **The S3's MAX98357A has never made a sound.** WROVER1's does, since
+      2026-09-28 (`CHANGELOG.md`); its silence was the wiring, not the
+      board — see the note on base boards below before debugging the S3's.
+      The S3's I2S pins 4/5/6 have never driven a DAC. SD: WROVER1's clone
+      plays with SD tied to 3.3 V (left channel); whether it has the pull-up
+      that makes a floating SD work was not checked.
 - [ ] **Tones on every board, and loud enough for the amp they are on.** The
       user wants the startup tone on every node, DAC or not, BT or not — a
       client-only build plays nothing at boot today because the startup tone
