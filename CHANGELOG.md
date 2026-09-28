@@ -48,7 +48,12 @@ in `TODO.md` false.
   is 20.3 ms of zeros and the mic heard a 22 ms hole; 24.9 ms is 13.3 and it
   heard 14. On the new ring gaps as long pass silently. Cost: 6 KB of internal
   DRAM (23.2 KB free streaming and forwarding, from 29.4) and 46 ms of local
-  latency, which the server needs anyway to meet its clients.
+  latency, which the server needs anyway to meet its clients. A phone on the
+  same build — the last thing to crash a server short of DRAM — connected and
+  played "very fine": 50 packets/s of 3–4 KB (Windows sends 43 of 4 KB),
+  late 0, longest gap 21 ms, 21.4–22.4 KB free while streaming and
+  forwarding. Two TX-queue overflows (`qfull=2`) in that minute, i.e. two
+  mesh frames dropped at the source; the queue is the mesh item's business.
 
   The board's gap count was fixed on the way (`b8273ae`): it had measured
   only the wait for the next packet, missing the up to 5 ms the forwarding

@@ -125,13 +125,13 @@ crackled — both under "Blocking" below.
       gets `PS_NONE` like everyone else) as a CLIENT of a bench source, 600 s,
       compare `lost`/`und` against the baseline. If it costs packets, the
       next thing to try is `esp_now_set_wake_window()`.
-- [ ] **Connect a phone to a server on the 46 ms ring.** The deeper I2S
-      ring costs 6 KB of internal DRAM: 23.2 KB free while streaming from
-      the PC and forwarding, against 29.4 KB before. The last time a server
-      ran short of internal DRAM it was a *phone* connecting that crashed it
-      (2026-09-14, 15.5 KB free). Pair the phone, play, pause, disconnect,
-      reconnect, and watch `heap=` in the `a` window; if it gets tight,
-      `q128` (23 ms) is the fallback to measure next.
+- [ ] **The TPA3116 on WROVER2 is too hot for its speaker**: very loud by
+      50% on the phone, which on the library's curve is already −17.5 dB.
+      Fix it on the amp — the module's gain jumper, or a divider between DAC
+      and amp input (10 k series, 3.3 k to ground ≈ −12 dB). Not with a
+      volume ceiling in firmware: the server forwards to the mesh *after*
+      the A2DP volume is applied, so a ceiling on one node would turn every
+      room down.
 - [ ] **Solder a DAC to the S3** and pick its I2S pins — `config.h` hardcodes the
       WROOM/WROVER pins (26/25/22) for every board. Until then the S3 is verified
       only as far as "packets arrive and the buffer stays healthy", with no audio
