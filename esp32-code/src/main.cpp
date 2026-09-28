@@ -992,10 +992,13 @@ static void startBluetooth() {
  * ring, so one Bluetooth session can compare two depths -- a reflash would
  * drop the link, and getting it back needs a person to click Connect.
  *
- * Only between streams. The library stops I2S on every audio suspend and
- * starts it on resume, and otherwise leaves the driver alone after start():
- * a driver swapped while suspended is simply the one it resumes on. During a
- * stream the BT task could be inside i2s_write(), so that is refused.
+ * Only between streams: during one the BT task could be inside i2s_write().
+ * The library installs the driver once in start() and, as configured here
+ * (set_output_active_by_state never called), leaves it *running* across a
+ * suspend, playing zeros -- on resume it sees I2S still active and does not
+ * call i2s_start(). So the new driver must be left running too. The first
+ * version stopped it, the library's next i2s_write() blocked forever
+ * (portMAX_DELAY), and the BT task with it.
  */
 static void serverSetDmaLen(int len) {
     if (!btSinkStarted || txReady) {
@@ -1013,8 +1016,8 @@ static void serverSetDmaLen(int len) {
     if (err == ESP_OK) {
         i2s_pin_config_t pins = serverI2SPins();
         i2s_set_pin(I2S_NUM_0, &pins);
-        i2s_stop(I2S_NUM_0);            // suspended, as the library left it
         i2s_zero_dma_buffer(I2S_NUM_0);
+        i2s_start(I2S_NUM_0);           // running, as the library left it
         a2dpSink.set_i2s_config(cfg);
         serverDmaLen = len;
     }
