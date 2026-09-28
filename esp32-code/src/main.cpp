@@ -708,46 +708,91 @@ static volatile bool a2dpForward = true;
 // before the library's blocking i2s_write(), data_received runs after it.
 //
 //   write = data_received - end of our callback: time blocked in i2s_write()
-//   idle  = our callback - previous data_received: time waiting for a packet
+//   idle  = our callback - previous data_received: waiting for and decoding
+//           the next packet
+//   gap   = end of our callback - previous data_received: idle plus the
+//           forwarding in our callback, i.e. everything between one
+//           i2s_write() and the next
 //
-// i2s_write() returns once the packet's tail fits in the DMA ring, so the ring
-// is roughly full at that moment -- the library's default ring is 8 x 64
-// frames, 11.6 ms at 44.1 kHz. An idle longer than that is a stretch in which the DMA ran dry and played
-// zeros (the library sets tx_desc_auto_clear) -- an audible gap. The idle
-// histogram is therefore an underrun count the board takes of itself.
-// Printed and reset by `a`.
-static volatile uint32_t a2dpPackets   = 0;
-static volatile uint32_t a2dpBytes     = 0;
-static volatile uint32_t a2dpPktMin    = UINT32_MAX;
-static volatile uint32_t a2dpPktMax    = 0;
-static volatile uint32_t a2dpIdleMaxUs = 0;
+// i2s_write() returns once the packet's tail fits in the DMA ring, so -- as
+// long as writes block, which `nb` checks -- the ring is full at that moment
+// and holds serverDmaMs() of audio. A gap longer than that is a stretch in
+// which the DMA ran dry and played zeros (the library sets
+// tx_desc_auto_clear) -- an audible hole, counted as `late`.
+//
+// Writes only block if the ring is already full. With the library's 11.6 ms
+// ring that is automatic: a 23.2 ms packet cannot fit. A ring deeper than a
+// packet stays full only if something filled it, which is what
+// serverPrefill() does at the start of every stream; `nb` counts writes that
+// returned without blocking, i.e. moments the ring was not full.
+// The first version of this histogram measured idle alone, and with
+// forwarding on the callback's own 5 ms went uncounted. Printed and reset by
+// `a`.
+static volatile uint32_t a2dpPackets    = 0;
+static volatile uint32_t a2dpBytes      = 0;
+static volatile uint32_t a2dpPktMin     = UINT32_MAX;
+static volatile uint32_t a2dpPktMax     = 0;
+static volatile uint32_t a2dpIdleMaxUs  = 0;
+static volatile uint32_t a2dpGapMaxUs   = 0;
 static volatile uint32_t a2dpWriteMaxUs = 0;
-static volatile uint32_t a2dpCbMaxUs   = 0;
-static volatile uint32_t a2dpIdleHist[8];   // 5 ms buckets, last one open-ended
-static uint32_t          a2dpCbEndUs   = 0;
+static volatile uint32_t a2dpCbMaxUs    = 0;
+static volatile uint32_t a2dpLate       = 0;
+static volatile uint32_t a2dpNoBlock    = 0;
+static volatile bool     a2dpPrefill    = false;
+static volatile uint32_t a2dpGapHist[8];   // 5 ms buckets, last one open-ended
+static uint32_t          a2dpCbEndUs    = 0;
 static uint32_t          a2dpWriteEndUs = 0;
-static unsigned long     a2dpWindowMs  = 0;
+static unsigned long     a2dpWindowMs   = 0;
+
+// The DMA ring the library's I2S driver was installed with. SERVER_DMA_BUF_LEN
+// at boot; `q<frames>` reinstalls it between streams, so one Bluetooth session
+// can compare two depths without a reflash and a reconnect in between.
+static int serverDmaLen = SERVER_DMA_BUF_LEN;
+
+static float serverDmaMs() {
+    return SERVER_DMA_BUF_COUNT * serverDmaLen * 1000.0f / BT_SAMPLE_RATE;
+}
+
+// The library's own default config (BluetoothA2DPOutputLegacy) with only the
+// DMA ring changed. The sample rate is overwritten on codec configuration.
+static i2s_config_t serverI2SConfig(int dmaLen) {
+    i2s_config_t cfg = {};
+    cfg.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+    cfg.sample_rate          = BT_SAMPLE_RATE;
+    cfg.bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT;
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+    cfg.intr_alloc_flags     = 0;
+    cfg.dma_buf_count        = SERVER_DMA_BUF_COUNT;
+    cfg.dma_buf_len          = dmaLen;
+    cfg.use_apll             = false;
+    cfg.tx_desc_auto_clear   = true;
+    return cfg;
+}
 
 static void a2dpStatsReset() {
-    a2dpPackets = a2dpBytes = 0;
+    a2dpPackets = a2dpBytes = a2dpLate = a2dpNoBlock = 0;
     a2dpPktMin = UINT32_MAX;
-    a2dpPktMax = a2dpIdleMaxUs = a2dpWriteMaxUs = a2dpCbMaxUs = 0;
-    for (auto &h : a2dpIdleHist) h = 0;
-    a2dpWriteEndUs = 0;   // the first packet after a reset has no idle to measure
+    a2dpPktMax = a2dpIdleMaxUs = a2dpGapMaxUs = a2dpWriteMaxUs = a2dpCbMaxUs = 0;
+    for (auto &h : a2dpGapHist) h = 0;
+    a2dpWriteEndUs = 0;   // the first packet after a reset has no gap to measure
     a2dpWindowMs = millis();
 }
 
 static void a2dpStatsPrint() {
     const float secs = (millis() - a2dpWindowMs) / 1000.0f;
     DEBUG_SERIAL.printf(
-        "[A2DP] win=%.1fs pk=%lu pk/s=%.1f B/s=%.0f pkB=%lu..%lu idlemax=%.1fms "
-        "writemax=%.1fms cbmax=%.2fms fwd=%d wifi=%d idle5ms=",
-        secs, (unsigned long)a2dpPackets, a2dpPackets / secs, a2dpBytes / secs,
+        "[A2DP] win=%.1fs pk=%lu pk/s=%.1f pkB=%lu..%lu ring=%.1fms late=%lu nb=%lu "
+        "gapmax=%.1fms idlemax=%.1fms cbmax=%.2fms writemax=%.1fms fwd=%d wifi=%d "
+        "heap=%lu gap5ms=",
+        secs, (unsigned long)a2dpPackets, a2dpPackets / secs,
         (unsigned long)(a2dpPackets ? a2dpPktMin : 0), (unsigned long)a2dpPktMax,
-        a2dpIdleMaxUs / 1000.0f, a2dpWriteMaxUs / 1000.0f, a2dpCbMaxUs / 1000.0f,
-        a2dpForward ? 1 : 0, espnowActive ? 1 : 0);
+        serverDmaMs(), (unsigned long)a2dpLate, (unsigned long)a2dpNoBlock,
+        a2dpGapMaxUs / 1000.0f, a2dpIdleMaxUs / 1000.0f, a2dpCbMaxUs / 1000.0f,
+        a2dpWriteMaxUs / 1000.0f, a2dpForward ? 1 : 0, espnowActive ? 1 : 0,
+        (unsigned long)ESP.getFreeHeap());
     for (int i = 0; i < 8; i++)
-        DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)a2dpIdleHist[i]);
+        DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)a2dpGapHist[i]);
     DEBUG_SERIAL.printf(" tx=%lu\n", (unsigned long)txSent);
 }
 
@@ -755,7 +800,22 @@ static void a2dpWriteDone() {
     const uint32_t now = micros();
     const uint32_t w = now - a2dpCbEndUs;
     if (w > a2dpWriteMaxUs) a2dpWriteMaxUs = w;
+    if (w < 1000) a2dpNoBlock++;
     a2dpWriteEndUs = now;
+}
+
+// Fill the whole DMA ring with silence before the first packet of a stream,
+// from the BT task, so the library's writes queue behind a full ring from the
+// start instead of running just in time. Costs the ring's depth in latency,
+// once; see SERVER_DMA_BUF_LEN in config.h.
+static void serverPrefill() {
+    static const uint8_t zeros[256] = {0};
+    int bytes = SERVER_DMA_BUF_COUNT * serverDmaLen * 4;
+    while (bytes > 0) {
+        const size_t n = min(bytes, (int)sizeof(zeros));
+        if (i2sWriteAll(zeros, n, pdMS_TO_TICKS(50)) < n) break;   // I2S not running
+        bytes -= n;
+    }
 }
 
 static void a2dpForwardPacket(const uint8_t *data, uint32_t length);
@@ -763,12 +823,11 @@ static void a2dpForwardPacket(const uint8_t *data, uint32_t length);
 // Called from BT task, once per decoded packet, before the library writes it
 // to I2S. Accounts for the packet, then forwards it to the mesh.
 static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
-    const uint32_t t0 = micros();
-    if (a2dpWriteEndUs) {
-        const uint32_t idle = t0 - a2dpWriteEndUs;
-        if (idle > a2dpIdleMaxUs) a2dpIdleMaxUs = idle;
-        a2dpIdleHist[min<uint32_t>(idle / 5000, 7)]++;
+    if (a2dpPrefill) {
+        a2dpPrefill = false;
+        serverPrefill();
     }
+    const uint32_t t0 = micros();
     a2dpPackets++;
     a2dpBytes += length;
     if (length < a2dpPktMin) a2dpPktMin = length;
@@ -778,6 +837,14 @@ static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
 
     a2dpCbEndUs = micros();
     if (a2dpCbEndUs - t0 > a2dpCbMaxUs) a2dpCbMaxUs = a2dpCbEndUs - t0;
+    if (a2dpWriteEndUs) {
+        const uint32_t idle = t0 - a2dpWriteEndUs;
+        const uint32_t gap  = a2dpCbEndUs - a2dpWriteEndUs;
+        if (idle > a2dpIdleMaxUs) a2dpIdleMaxUs = idle;
+        if (gap > a2dpGapMaxUs)   a2dpGapMaxUs = gap;
+        a2dpGapHist[min<uint32_t>(gap / 5000, 7)]++;
+        if (gap > (uint32_t)(serverDmaMs() * 1000.0f)) a2dpLate++;
+    }
 }
 
 // Downsamples 44100Hz stereo → 22050Hz mono and queues ESP-NOW packets. The
@@ -839,14 +906,16 @@ static void btConnectionChanged(esp_a2d_connection_state_t state, void *) {
 
 static void btAudioChanged(esp_a2d_audio_state_t state, void *) {
     if (state == ESP_A2D_AUDIO_STATE_STARTED) {
-        txReady      = true;
-        audioStartMs = millis();
+        txReady        = true;
+        audioStartMs   = millis();
+        a2dpWriteEndUs = 0;   // the first packet of a stream has no gap
+        a2dpPrefill    = true;
         decimReset();
         accumLen = 0;
         LOG_INFO("BT audio started → ESP-NOW TX will activate in " + String(TX_WARMUP_MS) + "ms");
     } else {
-        txReady      = false;
-        audioStartMs = 0;
+        txReady        = false;
+        audioStartMs   = 0;
         LOG_INFO("BT audio stopped → ESP-NOW TX paused");
     }
 }
@@ -887,11 +956,7 @@ static void bringUpBtController() {
     if (r != ESP_OK) LOG_ERROR("BT controller enable failed: " + String(esp_err_to_name(r)));
 }
 
-static void startBluetooth() {
-    if (btSinkStarted) return;
-
-    bringUpBtController();
-
+static i2s_pin_config_t serverI2SPins() {
     i2s_pin_config_t pins = {
         .mck_io_num   = I2S_PIN_NO_CHANGE,
         .bck_io_num   = I2S_BCK_PIN,
@@ -899,7 +964,16 @@ static void startBluetooth() {
         .data_out_num = I2S_DATA_PIN,
         .data_in_num  = I2S_PIN_NO_CHANGE
     };
-    a2dpSink.set_pin_config(pins);
+    return pins;
+}
+
+static void startBluetooth() {
+    if (btSinkStarted) return;
+
+    bringUpBtController();
+
+    a2dpSink.set_pin_config(serverI2SPins());
+    a2dpSink.set_i2s_config(serverI2SConfig(serverDmaLen));
     a2dpSink.set_stream_reader(a2dpDataCallback, true);  // true = keep local I2S output
     a2dpSink.set_on_data_received(a2dpWriteDone);
     a2dpSink.set_on_connection_state_changed(btConnectionChanged);
@@ -911,6 +985,42 @@ static void startBluetooth() {
     LOG_INFO("BT discoverable as: " BT_DEVICE_NAME);
     LOG_INFO("Heap after BT start: " + String(ESP.getFreeHeap()) + " bytes, maxalloc " +
              String(ESP.getMaxAllocHeap()));
+}
+
+/**
+ * `q<frames>`: reinstall the A2DP library's I2S driver with a different DMA
+ * ring, so one Bluetooth session can compare two depths -- a reflash would
+ * drop the link, and getting it back needs a person to click Connect.
+ *
+ * Only between streams. The library stops I2S on every audio suspend and
+ * starts it on resume, and otherwise leaves the driver alone after start():
+ * a driver swapped while suspended is simply the one it resumes on. During a
+ * stream the BT task could be inside i2s_write(), so that is refused.
+ */
+static void serverSetDmaLen(int len) {
+    if (!btSinkStarted || txReady) {
+        DEBUG_SERIAL.println("[A2DP] error reason=streaming (stop playback first)");
+        return;
+    }
+    if (len < 8 || len > 1024) {
+        DEBUG_SERIAL.println("[A2DP] error reason=range (8..1024 frames)");
+        return;
+    }
+    i2s_config_t cfg = serverI2SConfig(len);
+    cfg.sample_rate = a2dpSink.sample_rate();
+    i2s_driver_uninstall(I2S_NUM_0);
+    esp_err_t err = i2s_driver_install(I2S_NUM_0, &cfg, 0, nullptr);
+    if (err == ESP_OK) {
+        i2s_pin_config_t pins = serverI2SPins();
+        i2s_set_pin(I2S_NUM_0, &pins);
+        i2s_stop(I2S_NUM_0);            // suspended, as the library left it
+        i2s_zero_dma_buffer(I2S_NUM_0);
+        a2dpSink.set_i2s_config(cfg);
+        serverDmaLen = len;
+    }
+    DEBUG_SERIAL.printf("[A2DP] dma=%dx%d ring=%.1fms install=%s heap=%lu\n",
+                        SERVER_DMA_BUF_COUNT, serverDmaLen, serverDmaMs(),
+                        esp_err_to_name(err), (unsigned long)ESP.getFreeHeap());
 }
 
 static void stopBluetooth() {
@@ -1599,6 +1709,8 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   a  print and reset the A2DP timing window (see a2dpDataCallback)
  *   f  toggle forwarding A2DP audio to the mesh; local playback continues
  *   w  stop WiFi altogether, until the next reboot -- what a WROOM server is
+ *   q  `q<frames>` sets the local I2S DMA buffer length, between streams only;
+ *      bare `q` prints the current ring
  */
 static void benchServiceSerial() {
     while (DEBUG_SERIAL.available()) {
@@ -1666,6 +1778,14 @@ static void benchServiceSerial() {
                 espnowActive = false;
                 DEBUG_SERIAL.printf("[A2DP] wifi stop -> %s\n", esp_err_to_name(esp_wifi_stop()));
                 break;
+            case 'q': {
+                char line[8];
+                benchReadLine(line, sizeof(line));
+                if (line[0] != '\0') serverSetDmaLen(atoi(line));
+                else DEBUG_SERIAL.printf("[A2DP] dma=%dx%d ring=%.1fms\n", SERVER_DMA_BUF_COUNT,
+                                         serverDmaLen, serverDmaMs());
+                break;
+            }
 #endif
             case 'b':
                 benchMagic = BENCH_MAGIC;

@@ -71,6 +71,23 @@
 #define BT_SAMPLE_RATE   44100
 #define VOLUME_DEFAULT   1       // 0–127; keep low, TPA3116 has high gain
 
+// The server's local I2S DMA ring. The A2DP library writes each decoded packet
+// to I2S from the Bluetooth task and blocks until its tail fits, so between
+// packets this ring is all that plays -- whatever the task spends waiting for
+// the next packet, decoding it and forwarding it to the mesh must fit inside
+// it, or the DMA plays zeros. The library's default is 8 x 64 frames, 11.6 ms:
+// half of one 23.2 ms packet from Windows. Measured 2026-09-28 the task spent
+// 5-10 ms between packets in steady play, 10-27 ms around the start of a
+// stream, plus up to 5 ms in the forwarding callback. 8 x 256 is 46 ms, costs
+// 6 KB more internal DRAM, and a zeroed buffer on an underrun is 5.8 ms
+// instead of 1.45. A ring deeper than a packet only helps while it is full,
+// so every stream starts by filling it with silence (serverPrefill); the
+// local output is then the ring's depth late. That latency is not a cost:
+// the server's local output will have to be delayed to meet the clients'
+// ~137 ms anyway.
+#define SERVER_DMA_BUF_COUNT  8
+#define SERVER_DMA_BUF_LEN    256
+
 // ============================================================================
 // Notification Tones (startup / connect / disconnect)
 // ============================================================================
