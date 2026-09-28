@@ -138,7 +138,8 @@ WiFi until the next reboot. To compare I2S ring depths in one session, send
 `q64` (the library's old 11.6 ms) or `q256` (the default, 46 ms) over serial
 *between* runs — it is refused while a stream is running, and Windows keeps a
 stream open for 2–3 s after the last sound, so retry until it answers
-`install=ESP_OK`.
+`install=ESP_OK`. `--at 3.0:j` sends a command three seconds into playback —
+`j`/`J` play the connect jingle over the test tone, the new way and the old.
 
 **What clean looks like** (the control through the laptop's own speaker, and
 WROVER2 on 2026-09-28 after a reboot): tone **997.00 Hz**, **6.02 s** long,

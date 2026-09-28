@@ -96,14 +96,26 @@ crackled — both under "Blocking" below.
       running below 12 V, not the stream. The ESP-NOW side ran
       at the full 220.6 frames/s from the PC; nothing was listening to
       measure the air loss.
-- [ ] **The MAX98357A boards are silent.** WROVER1 (COM12) and the S3
-      (COM9) are wired to them. In the last window WROVER1 was receiving and
-      driving I2S (144 re-arms, 24% loss) and **no sound came out** — the
-      user confirmed it. So either the wiring (SD floating is right for
-      mono; VIN on 5 V; GAIN floating), the power, or the I2S signal never
-      reached the amp. Cheapest proof, no phone needed:
-      bench mode, WROVER2 as source (`-Source COM13`), the 6000-amplitude
-      tone is unmissable. The S3's I2S pins 4/5/6 have never driven a DAC.
+- [ ] **The MAX98357A boards are silent.** WROVER1 (COM20 now) and the S3
+      (COM9) are wired to them. **2026-09-28 it is narrowed to the amp side:**
+      WROVER1 as the Bluetooth server, laptop streaming, was in SERVER at
+      43 packets/s with i2s_write() blocking ~23 ms per packet — the I2S
+      clock was running and draining at real time — and its mesh stream,
+      which is taken *after* the A2DP volume, was audible on WROVER2. Yet the
+      MAX98357A was silent on two different speakers (a small car-unit one, a
+      20" TV one). So the samples leave GPIO 26/22/25 (BCLK/LRC/DIN) at a
+      sane level and die between there and the speaker. Check, in order:
+      1. **SD.** Below 0.16 V the chip is shut down, and it has an internal
+         pull-down. The Adafruit board adds a 1 MΩ pull-up that holds SD near
+         0.45 V ((L+R)/2); many clones do not, and on those "SD floating" —
+         what this item used to call right — is permanently off. Measure SD
+         to GND while playing; if it is ~0 V, tie it to 3.3 V (left channel)
+         or through ~1 MΩ to VIN (mix).
+      2. VIN–GND on the amp board while playing (2.5–5.5 V), and a ground
+         shared with the ESP32.
+      3. BCLK→26, LRC→22, DIN→25 by GPIO number, not by the dev board's
+         D-labels; BCLK and LRC swapped is silence.
+      The S3's I2S pins 4/5/6 have never driven a DAC.
 - [ ] **Tones on every board, and loud enough for the amp they are on.** The
       user wants the startup tone on every node, DAC or not, BT or not — a
       client-only build plays nothing at boot today because the startup tone
@@ -125,6 +137,31 @@ crackled — both under "Blocking" below.
       gets `PS_NONE` like everyone else) as a CLIENT of a bench source, 600 s,
       compare `lost`/`und` against the baseline. If it costs packets, the
       next thing to try is `esp_now_set_wake_window()`.
+- [ ] **A per-node volume trim.** The user's ask, 2026-09-28: every node
+      should be heard clearly whatever its amp and speaker — WROVER2's TPA3116
+      is loud by 50%, WROVER1's MAX98357A is a small amp. Today the phone's
+      volume is applied on the server before forwarding, so every room follows
+      one slider and no node can differ. Proposal: a gain in dB per node, in
+      NVS like the mesh name, set over serial (`v<dB>`), applied at that
+      node's output — on a client in `driveClientI2S`, on the server to its
+      local output only, after the forward is taken. The phone slider still
+      moves every room together; the trim sets each room's offset. Worth
+      deciding at the same time whether the mesh should carry pre-volume
+      audio plus the volume value instead: at a low phone volume the forwarded
+      16-bit stream has already lost bits the clients cannot get back.
+- [ ] **A node playing as a client cannot be connected to.** Its Bluetooth
+      is stopped in CLIENT, so a phone trying to take it over fails ("Couldn't
+      connect", 2026-09-28) until the current server stops and the node has
+      sat 5 s in silence. Either keep a connectable (page-scan) BT on clients,
+      at whatever that costs the radio, or document the two-step. Separately,
+      Windows then also failed on the freshly rebooted node with nothing at
+      all reaching it, and later connected fine; not understood.
+- [ ] **Measure the jingle fix** (`563833a`). `listen.py --serial COM21
+      --pre f --at 3.0:J` against `--at 3.0:j`, in a quiet room with nothing
+      else playing (the one attempt had music under it), and the notes broken
+      out of each recording: the old way should show each note in pieces with
+      the test tone between them, the new way one piece per note and no test
+      tone under the jingle.
 - [ ] **The TPA3116 on WROVER2 is too hot for its speaker**: very loud by
       50% on the phone, which on the library's curve is already −17.5 dB.
       Fix it on the amp — the module's gain jumper, or a divider between DAC

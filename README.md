@@ -388,6 +388,7 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `a` | BT server: print and reset the A2DP timing window — packets/s, packet size, and a histogram of the gaps between I2S writes. A gap longer than the DMA ring is a hole in the local output, counted as `late` |
 | `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
 | `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
+| `j` / `J` | BT server: play the connect jingle now — `j` the way a connection does (the library's local output muted meanwhile), `J` the old unguarded way. For comparing the two during a stream |
 | `q` | BT server: `q<frames>` reinstalls the local I2S DMA ring with that buffer length (8 buffers; 256 = 46 ms is the default, 64 = the library's 11.6 ms), between streams only. Bare `q` prints it |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
