@@ -30,6 +30,46 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **The Bluetooth half has a test signal, and the PC can listen to it.**
+  `tools/btlisten/listen.py` makes the PC the A2DP source: it plays a 997 Hz
+  tone into a paired server and records the speaker with the laptop's own
+  microphone, then reports holes in the tone (>6 dB, 1 ms resolution),
+  clicks, and the tone's pitch and length as recorded. A run through the
+  laptop's speaker is the control: 997.00 Hz, 6.02 s, zero dips. Two things
+  had to be found first: Windows' default capture path runs voice noise
+  suppression that erases a steady sine and gates the rest to exact zeros
+  (RAW mode fixes it), and exclusive mode on this Realtek driver returns
+  65–82 k frames/s for a 48 k stream. The server side got instruments too
+  (`8b49010`): `a` prints a window of A2DP timing — packets/s, packet size,
+  and a histogram of how long the BT task waited between packets against the
+  11.6 ms DMA ring — `f` toggles forwarding, `w` stops WiFi. `mon.py` logs the
+  window every 2 s during real use.
+
+  What it found on WROVER2 (COM19, `v0.2.0-18-g8b49010` for everything after
+  the first row):
+
+  | | pitch | tone length | dips/s |
+  |---|---|---|---|
+  | laptop speaker (control) | 997.00 | 6.02 s | 0 |
+  | WROVER2, forwarding on, before reflash | 987.14 | 6.55 s | **26.8**, ~3 ms, every 24–28 ms |
+  | WiFi off (`w`) | 996.99 | 6.02 s | 0 |
+  | after reboot, WiFi on, forwarding on / off / on, low volume | 997.00 / 996.97 / 996.76 | 6.0 s | 0.4 / 0.2 / 1.4 |
+  | same at 40% volume | 996.93 / 996.91 / 996.95 | 6.0 s | 0.4 / 0.5 / 0.4 |
+
+  The crackle was real — one hole per A2DP packet, and time inserted — and
+  did not come back after a reboot in any condition, so it is not simply
+  WiFi being on; what state produced it is open. The board's own view of
+  clean play: Windows sends 4096-byte packets (1024 frames, 23.2 ms) at
+  43.0/s, the BT task waits 5–10 ms between them, and forwarding runs at the
+  full 220.6 frames/s. The margin against the DMA ring is thin — about nine
+  waits of 10–27 ms in the first 8 s of playback, heard as "a bit crispy at
+  first" — which is the next item in `TODO.md`.
+
+  Separately, "very distorted above 50–60% volume" on two different speakers
+  was the TPA3116 clipping on its 12 V supply: 2.1 Vrms from the PCM5102 at
+  26 dB gain wants far more swing than 12 V gives, and on the library's volume
+  curve the clip point lands at 55–60%. A higher supply voltage fixed it.
+
 - **A phone has streamed through a SonoLoco server for the first time — and
   the first thing it did was crash it.** Two connection attempts to WROVER2,
   same crash both times: `assert failed: hash_map_set (data != NULL)` out of

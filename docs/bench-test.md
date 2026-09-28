@@ -108,6 +108,82 @@ with **no** offer open, a listening node must ignore a foreign stream entirely.
 Start the source on another mesh, press `p` on the odd node out, and confirm it
 reports `listening closed, no offer heard` 60 s later rather than joining.
 
+## Listening to a Bluetooth server: `tools/btlisten/`
+
+The mesh half has a synthetic stream (bench mode); this is the equivalent for
+the Bluetooth half, and it needs no phone. The PC is the A2DP source: pair the
+server with Windows once, click Connect, and it appears as an audio endpoint.
+`listen.py` plays a 997 Hz tone into it and records the node's speaker with
+the PC's microphone.
+
+One-time setup, any Python 3 with a venv (the PlatformIO Python has no numpy):
+
+```
+python -m venv .venv-btlisten
+.venv-btlisten/Scripts/pip install -r tools/btlisten/requirements.txt
+```
+
+Then, first the control, then the node:
+
+```
+python tools/btlisten/listen.py --device "Speakers (Realtek" --label control
+python tools/btlisten/listen.py --serial COM19 --label baseline
+python tools/btlisten/listen.py --serial COM19 --pre f --label no-forwarding
+```
+
+Each run is ~11 s, writes `logs/listen-<time>-<label>.wav` and a plot beside it,
+and prints the node's `a` window for the same seconds. `--pre f` toggles
+forwarding before the run (send it again to turn it back on); `--pre w` stops
+WiFi until the next reboot.
+
+**What clean looks like** (the control through the laptop's own speaker, and
+WROVER2 on 2026-09-28 after a reboot): tone **997.00 Hz**, **6.02 s** long,
+**0 dips**. What the crackle looked like, the one time it was caught
+(`logs/listen-20260928-170905-crackle-fwd-on.wav`): 27 dips/s lasting ~3 ms,
+spaced 24–28 ms — one per A2DP packet from Windows (1024 frames, 23.2 ms) —
+with the tone at 987 Hz and 6.55 s long. Pitch and length are the strongest
+signal: the analysis cannot mistake room noise for a tone that took half a
+second longer to play than it was.
+
+The `a` window, one line per run:
+
+```
+[A2DP] win=11.8s pk=467 pk/s=39.6 B/s=162297 pkB=4096..4096 idlemax=18.1ms
+       writemax=17.1ms cbmax=5.39ms fwd=1 wifi=1 idle5ms=0,458,5,3,0,0,0,0 tx=4357
+```
+
+`idle5ms` is a histogram in 5 ms buckets of how long the BT task waited for the
+next packet after writing the previous one to I2S. The library's DMA ring holds
+11.6 ms, so anything past the second bucket is a stretch of zeros on the
+speaker. **Known gap:** the wait is measured from our stream callback, and with
+forwarding on that callback itself takes up to 5 ms (`cbmax`), which drains the
+ring too and is not in the histogram. Add the two before calling a window clean.
+
+Traps, each of which cost a run on 2026-09-28:
+
+- **Windows' default microphone path erases the tone.** Its noise suppression
+  treats a steady sine as hum and gates the rest to exact zeros; the recording
+  is silent. `listen.py` opens the mic in WASAPI RAW mode for that reason.
+  Exclusive mode is no better on this laptop: the Realtek driver delivers
+  65–82 k frames/s for a 48 k stream, i.e. repeated audio — clicks of its own.
+- **The volume resets on every reconnect**, and a tone 40 dB quieter looks like
+  90 dips/s of noise. The script warns below −55 dBFS at the mic; above
+  `peak 0.99` it clipped. Lower `--level` rather than the volume.
+- **"Connected" in Windows is not the audio profile.** After a reboot Windows
+  reported the device connected while the node sat in DISCOVERY and the
+  endpoint was missing. If `listen.py` says no device matches, check the
+  node's status line.
+- **Every flash or reboot drops the Bluetooth link** and it does not come back
+  by itself (`set_auto_reconnect(false)`): somebody clicks Connect.
+- **Opening the serial port can reset the node** — and drop the link under
+  test. `ser.py` sets DTR and RTS false *before* the port opens; `pio device
+  monitor` does not.
+- **Loud and distorted is not a firmware problem** until the supply says so:
+  the TPA3116 clips on 12 V well before 100% (README, Hardware Tips).
+
+`mon.py COM19` logs the `a` window every 2 s to `logs/a2dp-<time>.log` while
+somebody plays real music — for "it crackled just then".
+
 ## Manual walkthrough
 
 The procedure below is the original by-hand version. It is still the only way to

@@ -104,11 +104,17 @@ for it is "Surviving the wild" in `TODO.md`.
 phone streams into a WROVER-E, which plays it locally and forwards it over
 ESP-NOW — after a boot loop (`WIFI_PS_NONE` gotcha) and a crash on connect
 (15 KB of internal DRAM was not enough for one L2CAP link; it is 43 KB now).
-What comes out of the server's own speaker crackles, and with the BT radio
-streaming a fifth of the ESP-NOW frames never make it onto the air (24% loss at
-the client). That is BT/WiFi coexistence on one chip hurting both radios, it is
-measured, and it is the first item in `TODO.md`. The clients' MAX98357A boards
-have not made a sound yet — that is the second.
+With the BT radio streaming, a fifth of the ESP-NOW frames never made it onto
+the air (24% loss at the client) — BT/WiFi coexistence on one chip, measured,
+and the first item in `TODO.md`. The server's *own* speaker crackled too; as of
+2026-09-28 the PC can stream a test tone to a server and listen to it through
+its microphone (`tools/btlisten/`), which found two things. The loud-volume
+distortion was the TPA3116 clipping on a 12 V supply (fixed by a higher supply,
+see Hardware Tips). And the crackle itself — a ~3 ms hole in the audio at every
+A2DP packet, measured once — did not come back after a reboot, with forwarding
+on or off; what is left is a few late packets at the start of playback,
+counted by the board itself. The clients' MAX98357A boards have not made a
+sound yet — that is the second item.
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the
@@ -174,7 +180,7 @@ see the bandwidth note in `TODO.md`.
 | Microcontroller | ESP32 WROVER | ~€7 |
 | DAC | PCM5102 I2S module | ~€3 |
 | Amplifier | TPA3116 Class D 2x50W | ~€10 |
-| Power Supply | 12V DC adapter | ~€10 |
+| Power Supply | 12–24 V DC adapter — more volts, more clean volume (Hardware Tips) | ~€10 |
 | **Total** | | **~€30** |
 
 ### Wiring Diagram
@@ -215,6 +221,18 @@ see the bandwidth note in `TODO.md`.
 - Add ferrite beads on I2S lines
 - Use separate power supplies for ESP32 and amplifier
 - Add decoupling capacitors (100nF + 10µF) near ESP32 and DAC
+
+**If it distorts above a certain volume, the amp is clipping.** The PCM5102
+puts out up to 2.1 Vrms. A TPA3116 at 26 dB gain on 12 V can swing about
+7.8 Vrms, so it clips once the DAC is above roughly −15 dB of full scale — on
+the A2DP library's volume curve (0 dB at 100%, about 3.5 dB per 10%) that is
+**55–60% on the phone**, earlier with an efficient speaker. Measured
+2026-09-28: 60% on one speaker, 50% on a louder one, then "very distorted".
+- **Raise the supply voltage** (the TPA3116 takes up to ~24 V). This is the fix
+  that adds clean volume, and the one that cured it on the bench.
+- Or lower the gain: the module's gain jumper (20/26/32/36 dB), or a resistor
+  divider between DAC and amp input. No more volume, but no clipping and less
+  hiss.
 
 **To reduce volume with TPA3116:**
 - Check for gain jumpers on your TPA3116 module (20dB/26dB/32dB)
@@ -286,7 +304,7 @@ name per board that might be plugged in:
 |---------------|--------------|------|-------|------|
 | `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
 | `esp32wrover` | ESP32 WROVER-E | COM12 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 |
-| `esp32wrover2` | ESP32 WROVER-E + DAC | COM13 | `esp32_classic` | Same binary, second name so a phone can tell the two apart |
+| `esp32wrover2` | ESP32 WROVER-E + DAC | COM19 | `esp32_classic` | Same binary, second name so a phone can tell the two apart. Was COM13 until it moved USB socket |
 | `esp32s3`     | ESP32-S3     | COM9 | `esp32s3_client` | CLIENT only (no BT Classic) |
 | `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
 
@@ -374,6 +392,9 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once — no reboot, because nothing about the id is decided at boot |
 | `p` | listen for 60 s and join the mesh that offers itself — the speaker half of pairing. Same as a three-second BOOT hold on a node that cannot be a server |
 | `o` | offer this mesh for 60 s, so a listening node can join it — the server half. Same as a three-second BOOT hold on a server-capable node |
+| `a` | BT server: print and reset the A2DP timing window — packets/s, packet size, how long the BT task sat idle between packets. An idle longer than the 11.6 ms I2S DMA ring is a gap in the local output |
+| `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
+| `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
 A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs
@@ -423,6 +444,11 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   puts every node into bench mode by design.
 - `tools/capture-serial.ps1` — timestamped serial capture of a single node, so
   two manual runs can be compared.
+- `tools/btlisten/` — the Bluetooth half's test signal. The PC streams a 997 Hz
+  tone to a server and records it with its own microphone, then counts holes,
+  clicks and pitch error; with `--serial` the board's `a` window for the same
+  seconds is printed beside it. `mon.py` logs that window every 2 s during
+  ordinary use.
 
 Comments in the code explain *why*, particularly where a line looks wrong but isn't.
 

@@ -16,8 +16,9 @@ The 41 host tests also pass on-device (`pio test -e esp32dev`): 23 for the
 jitter buffer and sequence accounting, 18 for the clock-drift controller.
 
 Boards on the bench: a WROOM (COM8), an ESP32-C3 (COM10), an ESP32-S3
-(COM9) and, since 2026-09-14, two WROVER-Es (COM12, and COM13 with a DAC).
-DACs are wired on the WROOM, the C3 and the COM13 WROVER; the S3 and the
+(COM9) and, since 2026-09-14, two WROVER-Es (COM12, and WROVER2 with a DAC
+— COM13 then, COM19 since 2026-09-28). DACs are wired on the WROOM, the C3
+and WROVER2; the S3 and the
 COM12 WROVER have none. The WROOM's auto-reset into download mode has become
 unreliable (see "Bench" below); run the harness without `-Flash` and flash it
 by hand with retries.
@@ -26,10 +27,10 @@ by hand with retries.
 channel 11 with the house router busy on channel 1. What is *not* proven is a
 building; see "Surviving the wild" below, which is the real list.
 
-Still unproven: the Bluetooth server path, i.e. real audio from a phone
-forwarded to clients. The WROVER that can do it arrived 2026-09-14 and boots
-into SERVER capable (after one coexistence fix, see `CHANGELOG.md`); the manual
-walkthrough has not been run yet.
+Still unproven: the Bluetooth server path end to end. A phone (2026-09-14)
+and the PC (2026-09-28) have both streamed into WROVER2, which plays and
+forwards; what reaches a client is lossy, and the server's own output has
+crackled — both under "Blocking" below.
 
 ---
 
@@ -77,12 +78,24 @@ walkthrough has not been run yet.
       BT loses ~2.5% of its frames (a gap every ~40 ms — a crackle), ESP-NOW
       loses ~20%. So a coexistence *preference* (1.) only moves the damage
       between the two; fewer WiFi transmissions (2.) or two chips (3.) are
-      the real candidates. **First test tomorrow, before any of that:** pair
-      the phone to `SonoLoco-WROOM` (COM8, default mode — no PSRAM, so WiFi
-      never starts) and listen. Clean there and crackly on WROVER2 pins the
-      crackle on coexistence, not on the WROVER's PSRAM cache workaround or
-      the forwarding callback in the BT task. Crackly on both means the
-      problem predates the mesh. Needs the phone: notify.
+      the real candidates.
+
+      **2026-09-28, the local crackle measured instead of listened to.** The
+      PC streamed a 997 Hz tone to WROVER2 and recorded it with its mic
+      (`tools/btlisten/`, `docs/bench-test.md`). Caught once, forwarding on:
+      27 holes/s of ~3 ms, one per A2DP packet, tone at 987 Hz and 6.55 s
+      long for 6.0 s sent. After a reflash (`8b49010`, adding the `a`/`f`/`w`
+      commands): WiFi off clean — but after a reboot, WiFi on was clean too,
+      forwarding on or off, at low volume and at 40%: 997.0 Hz, 6.02 s, 0–1.4
+      dips/s. So the WROOM test above is answered on the same board and does
+      not pin it on coexistence; what put the node in the crackling state is
+      unknown. If it comes back, run `listen.py --serial` at once and compare
+      the `a` window with the clean ones (`logs/a2dp-20260928-173606-user-
+      music.log`): packet size and rate, and the idle histogram. The "very
+      distorted" sound at high volume the same day was the TPA3116 clipping
+      on 12 V, not the stream (README, Hardware Tips). The ESP-NOW side ran
+      at the full 220.6 frames/s from the PC; nothing was listening to
+      measure the air loss.
 - [ ] **The MAX98357A boards are silent.** WROVER1 (COM12) and the S3
       (COM9) are wired to them. In the last window WROVER1 was receiving and
       driving I2S (144 re-arms, 24% loss) and **no sound came out** — the
@@ -112,14 +125,25 @@ walkthrough has not been run yet.
       gets `PS_NONE` like everyone else) as a CLIENT of a bench source, 600 s,
       compare `lost`/`und` against the baseline. If it costs packets, the
       next thing to try is `esp_now_set_wake_window()`.
-- [ ] **Prepare a known test audio sample to stream over Bluetooth into the
-      server board**, instead of testing the still-unproven BT path against
-      whatever happens to be on someone's phone. Bench mode already solved
-      this for the ESP-NOW side with a precomputed tone (D9); nothing
-      equivalent exists for the BT-ingest half, so a manual walkthrough run
-      today would not be reproducible or comparable across runs. Needs the
-      WROVER above to actually play through, but the sample itself can be
-      made now.
+- [ ] **The server's local output underruns at the start of playback.** The
+      A2DP library writes each decoded packet to I2S from the BT task, into
+      the default DMA ring of 8 × 64 frames = 11.6 ms — half of one 23.2 ms
+      packet from Windows. In steady play the task waits 5–10 ms between
+      packets, so the margin is 2–6 ms; in the first ~8 s after play it
+      waited 10–27 ms about nine times (`a2dp-20260928-173606`), and with
+      forwarding on a few more every few seconds — "a bit crispy at first"
+      by ear. Two things to do, then re-measure with `listen.py` and `mon.py`:
+      1. **Count the callback's time.** `cbmax` reaches 5 ms with forwarding
+         on (decimation plus whatever the TX task preempts), and that drains
+         the ring as much as idle does. Histogram *write end → next write
+         start*, not only the idle part, or the board under-reports its own
+         gaps.
+      2. **Deepen the ring** with `a2dpSink.set_i2s_config()`: 8 × 256 frames
+         is 46 ms, the size the tone path already uses, and costs ~6 KB of
+         internal DRAM on a node that had 24–29 KB free while streaming and
+         forwarding. The latency is free — the server has to delay its local
+         output to meet the clients anyway (Timing / sync). The constants go
+         in `config.h`.
 - [ ] **Solder a DAC to the S3** and pick its I2S pins — `config.h` hardcodes the
       WROOM/WROVER pins (26/25/22) for every board. Until then the S3 is verified
       only as far as "packets arrive and the buffer stays healthy", with no audio

@@ -36,3 +36,6 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+# Python venvs for the host-side tools (tools/btlisten/)
+.venv*/
