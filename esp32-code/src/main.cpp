@@ -698,10 +698,92 @@ static inline void decimReset() {
     decimPhase = false;
 }
 
-// Called from BT task. Downsamples 44100Hz stereo → 22050Hz mono and queues
-// ESP-NOW packets. The BT library still drives I2S locally (local playback).
+// Off with `f` over serial: the server keeps playing locally and stops handing
+// frames to the radio, so one Bluetooth session can be measured with and
+// without the mesh's transmissions competing for the radio.
+static volatile bool a2dpForward = true;
+
+// How the Bluetooth task spends its time, as seen from the two hooks the
+// library gives us: the stream reader runs after a packet is decoded and
+// before the library's blocking i2s_write(), data_received runs after it.
+//
+//   write = data_received - end of our callback: time blocked in i2s_write()
+//   idle  = our callback - previous data_received: time waiting for a packet
+//
+// i2s_write() returns once the packet's tail fits in the DMA ring, so the ring
+// is roughly full at that moment -- the library's default ring is 8 x 64
+// frames, 11.6 ms at 44.1 kHz. An idle longer than that is a stretch in which the DMA ran dry and played
+// zeros (the library sets tx_desc_auto_clear) -- an audible gap. The idle
+// histogram is therefore an underrun count the board takes of itself.
+// Printed and reset by `a`.
+static volatile uint32_t a2dpPackets   = 0;
+static volatile uint32_t a2dpBytes     = 0;
+static volatile uint32_t a2dpPktMin    = UINT32_MAX;
+static volatile uint32_t a2dpPktMax    = 0;
+static volatile uint32_t a2dpIdleMaxUs = 0;
+static volatile uint32_t a2dpWriteMaxUs = 0;
+static volatile uint32_t a2dpCbMaxUs   = 0;
+static volatile uint32_t a2dpIdleHist[8];   // 5 ms buckets, last one open-ended
+static uint32_t          a2dpCbEndUs   = 0;
+static uint32_t          a2dpWriteEndUs = 0;
+static unsigned long     a2dpWindowMs  = 0;
+
+static void a2dpStatsReset() {
+    a2dpPackets = a2dpBytes = 0;
+    a2dpPktMin = UINT32_MAX;
+    a2dpPktMax = a2dpIdleMaxUs = a2dpWriteMaxUs = a2dpCbMaxUs = 0;
+    for (auto &h : a2dpIdleHist) h = 0;
+    a2dpWriteEndUs = 0;   // the first packet after a reset has no idle to measure
+    a2dpWindowMs = millis();
+}
+
+static void a2dpStatsPrint() {
+    const float secs = (millis() - a2dpWindowMs) / 1000.0f;
+    DEBUG_SERIAL.printf(
+        "[A2DP] win=%.1fs pk=%lu pk/s=%.1f B/s=%.0f pkB=%lu..%lu idlemax=%.1fms "
+        "writemax=%.1fms cbmax=%.2fms fwd=%d wifi=%d idle5ms=",
+        secs, (unsigned long)a2dpPackets, a2dpPackets / secs, a2dpBytes / secs,
+        (unsigned long)(a2dpPackets ? a2dpPktMin : 0), (unsigned long)a2dpPktMax,
+        a2dpIdleMaxUs / 1000.0f, a2dpWriteMaxUs / 1000.0f, a2dpCbMaxUs / 1000.0f,
+        a2dpForward ? 1 : 0, espnowActive ? 1 : 0);
+    for (int i = 0; i < 8; i++)
+        DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)a2dpIdleHist[i]);
+    DEBUG_SERIAL.printf(" tx=%lu\n", (unsigned long)txSent);
+}
+
+static void a2dpWriteDone() {
+    const uint32_t now = micros();
+    const uint32_t w = now - a2dpCbEndUs;
+    if (w > a2dpWriteMaxUs) a2dpWriteMaxUs = w;
+    a2dpWriteEndUs = now;
+}
+
+static void a2dpForwardPacket(const uint8_t *data, uint32_t length);
+
+// Called from BT task, once per decoded packet, before the library writes it
+// to I2S. Accounts for the packet, then forwards it to the mesh.
 static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
-    if (currentMode != MODE_SERVER || !txReady || !espnowActive) return;
+    const uint32_t t0 = micros();
+    if (a2dpWriteEndUs) {
+        const uint32_t idle = t0 - a2dpWriteEndUs;
+        if (idle > a2dpIdleMaxUs) a2dpIdleMaxUs = idle;
+        a2dpIdleHist[min<uint32_t>(idle / 5000, 7)]++;
+    }
+    a2dpPackets++;
+    a2dpBytes += length;
+    if (length < a2dpPktMin) a2dpPktMin = length;
+    if (length > a2dpPktMax) a2dpPktMax = length;
+
+    a2dpForwardPacket(data, length);
+
+    a2dpCbEndUs = micros();
+    if (a2dpCbEndUs - t0 > a2dpCbMaxUs) a2dpCbMaxUs = a2dpCbEndUs - t0;
+}
+
+// Downsamples 44100Hz stereo → 22050Hz mono and queues ESP-NOW packets. The
+// BT library still drives I2S locally (local playback).
+static void a2dpForwardPacket(const uint8_t *data, uint32_t length) {
+    if (currentMode != MODE_SERVER || !txReady || !espnowActive || !a2dpForward) return;
     // Signed, for the reason spelled out at the ESP-NOW silence check: this
     // timestamp is written from the A2DP state callback, and an unsigned
     // difference against a timestamp set a moment in the future wraps to a huge
@@ -819,6 +901,7 @@ static void startBluetooth() {
     };
     a2dpSink.set_pin_config(pins);
     a2dpSink.set_stream_reader(a2dpDataCallback, true);  // true = keep local I2S output
+    a2dpSink.set_on_data_received(a2dpWriteDone);
     a2dpSink.set_on_connection_state_changed(btConnectionChanged);
     a2dpSink.set_on_audio_state_changed(btAudioChanged);
     a2dpSink.set_auto_reconnect(false);
@@ -1511,6 +1594,11 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   g  print the mesh identity; `g<name>` sets it (persists, no reboot)
  *   p  listen for an offer and join that mesh (the speaker half of pairing)
  *   o  offer this mesh to a node that is listening (the server half)
+ *
+ * Bluetooth server diagnostics, for telling the A2DP side from the mesh side:
+ *   a  print and reset the A2DP timing window (see a2dpDataCallback)
+ *   f  toggle forwarding A2DP audio to the mesh; local playback continues
+ *   w  stop WiFi altogether, until the next reboot -- what a WROOM server is
  */
 static void benchServiceSerial() {
     while (DEBUG_SERIAL.available()) {
@@ -1565,6 +1653,20 @@ static void benchServiceSerial() {
             }
             case 'p': meshStartPairing();  break;
             case 'o': meshStartOffering(); break;
+#ifdef ENABLE_BLUETOOTH
+            case 'a': a2dpStatsPrint(); a2dpStatsReset(); break;
+            case 'f':
+                a2dpForward = !a2dpForward;
+                DEBUG_SERIAL.printf("[A2DP] fwd=%d\n", a2dpForward ? 1 : 0);
+                break;
+            case 'w':
+                // One way only: bringing ESP-NOW back after esp_wifi_stop()
+                // means redoing channel and PHY rate, and a reboot does that.
+                a2dpForward  = false;
+                espnowActive = false;
+                DEBUG_SERIAL.printf("[A2DP] wifi stop -> %s\n", esp_err_to_name(esp_wifi_stop()));
+                break;
+#endif
             case 'b':
                 benchMagic = BENCH_MAGIC;
                 DEBUG_SERIAL.println("[BENCH] rebooting into bench mode");
