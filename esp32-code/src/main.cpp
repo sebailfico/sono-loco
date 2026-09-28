@@ -739,6 +739,7 @@ static volatile uint32_t a2dpCbMaxUs    = 0;
 static volatile uint32_t a2dpLate       = 0;
 static volatile uint32_t a2dpNoBlock    = 0;
 static volatile bool     a2dpPrefill    = false;
+static volatile bool     jingleActive   = false;   // see playJingleOverA2DP()
 static volatile uint32_t a2dpGapHist[8];   // 5 ms buckets, last one open-ended
 static uint32_t          a2dpCbEndUs    = 0;
 static uint32_t          a2dpWriteEndUs = 0;
@@ -823,7 +824,9 @@ static void a2dpForwardPacket(const uint8_t *data, uint32_t length);
 // Called from BT task, once per decoded packet, before the library writes it
 // to I2S. Accounts for the packet, then forwards it to the mesh.
 static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
-    if (a2dpPrefill) {
+    // Not while a jingle owns the ring: the silence would land inside it.
+    // Left pending, it runs on the first packet after the jingle instead.
+    if (a2dpPrefill && !jingleActive) {
         a2dpPrefill = false;
         serverPrefill();
     }
@@ -1024,6 +1027,33 @@ static void serverSetDmaLen(int len) {
     DEBUG_SERIAL.printf("[A2DP] dma=%dx%d ring=%.1fms install=%s heap=%lu\n",
                         SERVER_DMA_BUF_COUNT, serverDmaLen, serverDmaMs(),
                         esp_err_to_name(err), (unsigned long)ESP.getFreeHeap());
+}
+
+/**
+ * Play a connect/disconnect jingle into the I2S driver the A2DP library owns,
+ * without the library writing into it at the same time.
+ *
+ * The jingles are written from loop(); the library writes each decoded packet
+ * from the BT task. If a stream is running -- Windows opens one the moment it
+ * connects whenever anything on the PC has audio open -- the two interleave in
+ * the ring and the jingle comes out chopped and stretched: "the 3 tones were
+ * very laggy" (2026-09-28). With the 46 ms ring the stream start also writes
+ * a ring of silence (serverPrefill) into the middle of it.
+ *
+ * So for the jingle's ~0.6 s the library's local output is muted: packets are
+ * still decoded, still passed to a2dpDataCallback and still forwarded to the
+ * mesh -- they only skip I2S. A write already in progress finishes first (the
+ * driver serialises writers), so at most one packet precedes the jingle.
+ * Afterwards a running stream restarts behind a ring of silence, as at any
+ * stream start. `J` plays a jingle the old, unguarded way, for comparison.
+ */
+static void playJingleOverA2DP(void (*jingle)()) {
+    jingleActive = true;
+    a2dpSink.set_stream_reader(a2dpDataCallback, false);
+    jingle();
+    a2dpSink.set_stream_reader(a2dpDataCallback, true);
+    if (txReady) a2dpPrefill = true;
+    jingleActive = false;
 }
 
 static void stopBluetooth() {
@@ -1714,6 +1744,8 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   w  stop WiFi altogether, until the next reboot -- what a WROOM server is
  *   q  `q<frames>` sets the local I2S DMA buffer length, between streams only;
  *      bare `q` prints the current ring
+ *   j  play the connect jingle as a connection does; `J` the old way, with
+ *      the library still writing -- run either during a stream to compare
  */
 static void benchServiceSerial() {
     while (DEBUG_SERIAL.available()) {
@@ -1780,6 +1812,16 @@ static void benchServiceSerial() {
                 a2dpForward  = false;
                 espnowActive = false;
                 DEBUG_SERIAL.printf("[A2DP] wifi stop -> %s\n", esp_err_to_name(esp_wifi_stop()));
+                break;
+            case 'j':
+                if (!btSinkStarted) break;
+                DEBUG_SERIAL.printf("[A2DP] jingle guarded=1 streaming=%d\n", txReady ? 1 : 0);
+                playJingleOverA2DP(playConnectedSound);
+                break;
+            case 'J':
+                if (!btSinkStarted) break;
+                DEBUG_SERIAL.printf("[A2DP] jingle guarded=0 streaming=%d\n", txReady ? 1 : 0);
+                playConnectedSound();
                 break;
             case 'q': {
                 char line[8];
@@ -1944,12 +1986,12 @@ void loop() {
             if (btAllowed()) {
                 if (doConnectSound) {
                     doConnectSound = false;
-                    playConnectedSound();
+                    playJingleOverA2DP(playConnectedSound);
                 }
                 if (!btConnected) {
                     if (doDisconnectSound) {
                         doDisconnectSound = false;
-                        playDisconnectedSound();
+                        playJingleOverA2DP(playDisconnectedSound);
                     }
                     enterDiscovery();
                 }
