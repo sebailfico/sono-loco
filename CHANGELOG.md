@@ -33,12 +33,10 @@ in `TODO.md` false.
 - **WROVER1's MAX98357A plays — it was never broken.** Silent on two
   speakers while WROVER1 streamed as a server, with its I2S clock running
   and its mesh stream audible on WROVER2. At the amp's pins a meter read
-  BCLK 0 V, LRC 3.3 V, DIN 0 V — the amp's inputs idling, because the jumper
-  wires were on a row of the WROVER's base board that does not carry the
-  GPIOs: each pin fans out to three header rows, and WROVER2 had been wired
-  on the outer one. Moved to the outer row, it plays. It also survived an
-  earlier supply reversal (5 V and GND swapped, which browned out the
-  ESP32). SD is tied to 3.3 V (left channel only; one speaker).
+  BCLK 0 V, LRC 3.3 V, DIN 0 V where running clocks read ~1.6 V: the signal
+  wires were not on the GPIOs. Rewired, it plays. It also survived an earlier
+  supply reversal (5 V and GND swapped, which browned out the ESP32). SD is
+  tied to 3.3 V (left channel only; one speaker).
 
 - **The server's own output no longer runs dry between Bluetooth packets.**
   The A2DP library played on its default I2S ring of 8 × 64 frames, 11.6 ms,

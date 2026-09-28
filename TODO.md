@@ -97,9 +97,8 @@ crackled — both under "Blocking" below.
       at the full 220.6 frames/s from the PC; nothing was listening to
       measure the air loss.
 - [ ] **The S3's MAX98357A has never made a sound.** WROVER1's does, since
-      2026-09-28 (`CHANGELOG.md`); its silence was the wiring, not the
-      board — see the note on base boards below before debugging the S3's.
-      The S3's I2S pins 4/5/6 have never driven a DAC. SD: WROVER1's clone
+      2026-09-28 (`CHANGELOG.md`); its silence was a wiring mistake, not
+      the board. The S3's I2S pins 4/5/6 have never driven a DAC. SD: WROVER1's clone
       plays with SD tied to 3.3 V (left channel); whether it has the pull-up
       that makes a floating SD work was not checked.
 - [ ] **Tones on every board, and loud enough for the amp they are on.** The

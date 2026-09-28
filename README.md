@@ -223,13 +223,6 @@ see the bandwidth note in `TODO.md`.
 - Use separate power supplies for ESP32 and amplifier
 - Add decoupling capacitors (100nF + 10µF) near ESP32 and DAC
 
-**If a DAC or amp is silent, check which header row it is on first.** The
-WROVER base boards used here fan each pin out to three rows of headers, and
-not every row carries the GPIO: WROVER1's MAX98357A sat silent on a dead row
-for an evening (2026-09-28) while the firmware was streaming perfectly. The
-outer row works. A meter on the amp's pins reading clocks stuck at 0 V or
-3.3 V instead of ~1.6 V means no signal is arriving.
-
 **If it turns harsh and distorted above some volume, check the amp's supply
 first.** On 2026-09-28 a TPA3116 fed below its 12 V distorted from 50–60%
 upwards, on two different speakers; at 12 V it was fine.
