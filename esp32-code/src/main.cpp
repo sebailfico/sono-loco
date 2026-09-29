@@ -1860,6 +1860,23 @@ static void benchServiceSerial() {
                 DEBUG_SERIAL.printf("[MESH] repeat=%u\n", txRepeat);
                 break;
             }
+            case 'R': {
+                // `R<Mbps>`: the ESP-NOW PHY rate this node sends at, until
+                // reboot. 1, 2 (DSSS) or 6..54 (OFDM). See ESPNOW_PHY_RATE.
+                char line[8];
+                benchReadLine(line, sizeof(line));
+                static const struct { int mbps; wifi_phy_rate_t r; } rates[] = {
+                    {1, WIFI_PHY_RATE_1M_L}, {2, WIFI_PHY_RATE_2M_L},
+                    {6, WIFI_PHY_RATE_6M}, {9, WIFI_PHY_RATE_9M}, {12, WIFI_PHY_RATE_12M},
+                    {18, WIFI_PHY_RATE_18M}, {24, WIFI_PHY_RATE_24M}, {36, WIFI_PHY_RATE_36M},
+                    {48, WIFI_PHY_RATE_48M}, {54, WIFI_PHY_RATE_54M}};
+                const int want = atoi(line);
+                esp_err_t err = ESP_ERR_INVALID_ARG;
+                for (const auto &e : rates)
+                    if (e.mbps == want) err = esp_wifi_config_espnow_rate(WIFI_IF_STA, e.r);
+                DEBUG_SERIAL.printf("[MESH] rate=%dM -> %s\n", want, esp_err_to_name(err));
+                break;
+            }
             case 'p': meshStartPairing();  break;
             case 'o': meshStartOffering(); break;
 #ifdef ENABLE_BLUETOOTH
