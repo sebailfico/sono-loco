@@ -34,6 +34,7 @@
 
 // Hardware-independent parts of the CLIENT receive path, tested on the host
 // with `pio test -e native` — see test/test_jitter.
+#include "adpcm.h"
 #include "drift.h"
 #include "jitter.h"
 #include "mesh.h"
@@ -98,8 +99,21 @@ static bool benchSource = false;   // this node is generating the test stream
 static Preferences prefs;
 static bool        clientOnly = false;
 
+// This node's own speaker, and nothing else. Neither setting touches what is
+// received, forwarded, buffered or corrected -- only the samples handed to I2S.
+//
+// `m` mutes, until reboot: on a server the A2DP library's local output (the
+// mesh still gets every packet), on a client its I2S. It is how a microphone
+// next to one node hears that node alone, and how a bench run stays silent.
+static volatile bool outputMuted   = false;
+// `M` mixes a client's stereo to mono on both channels, kept in NVS: a node
+// with one speaker -- a MAX98357A plays one channel -- would otherwise lose
+// whatever was panned to the other.
+static bool          clientMonoOut = false;
+
 static const char *PREF_NAMESPACE = "sonoloco";
 static const char *PREF_CLIENT_ONLY = "clientonly";
+static const char *PREF_MONO_OUT = "monoout";
 static const char *PREF_MESH_ID = "meshid";
 static const char *PREF_MESH_NAME = "meshname";
 
@@ -348,26 +362,40 @@ void deinitI2SForTones() {
 // `group` is first because it is the field that decides whether the rest is
 // even ours to look at -- a receiver rejects a neighbour's packet having read
 // two bytes.
+//
+// The payload is MESH_BLOCKS_PER_PACKET ADPCM blocks (lib/adpcm): the block
+// numbered `seq`, then the one before it, which is how a client rebuilds a
+// packet it missed from the next one. `len` says how many blocks are there --
+// the first packet of a stream has no predecessor to carry.
 typedef struct __attribute__((packed)) {
     uint16_t group;
     uint16_t seq;
     uint16_t len;
     uint8_t  data[ESPNOW_PAYLOAD_SIZE];
-} AudioPacket;  // 206 bytes total, well under the 250-byte ESP-NOW limit
+} AudioPacket;  // 246 bytes total, under the 250-byte ESP-NOW limit
 
 static_assert(ESPNOW_HEADER_SIZE + ESPNOW_PAYLOAD_SIZE <= 250,
               "ESP-NOW cannot send more than 250 bytes per frame");
+static_assert(MESH_BLOCK_BYTES == adpcmBlockBytes(MESH_BLOCK_FRAMES),
+              "MESH_BLOCK_BYTES must match lib/adpcm's block layout");
+static_assert(MESH_BLOCK_FRAMES <= ADPCM_MAX_FRAMES, "block too long for the encoder");
 
 // Set in `len` on the second and later copies of a frame (ESPNOW_TX_COPIES).
 // A payload is at most 250 bytes, so the top bit is free. The receiver needs
 // it only for its counters: a copy whose original arrived is dropped either
 // way, but it was meant, and must not read as a duplicate nobody sent.
 #define ESPNOW_LEN_REPEAT  0x8000
-// The accumulator fills two bytes at a time and the RX side masks off odd byte
-// counts, so an odd payload size would either overrun accumBuf or truncate a
-// sample on every packet.
-static_assert(ESPNOW_PAYLOAD_SIZE % 2 == 0,
-              "ESPNOW_PAYLOAD_SIZE must hold whole 16-bit samples");
+
+// XORed into the mesh id on the wire. A node on another audio format sees this
+// format's packets as somebody else's mesh and drops them, and the other way
+// round -- which matters, because the alternative is worse than silence: a
+// node from before ADPCM would play these bytes as raw PCM, full-scale noise
+// through whatever amp it has. `fgn=` climbing on a node that should be
+// playing is the sign of a node left on the old firmware. Change it whenever
+// the payload changes meaning. XOR is its own inverse, so one helper both
+// stamps and reads.
+#define MESH_WIRE_FORMAT   0xAD01
+static inline uint16_t wireGroup(uint16_t id) { return id ^ MESH_WIRE_FORMAT; }
 
 static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -375,8 +403,6 @@ static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static QueueHandle_t     txQueue      = nullptr;
 static SemaphoreHandle_t txDone       = nullptr;   // radio is free for the next frame
 static uint16_t          txSeq        = 0;
-static uint8_t           accumBuf[ESPNOW_PAYLOAD_SIZE];
-static int               accumLen     = 0;
 static volatile bool     txReady      = false;   // true while BT audio is streaming
 static unsigned long     audioStartMs = 0;       // when BT audio last started
 
@@ -403,6 +429,43 @@ static uint32_t          txStartUs    = 0;
 // `t<n>` changes it until reboot, so one Bluetooth session can compare.
 static volatile uint8_t  txRepeat     = ESPNOW_TX_COPIES;
 
+// The one place audio becomes packets, whoever the source is -- A2DP on a
+// server, the synthetic tone on a bench source. Frames go into the encoder;
+// each completed block goes out with the previous one behind it.
+static AdpcmStereoEncoder txEncoder;
+static uint8_t            txPrevBlock[MESH_BLOCK_BYTES];
+static bool               txHavePrev = false;
+
+/** Start a new stream: no state carried over, and no previous block to send. */
+static void meshTxReset() {
+    txEncoder.reset();
+    txHavePrev = false;
+}
+
+/**
+ * Add one stereo frame to the outgoing stream. Returns true when it completed
+ * a packet, which has then been queued (or counted as `qfull`).
+ */
+static bool meshTxFrame(int16_t left, int16_t right) {
+    if (!txEncoder.push(left, right)) return false;
+
+    AudioPacket pkt;
+    pkt.group = wireGroup(meshId);
+    pkt.seq   = txSeq++;
+    memcpy(pkt.data, txEncoder.block(), MESH_BLOCK_BYTES);
+    uint16_t len = MESH_BLOCK_BYTES;
+    if (txHavePrev) {
+        memcpy(pkt.data + MESH_BLOCK_BYTES, txPrevBlock, MESH_BLOCK_BYTES);
+        len += MESH_BLOCK_BYTES;
+    }
+    pkt.len = len;
+    memcpy(txPrevBlock, txEncoder.block(), MESH_BLOCK_BYTES);
+    txHavePrev = true;
+
+    if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
+    return true;
+}
+
 // --- RX (CLIENT mode) ---
 // The ring buffer and the packet sequence accounting live in lib/jitter: they
 // are pure logic, they are where the nastiest bugs in this project came from,
@@ -417,14 +480,20 @@ static_assert(JITTER_PREFILL > CLIENT_DMA_CAPACITY_BYTES,
               "JITTER_PREFILL must exceed what the I2S DMA ring can swallow at once");
 static_assert(JITTER_PREFILL < JITTER_BUF_SIZE,
               "JITTER_PREFILL must fit in the jitter buffer");
+// Stereo frames are 4 bytes. The ring is only ever pushed, advanced and
+// peeked in whole frames; one partial frame would swap left and right for
+// the rest of the stream.
+static_assert(JITTER_PREFILL % CLIENT_FRAME_BYTES == 0, "prefill must be whole frames");
+static_assert(MESH_BLOCK_FRAMES * CLIENT_FRAME_BYTES < JITTER_BUF_SIZE / 4,
+              "a decoded block must be small against the ring");
 
-// The ring's storage. A static array would sit in internal DRAM on every
-// board; on a board with PSRAM it goes there instead, because the server
-// path needs the internal bytes for the BT stack and the ring is only ever
-// touched from task context (the ESP-NOW receive callback and loop()), where
-// PSRAM is fine. On a WROOM/S3/C3 it stays static.
-static uint8_t      jStorageInternal[JITTER_BUF_SIZE];
-static uint8_t     *jStorage = jStorageInternal;
+// The ring's storage, allocated in setup(): PSRAM where there is PSRAM,
+// because a WROVER server needs its internal DRAM for the BT stack and the
+// ring is only ever touched from task context (the ESP-NOW receive callback
+// and loop()), where PSRAM is fine; the heap elsewhere. It used to be a static
+// array, which sat in internal DRAM even on boards that then put the ring in
+// PSRAM -- 8 KB then, and it is 32 KB now.
+static uint8_t     *jStorage = nullptr;
 static JitterBuffer jbuf;
 static SeqTracker   seqTracker(SEQ_RESYNC_THRESHOLD, MAX_GAP_FILL_PKTS);
 
@@ -515,11 +584,12 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     plen &= ~ESPNOW_LEN_REPEAT;
 
     const bool beacon = meshIsBeacon(seq, plen);
+    const uint16_t id = wireGroup(group);   // a node on another format lands elsewhere
 
     // Whose mesh is this? Checked BEFORE the sender lock below, and the order is
     // the whole point: a neighbour's server that took the lock would leave this
     // node ignoring its own household until it next fell back to DISCOVERY.
-    if (group != meshId) {
+    if (id != meshId) {
         // Adoption happens only from a beacon -- somebody is holding the button
         // on a node of that mesh right now. Adopting from any foreign *stream*,
         // as this first did, let a neighbour capture a node by doing nothing
@@ -529,7 +599,7 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
         // because this is the WiFi task and a flash erase here would stall the
         // radio mid-stream.
         if (beacon && pairing && !pairCandidateReady) {
-            pairCandidate      = group;
+            pairCandidate      = id;
             pairCandidateReady = true;
         }
         rxForeign++;
@@ -548,14 +618,14 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
         return;   // a second server is broadcasting — ignore it
     }
 
-    // Trust the wire for nothing: clamp to what was actually received, to our
-    // own payload limit, and to an even byte count so 16-bit framing survives.
-    int n = (int)plen;
-    int avail = len - ESPNOW_HEADER_SIZE;
-    if (n > avail)                n = avail;
-    if (n > ESPNOW_PAYLOAD_SIZE)  n = ESPNOW_PAYLOAD_SIZE;
-    n &= ~1;
-    if (n <= 0) return;
+    // Trust the wire for nothing: whole blocks, as many as the header says and
+    // no more than were received or than a packet can hold. Anything else is
+    // not a packet this firmware sent.
+    const int blocks = (int)plen / MESH_BLOCK_BYTES;
+    if (blocks < 1 || blocks > MESH_BLOCKS_PER_PACKET ||
+        (int)plen != blocks * MESH_BLOCK_BYTES ||
+        (int)plen > len - ESPNOW_HEADER_SIZE) return;
+    const uint8_t *payload = data + ESPNOW_HEADER_SIZE;
 
     lastRxMs = millis();
 
@@ -579,14 +649,32 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     const uint32_t run = seqTracker.lost - lostBefore;
     if (run) rxLossRuns[run < 8 ? run - 1 : 7]++;
 
-    // Substitute silence for lost packets so playback keeps its timing instead
-    // of splicing the stream shorter on every loss.
-    if (sr.fillPackets > 0 &&
-        !jbuf.pushSilence(sr.fillPackets * ESPNOW_PAYLOAD_SIZE)) {
+    // What was missed, in playing order: silence for blocks nobody has any
+    // more, then the block just before this one -- carried in this packet --
+    // then this packet's own. Silence keeps playback's timing instead of
+    // splicing the stream shorter on every loss.
+    const bool rebuild = sr.fillPackets > 0 && blocks >= 2;
+    const int  silent  = sr.fillPackets - (rebuild ? 1 : 0);
+    static const int BLOCK_PCM = MESH_BLOCK_FRAMES * CLIENT_FRAME_BYTES;
+    if (silent > 0 && !jbuf.pushSilence(silent * BLOCK_PCM)) rxOverflow++;
+
+    // Static: this is the WiFi task's stack, and it is not ours to spend.
+    static int16_t pcm[2 * MESH_BLOCK_FRAMES];
+    if (rebuild) {
+        if (adpcmDecodeStereoBlock(payload + MESH_BLOCK_BYTES, MESH_BLOCK_FRAMES, pcm)) {
+            if (!jbuf.pushBlock((const uint8_t *)pcm, BLOCK_PCM)) rxOverflow++;
+            seqTracker.recovered(1);   // played, so not a hole
+            rxRecovered++;
+            rxCount++;                 // rx + lost still adds up to the source's tx
+        } else if (!jbuf.pushSilence(BLOCK_PCM)) {
+            rxOverflow++;
+        }
+    }
+    if (adpcmDecodeStereoBlock(payload, MESH_BLOCK_FRAMES, pcm)) {
+        if (!jbuf.pushBlock((const uint8_t *)pcm, BLOCK_PCM)) rxOverflow++;
+    } else if (!jbuf.pushSilence(BLOCK_PCM)) {
         rxOverflow++;
     }
-
-    if (!jbuf.pushBlock(data + ESPNOW_HEADER_SIZE, n)) rxOverflow++;
 }
 
 static bool espnowActive = false;
@@ -733,27 +821,11 @@ volatile bool doDisconnectSound = false;
 // at global scope, and the collision is a hard compile error.
 static bool   btSinkStarted     = false;
 
-// Half-band-ish 4-tap FIR [1 3 3 1]/8 running at the input rate. Taking every
-// other sample without this folds all 11–22 kHz content back into the audible
-// band (cymbals and sibilance turn to fizz), which is what naive decimation did.
-static int32_t decimHist[4] = {0, 0, 0, 0};
-static bool    decimPhase   = false;
-
-static inline void decimReset() {
-    decimHist[0] = decimHist[1] = decimHist[2] = decimHist[3] = 0;
-    decimPhase = false;
-}
 
 // Off with `f` over serial: the server keeps playing locally and stops handing
 // frames to the radio, so one Bluetooth session can be measured with and
 // without the mesh's transmissions competing for the radio.
 static volatile bool a2dpForward = true;
-
-// `m`: the server's own speaker off, the mesh untouched -- so a microphone
-// next to a client hears the client alone. Packets are still decoded and
-// forwarded; only the library's i2s_write() is skipped, the same switch the
-// jingle uses (playJingleOverA2DP).
-static volatile bool serverMuted = false;
 
 // How the Bluetooth task spends its time, as seen from the two hooks the
 // library gives us: the stream reader runs after a packet is decoded and
@@ -852,7 +924,7 @@ static void a2dpStatsPrint() {
     for (int i = 0; i < 8; i++)
         DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)txLatHist[i]);
     DEBUG_SERIAL.printf(" txlatmax=%.1fms rep=%u mute=%d qfull=%lu\n", txLatMaxUs / 1000.0f,
-                        txRepeat, serverMuted ? 1 : 0, (unsigned long)txQueueFull);
+                        txRepeat, outputMuted ? 1 : 0, (unsigned long)txQueueFull);
 }
 
 static void a2dpWriteDone() {
@@ -908,8 +980,8 @@ static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
     }
 }
 
-// Downsamples 44100Hz stereo → 22050Hz mono and queues ESP-NOW packets. The
-// BT library still drives I2S locally (local playback).
+// Encodes the decoded A2DP stream -- 44.1 kHz stereo, after the volume -- into
+// mesh packets, frame by frame. The BT library still drives I2S locally.
 static void a2dpForwardPacket(const uint8_t *data, uint32_t length) {
     if (currentMode != MODE_SERVER || !txReady || !espnowActive || !a2dpForward) return;
     // Signed, for the reason spelled out at the ESP-NOW silence check: this
@@ -918,39 +990,9 @@ static void a2dpForwardPacket(const uint8_t *data, uint32_t length) {
     // number — here that would silently skip the warmup instead of enforcing it.
     if ((long)(millis() - audioStartMs) < (long)TX_WARMUP_MS) return;
 
-    const int16_t *in      = (const int16_t *)data;
-    const int      nStereo = length / 4;   // 4 bytes per stereo sample pair
-
-    for (int i = 0; i < nStereo; i++) {
-        int32_t mono = ((int32_t)in[i * 2] + (int32_t)in[i * 2 + 1]) >> 1;
-
-        decimHist[3] = decimHist[2];
-        decimHist[2] = decimHist[1];
-        decimHist[1] = decimHist[0];
-        decimHist[0] = mono;
-
-        decimPhase = !decimPhase;
-        if (decimPhase) continue;   // output one sample per two inputs
-
-        int32_t filtered =
-            (decimHist[0] + 3 * decimHist[1] + 3 * decimHist[2] + decimHist[3]) >> 3;
-        if (filtered >  32767) filtered =  32767;
-        if (filtered < -32768) filtered = -32768;
-        int16_t out = (int16_t)filtered;
-
-        memcpy(accumBuf + accumLen, &out, 2);
-        accumLen += 2;
-
-        if (accumLen >= ESPNOW_PAYLOAD_SIZE) {
-            AudioPacket pkt;
-            pkt.group = meshId;
-            pkt.seq   = txSeq++;
-            pkt.len   = ESPNOW_PAYLOAD_SIZE;
-            memcpy(pkt.data, accumBuf, ESPNOW_PAYLOAD_SIZE);
-            if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
-            accumLen = 0;
-        }
-    }
+    const int16_t *in     = (const int16_t *)data;
+    const int      frames = length / 4;   // 4 bytes per stereo frame
+    for (int i = 0; i < frames; i++) meshTxFrame(in[2 * i], in[2 * i + 1]);
 }
 
 static void btConnectionChanged(esp_a2d_connection_state_t state, void *) {
@@ -971,8 +1013,7 @@ static void btAudioChanged(esp_a2d_audio_state_t state, void *) {
         audioStartMs   = millis();
         a2dpWriteEndUs = 0;   // the first packet of a stream has no gap
         a2dpPrefill    = true;
-        decimReset();
-        accumLen = 0;
+        meshTxReset();   // a new stream: nothing from the last one carries over
         LOG_INFO("BT audio started → ESP-NOW TX will activate in " + String(TX_WARMUP_MS) + "ms");
     } else {
         txReady        = false;
@@ -1035,7 +1076,7 @@ static void startBluetooth() {
 
     a2dpSink.set_pin_config(serverI2SPins());
     a2dpSink.set_i2s_config(serverI2SConfig(serverDmaLen));
-    a2dpSink.set_stream_reader(a2dpDataCallback, true);  // true = keep local I2S output
+    a2dpSink.set_stream_reader(a2dpDataCallback, !outputMuted);  // true = keep local I2S output
     a2dpSink.set_on_data_received(a2dpWriteDone);
     a2dpSink.set_on_connection_state_changed(btConnectionChanged);
     a2dpSink.set_on_audio_state_changed(btAudioChanged);
@@ -1109,7 +1150,7 @@ static void playJingleOverA2DP(void (*jingle)()) {
     jingleActive = true;
     a2dpSink.set_stream_reader(a2dpDataCallback, false);
     jingle();
-    a2dpSink.set_stream_reader(a2dpDataCallback, !serverMuted);
+    a2dpSink.set_stream_reader(a2dpDataCallback, !outputMuted);
     if (txReady) a2dpPrefill = true;
     jingleActive = false;
 }
@@ -1161,7 +1202,8 @@ static void initI2SForClient() {
     i2s_set_pin(I2S_NUM_0, &pins);
     i2s_zero_dma_buffer(I2S_NUM_0);
     clientI2SActive = true;
-    LOG_INFO("I2S initialised for CLIENT mode at " + String(CLIENT_SAMPLE_RATE) + " Hz mono");
+    LOG_INFO("I2S initialised for CLIENT mode at " + String(CLIENT_SAMPLE_RATE) + " Hz " +
+             (clientMonoOut ? "stereo, mixed to mono" : "stereo"));
 }
 
 static void deinitI2SForClient() {
@@ -1185,10 +1227,11 @@ static void driveClientI2S() {
         }
     }
 
-    static int16_t mono[CLIENT_BATCH];
+    // Interleaved L, R -- exactly the ring's layout and exactly what I2S takes.
     static int16_t stereo[CLIENT_BATCH * 2];
+    static const int BATCH_BYTES = CLIENT_BATCH * CLIENT_FRAME_BYTES;
 
-    if (!jbuf.peek((uint8_t *)mono, CLIENT_BATCH * 2)) {
+    if (!jbuf.peek((uint8_t *)stereo, BATCH_BYTES)) {
         // Underrun. tx_desc_auto_clear already zeroes the DMA as it drains, so
         // pushing extra silence here would only add a click. Re-arm the prefill
         // gate and let the buffer refill. Counted, not logged — logging every
@@ -1203,56 +1246,62 @@ static void driveClientI2S() {
 
     // Ask before the batch, apply after it. Keeping the correction outside the
     // batch is what leaves the partial-write accounting below untouched: one
-    // sample either side of a write whose length is already handled correctly,
+    // frame either side of a write whose length is already handled correctly,
     // rather than an edit in the middle of a buffer that I2S may only half take.
     DriftController::Correction corr = DriftController::NONE;
     if (driftEnabled) corr = driftCtl.update(millis(), jbuf.fill());
 
-    // Expand mono → stereo (duplicate sample to both channels)
-    for (int i = 0; i < CLIENT_BATCH; i++) {
-        stereo[i * 2]     = mono[i];
-        stereo[i * 2 + 1] = mono[i];
+    // After the peek, so what is consumed is untouched: these change only what
+    // this node's speaker hears, never the timing or the drift loop.
+    if (outputMuted) {
+        memset(stereo, 0, sizeof(stereo));
+    } else if (clientMonoOut) {
+        // One speaker (a MAX98357A plays one channel): both channels, summed.
+        for (int i = 0; i < CLIENT_BATCH; i++) {
+            const int16_t m = (int16_t)(((int32_t)stereo[2 * i] + stereo[2 * i + 1]) >> 1);
+            stereo[2 * i] = stereo[2 * i + 1] = m;
+        }
     }
 
     // Blocking with a short timeout paces this loop to the I2S sample clock.
     size_t bw = 0;
-    i2s_write(I2S_NUM_0, stereo, CLIENT_BATCH * 4, &bw, pdMS_TO_TICKS(20));
+    i2s_write(I2S_NUM_0, stereo, BATCH_BYTES, &bw, pdMS_TO_TICKS(20));
 
-    // Consume only what the DMA actually took. The previous version advanced
+    // Consume only what the DMA actually took. An earlier version advanced
     // the read pointer unconditionally, discarding every sample I2S refused —
     // which at loop() speed was most of them.
     //
     // Round down to whole stereo frames first. i2s_write normally returns a
-    // multiple of 4 here, but if it ever returned a partial frame, bw/2 would be
-    // an odd number of mono bytes and the jitter buffer's 16-bit framing would be
-    // permanently shifted — the exact failure pushBlock exists to prevent.
-    const size_t frames = (bw & ~(size_t)3) / 4;
-    jbuf.advance((int)frames * 2);             // 4 bytes written per 2 bytes of mono
+    // multiple of 4 here, but if it ever returned a partial frame, advancing by
+    // it would shift the ring's framing by a sample and swap left and right for
+    // the rest of the stream -- the exact failure pushBlock exists to prevent.
+    const size_t frames = bw / CLIENT_FRAME_BYTES;
+    jbuf.advance((int)(frames * CLIENT_FRAME_BYTES));
 
-    // One sample of correction, at a batch boundary -- an edit every second or
-    // two at the offsets these boards actually have. Inaudible, and it needs no
-    // resampler. Nothing is counted unless it happened: an I2S write that came up
-    // short leaves the correction owed, and it is applied next batch instead.
+    // One frame of correction, at a batch boundary -- an edit every half second
+    // or so at the offsets these boards actually have. Inaudible, and it needs
+    // no resampler. Nothing is counted unless it happened: an I2S write that
+    // came up short leaves the correction owed, and it is applied next batch.
     //
     // Both directions require frames > 0, i.e. that playback actually advanced.
     // A correction is a statement about the rate audio is being consumed at, and
     // if the DMA took nothing then it was not consumed at any rate; dropping a
-    // sample there would discard audio that was never played, to fix a drift that
+    // frame there would discard audio that was never played, to fix a drift that
     // did not accrue.
     if (corr == DriftController::DROP && frames > 0) {
-        // Consume a sample without playing it. Two bytes, so the buffer's 16-bit
-        // framing survives -- the one thing this path must never get wrong.
-        if (jbuf.fill() >= 2) {
-            jbuf.advance(2);
+        // Consume a frame without playing it. A whole frame, both channels, so
+        // the ring's framing survives -- the one thing this path must never get
+        // wrong.
+        if (jbuf.fill() >= CLIENT_FRAME_BYTES) {
+            jbuf.advance(CLIENT_FRAME_BYTES);
             driftCtl.confirm(corr);
         }
     } else if (corr == DriftController::INSERT && frames > 0) {
-        // Play a sample twice without consuming it: hold the value one extra
-        // sample period. No discontinuity is possible by construction, because
-        // it is the sample that was just played.
-        const int16_t held  = mono[frames - 1];
-        int16_t frame[2]    = {held, held};
-        size_t  bwExtra     = 0;
+        // Play a frame twice without consuming it: hold it one extra sample
+        // period. No discontinuity is possible by construction, because it is
+        // the frame that was just played.
+        int16_t frame[2] = {stereo[2 * (frames - 1)], stereo[2 * (frames - 1) + 1]};
+        size_t  bwExtra  = 0;
         i2s_write(I2S_NUM_0, frame, sizeof(frame), &bwExtra, pdMS_TO_TICKS(20));
         if (bwExtra == sizeof(frame)) driftCtl.confirm(corr);
     }
@@ -1284,7 +1333,7 @@ static void enterDiscovery() {
     LOG_INFO("=== DISCOVERY ===");
 
     txReady  = false;
-    accumLen = 0;
+    meshTxReset();
 
     const bool wasClient = (currentMode == MODE_CLIENT);
     if (wasClient) deinitI2SForClient();
@@ -1314,10 +1363,7 @@ static void enterServer() {
     LOG_INFO("=== SERVER — local playback + ESP-NOW broadcast ===");
     // BT is already running (started in setup). Just flip the mode;
     // the data callback will start forwarding once BT audio state goes STARTED.
-#ifdef ENABLE_BLUETOOTH
-    decimReset();
-#endif
-    accumLen    = 0;
+    meshTxReset();
     currentMode = MODE_SERVER;
 }
 
@@ -1472,7 +1518,7 @@ static void meshServiceOffer() {
     lastBeaconMs = millis();
 
     AudioPacket pkt;
-    pkt.group = meshId;
+    pkt.group = wireGroup(meshId);
     pkt.seq   = MESH_BEACON_SEQ;
     pkt.len   = 0;                 // the mesh id in the header is the whole message
     if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
@@ -1576,11 +1622,11 @@ static uint32_t benchSampleIdx    = 0;   // running sample index, for a continuo
  *
  * The table holds an exact whole number of tone periods, so playing it end to
  * end and wrapping is seamless — no phase discontinuity, no click. That length
- * is sampleRate / gcd(sampleRate, toneHz): 2205 samples for 440 Hz at 22.05 kHz,
- * which is exactly 44 periods and 4.4 KB.
+ * is sampleRate / gcd(sampleRate, toneHz): 2205 samples for 440 Hz at 44.1 kHz,
+ * which is exactly 22 periods and 4.4 KB.
  *
  * A tone frequency sharing no factor with the sample rate would demand a table
- * of sampleRate samples — 44 KB — hence the static_assert rather than a silent
+ * of sampleRate samples — 88 KB — hence the static_assert rather than a silent
  * allocation nobody asked for.
  */
 static constexpr uint32_t benchGcd(uint32_t a, uint32_t b) {
@@ -1592,7 +1638,7 @@ static constexpr uint32_t BENCH_TONE_LEN =
 static_assert(BENCH_TONE_LEN <= 4096,
               "BENCH_TONE_HZ shares too little with CLIENT_SAMPLE_RATE — the "
               "wrap-exact tone table would be huge. Pick a frequency that "
-              "divides more evenly (440 Hz at 22050 Hz needs 2205 samples).");
+              "divides more evenly (440 Hz at 44100 Hz needs 2205 samples).");
 
 static int16_t  benchTone[BENCH_TONE_LEN];
 static uint32_t benchTonePhase = 0;
@@ -1626,30 +1672,27 @@ static unsigned long benchLastReportMs = 0;
 static void benchServiceSource() {
     if (!benchSource || !espnowActive || txQueue == nullptr) return;
 
-    const uint32_t samplesPerPkt = ESPNOW_PAYLOAD_SIZE / 2;
-    const int64_t  now           = esp_timer_get_time();
+    const int64_t now = esp_timer_get_time();
 
     // Bounded catch-up: if this node was blocked for a while, send a few packets
     // back to back but never sit here spinning out a whole backlog.
     for (int burst = 0; burst < BENCH_MAX_CATCHUP_PKTS; burst++) {
         const int64_t due = benchStartUs +
-            (int64_t)benchPktIdx * 1000000LL * (int64_t)samplesPerPkt / CLIENT_SAMPLE_RATE;
+            (int64_t)benchPktIdx * 1000000LL * (int64_t)MESH_BLOCK_FRAMES / CLIENT_SAMPLE_RATE;
         if (now < due) return;
 
-        AudioPacket pkt;
-        pkt.group = meshId;
-        pkt.seq   = txSeq++;
-        pkt.len   = ESPNOW_PAYLOAD_SIZE;
+        // One packet's worth of frames, through the same encoder a server uses.
         // Table lookup, wrapping by comparison rather than modulo: no division
         // and no float anywhere in the transmit path.
-        for (uint32_t i = 0; i < samplesPerPkt; i++) {
-            memcpy(pkt.data + i * 2, &benchTone[benchTonePhase], 2);
+        const uint32_t fullBefore = txQueueFull;
+        for (int i = 0; i < MESH_BLOCK_FRAMES; i++) {
+            const int16_t s = benchTone[benchTonePhase];
             if (++benchTonePhase >= BENCH_TONE_LEN) benchTonePhase = 0;
+            meshTxFrame(s, s);
         }
-        benchSampleIdx += samplesPerPkt;
+        benchSampleIdx += MESH_BLOCK_FRAMES;
 
-        if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
-        else                                        benchTxPackets++;
+        if (txQueueFull == fullBefore) benchTxPackets++;
         benchPktIdx++;
     }
 }
@@ -1666,6 +1709,7 @@ static void benchStartSource() {
     benchSampleIdx = 0;
     benchTonePhase = 0;
     benchTxPackets = 0;
+    meshTxReset();
     txQueueFull = txSendErr = txRadioFail = 0;
     benchSource    = true;
     currentMode    = MODE_SERVER;   // stops this node treating its own role as a listener
@@ -1743,7 +1787,7 @@ static void benchIdentify() {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     DEBUG_SERIAL.printf(
         "[BENCH] id fw=%s chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
-        "bench=%d bt=%d espnow=%d drift=%d conly=%d mesh=%04X meshname=%s "
+        "bench=%d bt=%d espnow=%d drift=%d conly=%d mono=%d mute=%d mesh=%04X meshname=%s "
         "name=%s\n",
         FW_VERSION,
         ESP.getChipModel(),
@@ -1758,6 +1802,8 @@ static void benchIdentify() {
         espnowActive ? 1 : 0,
         driftEnabled ? 1 : 0,
         clientOnly ? 1 : 0,
+        clientMonoOut ? 1 : 0,
+        outputMuted ? 1 : 0,
         meshId,
         meshNameForLog(),
         ROOM_NAME);
@@ -1798,8 +1844,16 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   g  print the mesh identity; `g<name>` sets it (persists, no reboot)
  *   p  listen for an offer and join that mesh (the speaker half of pairing)
  *   o  offer this mesh to a node that is listening (the server half)
+ *   m  mute this node's speaker until reboot (server: local output; client: I2S)
+ *   M  toggle mixing a client's stereo to mono, for one speaker (persists)
+ *   l  client: print and reset the lost-run histogram and `rec`
+ *   t  `t<n>` sends each mesh frame n times, 1..3, until reboot
+ *   R  `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot
  *
  * Bluetooth server diagnostics, for telling the A2DP side from the mesh side:
+ *   k  `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, as a headset would
+ *   V  `V<0..127>` sets the A2DP volume, which the mesh stream carries too
+ *   e  `e<n>` coexistence preference: 0 WiFi, 1 Bluetooth, 2 balance
  *   a  print and reset the A2DP timing window (see a2dpDataCallback)
  *   f  toggle forwarding A2DP audio to the mesh; local playback continues
  *   w  stop WiFi altogether, until the next reboot -- what a WROOM server is
@@ -1893,6 +1947,20 @@ static void benchServiceSerial() {
                 DEBUG_SERIAL.printf("[MESH] rate=%dM -> %s\n", want, esp_err_to_name(err));
                 break;
             }
+            case 'm':
+                outputMuted = !outputMuted;
+#ifdef ENABLE_BLUETOOTH
+                if (btSinkStarted) a2dpSink.set_stream_reader(a2dpDataCallback, !outputMuted);
+#endif
+                DEBUG_SERIAL.printf("[OUT] mute=%d\n", outputMuted ? 1 : 0);
+                break;
+            case 'M':
+                clientMonoOut = !clientMonoOut;
+                prefs.begin(PREF_NAMESPACE, false);
+                prefs.putBool(PREF_MONO_OUT, clientMonoOut);
+                prefs.end();
+                DEBUG_SERIAL.printf("[OUT] mono=%d\n", clientMonoOut ? 1 : 0);
+                break;
             case 'p': meshStartPairing();  break;
             case 'o': meshStartOffering(); break;
 #ifdef ENABLE_BLUETOOTH
@@ -1928,11 +1996,6 @@ static void benchServiceSerial() {
                 DEBUG_SERIAL.printf("[A2DP] volume=%d\n", a2dpSink.get_volume());
                 break;
             }
-            case 'm':
-                serverMuted = !serverMuted;
-                a2dpSink.set_stream_reader(a2dpDataCallback, !serverMuted);
-                DEBUG_SERIAL.printf("[A2DP] mute=%d\n", serverMuted ? 1 : 0);
-                break;
             case 'e': {
                 // Coexistence preference, at runtime, so one Bluetooth session
                 // can compare them: 0 WiFi, 1 Bluetooth, 2 balance (the default).
@@ -2004,6 +2067,7 @@ void setup() {
     // Read-only handle — the only writer is the 'c' command.
     prefs.begin(PREF_NAMESPACE, true);
     clientOnly = prefs.getBool(PREF_CLIENT_ONLY, false);
+    clientMonoOut = prefs.getBool(PREF_MONO_OUT, false);
     prefs.end();
 
     // Before the radio, because the receive callback compares every packet
@@ -2070,13 +2134,15 @@ void setup() {
 
     // Must happen before ESP-NOW comes up: the recv callback starts pushing into
     // this buffer as soon as the radio is listening.
-    if (psramFound()) {
-        uint8_t *ext = (uint8_t *)ps_malloc(JITTER_BUF_SIZE);
-        if (ext) jStorage = ext;
-    }
+    if (psramFound()) jStorage = (uint8_t *)ps_malloc(JITTER_BUF_SIZE);
+    if (!jStorage)    jStorage = (uint8_t *)malloc(JITTER_BUF_SIZE);
     if (!jbuf.init(jStorage, JITTER_BUF_SIZE)) {
-        LOG_ERROR("Jitter buffer init failed — JITTER_BUF_SIZE must be a power of two");
+        // A client with no ring drops every packet as an overflow: silent, and
+        // `ovf` on the status line says why.
+        LOG_ERROR("Jitter buffer init failed — no memory for " + String(JITTER_BUF_SIZE) +
+                  " bytes, or not a power of two");
     }
+    txEncoder.begin(MESH_BLOCK_FRAMES);
 
     // ESP-NOW must be up before BT to ensure coexistence layer is ready
     setupESPNow();

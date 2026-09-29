@@ -186,35 +186,59 @@
 // datasheet: -89 against -93 dBm); 54 would cost 17.
 #define ESPNOW_PHY_RATE      WIFI_PHY_RATE_12M
 
-// How many times each audio frame is sent. A broadcast has no acknowledgement
-// and so no retry: a frame lost in the air, or to the node's own Bluetooth
-// radio, is a hole in the audio unless it went out twice. The copies go back
-// to back and are not lost together (measured: with 14% of copies lost, fewer
-// blocks lost both than chance predicts), so the second copy recovers almost
-// every single loss -- and every loss measured behind a Bluetooth server was a
-// single frame. 12 Mbps with two copies: zero lost in 15 s, against 12% at
-// 6 Mbps with one, for about the same airtime. The receiver plays the first
-// copy that arrives; see ESPNOW_LEN_REPEAT in main.cpp.
-#define ESPNOW_TX_COPIES     2
+// How many times each frame is sent. A broadcast has no acknowledgement and so
+// no retry: a frame lost in the air, or to the node's own Bluetooth radio, is
+// a hole in the audio unless the data went out twice. It now does, inside the
+// packet -- every packet carries the previous block too (MESH_BLOCKS_PER_PACKET)
+// -- so one copy is enough. Two back-to-back copies were the first fix
+// (2026-09-29: 12 Mbps with two copies lost nothing in 15 s, against 12% at
+// 6 Mbps with one) and `t2` still sends them, for comparison; copies carry
+// ESPNOW_LEN_REPEAT in main.cpp and the receiver plays the first that arrives.
+#define ESPNOW_TX_COPIES     1
 
-// Audio payload per packet (bytes). Must be ≤ 250 (ESP-NOW max).
-// At 22050Hz mono 16-bit: 200 bytes = ~4.5ms of audio per packet (~220 pkt/s)
-#define ESPNOW_PAYLOAD_SIZE  200
+// ============================================================================
+// Mesh audio format
+// ============================================================================
+// 44.1 kHz stereo, IMA ADPCM: each sample a 4-bit step from a prediction, so
+// the full-rate stereo stream costs 44 KB/s -- what 22.05 kHz mono PCM cost
+// before (D5). The server forwards what A2DP gives it, with no decimation and
+// no fold to mono; a client plays what the server plays. The codec is
+// lib/adpcm; tools/codec/abtest.py is its reference and the A/B it was chosen by.
+//
+// Every node must agree on all of these, like ESPNOW_CHANNEL, and a node on
+// another format is kept out by MESH_WIRE_FORMAT in main.cpp.
+#define CLIENT_SAMPLE_RATE   44100
+
+// Stereo frames per ADPCM block: 2.6 ms of audio. Each block is 6 bytes of
+// decoder state plus one byte per frame, so a block is 120 bytes.
+#define MESH_BLOCK_FRAMES    114
+
+// Blocks per packet: its own, and the one before. A packet lost in the air is
+// rebuilt from the next one, 2.6 ms later -- far enough apart that the burst
+// that took the first rarely takes the second, which is where two copies sent
+// back to back fell short. Two 120-byte blocks and the 6-byte header are a
+// 246-byte frame, 387 of them a second: about the airtime of the two-copy
+// stream it replaces.
+#define MESH_BLOCKS_PER_PACKET  2
+
+#define MESH_BLOCK_BYTES     (6 + MESH_BLOCK_FRAMES)
+#define ESPNOW_PAYLOAD_SIZE  (MESH_BLOCKS_PER_PACKET * MESH_BLOCK_BYTES)
 
 // FreeRTOS queue depth for the ESP-NOW TX task (packets buffered before dropping).
-// FreeRTOS queue storage is internal DRAM, ~210 bytes a slot. 32 was ~6.7 KB
-// for a queue whose qfull counter had never left zero on the bench. 8 was
-// tried on 2026-09-14 and dropped 23 packets the first time a phone paused
-// and resumed: the A2DP decoder hands over a burst when audio restarts. 16 is
-// 72 ms of audio, 3.4 KB, and qfull is on the SERVER status line to watch.
-#define ESPNOW_TX_QUEUE_DEPTH  16
+// FreeRTOS queue storage is internal DRAM, one packet (~250 bytes) a slot. 8
+// was tried on 2026-09-14 and dropped 23 packets the first time a phone paused
+// and resumed: the A2DP decoder hands over a burst when audio restarts. 16 was
+// three A2DP packets' worth then; one A2DP packet (1024 frames) is now nine
+// mesh packets, not five, so it is 24 -- 2.7 A2DP packets, 62 ms, 5.9 KB.
+// qfull is on the SERVER status line and in `a` to watch.
+#define ESPNOW_TX_QUEUE_DEPTH  24
 
 // Hold ESP-NOW TX for this long after BT audio starts, so the A2DP pipeline has
 // settled before the radio starts competing with it.
 #define TX_WARMUP_MS  1000
 
 // --- WiFi driver buffer counts (see setupESPNow) -----------------------------
-// Receive side carries ~220 packets/s continuously. These buffers are DMA-capable
+// Receive side carries ~387 packets/s continuously. These buffers are DMA-capable
 // *internal* DRAM — PSRAM cannot back them, so trimming them is the only way to
 // claw back DRAM, and trimming them too far drops audio. 10 is the IDF default;
 // each buffer costs roughly 1.6 KB, so this is ~16 KB of DRAM.
@@ -228,32 +252,31 @@
 // chasing the WROVER's BT-connect crash, 2026-09-14.
 #define WIFI_STATIC_TX_BUFFERS   2
 
-// ============================================================================
-// Audio Downsampling (SERVER → CLIENT over ESP-NOW)
-// ============================================================================
-// BT A2DP delivers 44100Hz stereo 16-bit = 176 KB/s
-// We downsample to 22050Hz mono 16-bit = 44 KB/s before broadcasting.
-// Reduction: 2x from halving sample rate + 2x from stereo→mono = 4x total.
-#define CLIENT_SAMPLE_RATE  22050
 
 // ============================================================================
 // Jitter Buffer (CLIENT mode)
 // ============================================================================
-// Absorbs network timing variation before writing to I2S.
-// 8192 bytes at 22050Hz mono 16-bit ≈ 185ms of audio.
+// Absorbs network timing variation before writing to I2S. Holds decoded PCM,
+// 4 bytes a stereo frame: 32768 bytes at 44.1 kHz stereo is 185 ms, the same
+// depth as the 8192 bytes of 22.05 kHz mono it replaces. Allocated at boot, in
+// PSRAM where there is PSRAM -- a WROVER server needs its internal DRAM for
+// Bluetooth -- and from the heap elsewhere.
 // MUST be a power of two — the ring uses masking, not modulo (static_assert
 // in main.cpp enforces this).
-#define JITTER_BUF_SIZE    8192
+#define JITTER_BUF_SIZE    32768
 
-// Client I2S DMA ring. dma_buf_len counts stereo frames, so the ring holds
-// CLIENT_DMA_BUF_COUNT * CLIENT_DMA_BUF_LEN frames, and each frame consumes two
-// bytes of mono from the jitter buffer.
-#define CLIENT_DMA_BUF_COUNT  4
+// Bytes of PCM per stereo frame, in the jitter buffer and on I2S. Everything
+// the client moves -- a batch, a correction, a lost block's silence -- is a
+// whole number of these, or the channels swap for good.
+#define CLIENT_FRAME_BYTES  4
+
+// Client I2S DMA ring. dma_buf_len counts stereo frames: 8 x 256 is 46 ms at
+// 44.1 kHz, as 4 x 256 was at 22.05.
+#define CLIENT_DMA_BUF_COUNT  8
 #define CLIENT_DMA_BUF_LEN    256
 
-// Bytes of mono audio the DMA ring can swallow when completely empty:
-// 4 * 256 frames * 2 bytes = 2048 (~46 ms).
-#define CLIENT_DMA_CAPACITY_BYTES (CLIENT_DMA_BUF_COUNT * CLIENT_DMA_BUF_LEN * 2)
+// Bytes the DMA ring can swallow when completely empty: 8 * 256 * 4 = 8192.
+#define CLIENT_DMA_CAPACITY_BYTES (CLIENT_DMA_BUF_COUNT * CLIENT_DMA_BUF_LEN * CLIENT_FRAME_BYTES)
 
 // Minimum bytes in the jitter buffer before I2S output starts (~91 ms).
 //
@@ -264,9 +287,9 @@
 // jitter buffer that never held more than a fraction of its intended depth. The
 // audio survived on DMA buffering alone. A static_assert in main.cpp enforces
 // the relationship now.
-#define JITTER_PREFILL     4000
+#define JITTER_PREFILL     16000
 
-// Mono samples handed to I2S per loop() pass.
+// Stereo frames handed to I2S per loop() pass.
 #define CLIENT_BATCH       128
 
 // ============================================================================
@@ -280,9 +303,15 @@
 // lib/drift/drift.h for the control law and test/test_drift for the closed-loop
 // simulations these values were chosen against.
 //
-// The correction is one duplicated or dropped mono sample at a time -- at
-// 22.05 kHz those offsets are 0.67 and 1.28 samples/s, an edit every second or
-// two, which is why no resampler is needed.
+// The correction is one duplicated or dropped stereo frame at a time -- at
+// 44.1 kHz those offsets are 1.35 and 2.55 frames/s, an edit every half second
+// or so, which is why no resampler is needed.
+//
+// Every number below is in bytes of the jitter buffer, and the format behind
+// them changed on 2026-09-29 from 22.05 kHz mono (2 bytes, 44,100 B/s) to
+// 44.1 kHz stereo (4 bytes, 176,400 B/s). They were scaled to keep the same
+// behaviour in *time*: bytes x4, corrections per second x2 for the same ppm.
+// Byte figures quoted from measurements before that date are in the old unit.
 
 // Bounds on the fill the controller steers towards. The target itself is
 // measured once the settle window closes -- see lib/drift/drift.h -- and clamped
@@ -304,7 +333,7 @@
 // How long after playback arms before corrections may start, ms.
 //
 // Arming happens at JITTER_PREFILL with an empty DMA ring, and the ring then
-// takes its share within about 50 ms -- a 2,048-byte step down that is not
+// takes its share within about 50 ms -- an 8,192-byte step down that is not
 // drift and must not be corrected as if it were. Three filter time constants is
 // enough for the smoothed fill to forget it. Drift takes minutes to matter, so
 // the dead time costs nothing.
@@ -312,13 +341,13 @@
 
 // No correction at all while the smoothed error is inside this band.
 //
-// One packet. Wide enough that packet-arrival jitter never provokes an edit --
-// and the 4 s filter below has already removed most of that anyway -- while
-// costing only 4.5 ms of depth before the controller engages, which at the
-// measured offsets is 150 s (S3) or 78 s (C3) of untouched drift at startup.
-// It was 400, and 400 is depth this buffer cannot spare: see the equilibrium
-// arithmetic under DRIFT_KP.
-#define DRIFT_DEADBAND_BYTES  200
+// 4.5 ms, which was one packet. Wide enough that packet-arrival jitter never
+// provokes an edit -- and the 4 s filter below has already removed most of that
+// anyway -- while costing only 4.5 ms of depth before the controller engages,
+// which at the measured offsets is 150 s (S3) or 78 s (C3) of untouched drift
+// at startup. It was twice that, and that is depth this buffer cannot spare:
+// see the equilibrium arithmetic under DRIFT_KP.
+#define DRIFT_DEADBAND_BYTES  800
 
 // Corrections per second per byte of error outside the deadband.
 //
@@ -329,26 +358,28 @@
 //     target - (deadband + required_rate / kp)
 //
 // and that depth has to survive a radio hiccup. It is not a free parameter: at
-// 0.005 and the -58 ppm measured between the WROOM and the C3, the client parks
-// at ~1,290 bytes -- 29 ms. A client at that depth underran in the 600 s
-// baseline on a two-packet loss, with the buffer showing 1,304 bytes one second
-// earlier. At 0.02 the same client parks near 1,990 bytes, and the loop time
-// constant is 1/(2*kp) = 25 s: still six times slower than the input filter, so
-// there is nothing for it to ring against, and far faster than the drift it
-// corrects.
-#define DRIFT_KP              0.02f
+// 0.005 (old format) and the -58 ppm measured between the WROOM and the C3, the
+// client parked at 29 ms. A client at that depth underran in the 600 s baseline
+// on a two-packet loss, with 30 ms in the buffer one second earlier. At 0.02
+// (old format) the same client parked near 45 ms. In today's format that is
+// 0.01: the offset is required_rate / kp, and the rate doubles while the bytes
+// quadruple. The loop time constant is 1/(kp * CLIENT_FRAME_BYTES) = 25 s: six
+// times slower than the input filter, so there is nothing for it to ring
+// against, and far faster than the drift it corrects.
+#define DRIFT_KP              0.01f
 
-// Hard cap on the correction rate, corrections per second. 5/s is 227 ppm of
-// authority, comfortably past any crystal pair, and bounds how much audio the
-// controller can touch if something else goes wrong.
-#define DRIFT_MAX_RATE        5.0f
+// Hard cap on the correction rate, corrections per second. 10/s is 227 ppm of
+// authority at 44.1 kHz, comfortably past any crystal pair, and bounds how much
+// audio the controller can touch if something else goes wrong.
+#define DRIFT_MAX_RATE        10.0f
 
 // Time constant of the fill low-pass, ms.
 #define DRIFT_EMA_TAU_MS      4000.0f
 
 // Lost packets are replaced with an equal amount of silence to keep playback
-// timing. Capped so one long outage can't flood the buffer with silence.
-#define MAX_GAP_FILL_PKTS  4
+// timing. Capped so one long outage can't flood the buffer with silence: 8
+// blocks is 21 ms, about what 4 packets of the old format were.
+#define MAX_GAP_FILL_PKTS  8
 
 // A sequence number this far from the expected one is treated as a stream
 // restart, not as a gap. Sequence numbers are uint16_t, so a duplicate or
@@ -372,7 +403,7 @@
 
 // If the source falls behind (blocked for a while), send at most this many
 // packets back-to-back to catch up rather than spinning out the whole backlog.
-#define BENCH_MAX_CATCHUP_PKTS  8
+#define BENCH_MAX_CATCHUP_PKTS  14
 
 // How often each node emits its machine-parsable [BENCH] telemetry line. This
 // is the sampling interval for the clock-drift regression, so shorter gives a

@@ -298,6 +298,28 @@ static void test_seq_both_copies_lost_is_one_loss(void) {
     TEST_ASSERT_EQUAL_UINT32(0, s.dupe);
 }
 
+// Every packet also carries the block before it. A single loss is rebuilt from
+// the next packet and played, so it must not stay on `lost` -- that counter is
+// the holes, and the harness turns it into a loss percentage.
+static void test_seq_recovered_block_is_not_lost(void) {
+    SeqTracker s(RESYNC_THRESHOLD, MAX_GAP_FILL);
+    s.update(10);
+    SeqResult r = s.update(12);   // 11 missing, and 12 carries a copy of it
+    TEST_ASSERT_EQUAL_INT(1, r.fillPackets);
+    s.recovered(1);
+    TEST_ASSERT_EQUAL_UINT32(0, s.lost);
+
+    // Two missing, one rebuilt: one hole left.
+    s.update(15);
+    TEST_ASSERT_EQUAL_UINT32(2, s.lost);
+    s.recovered(1);
+    TEST_ASSERT_EQUAL_UINT32(1, s.lost);
+
+    // Never below zero, whatever the caller claims.
+    s.recovered(5);
+    TEST_ASSERT_EQUAL_UINT32(0, s.lost);
+}
+
 static void test_seq_single_loss_fills_one_packet(void) {
     SeqTracker s(RESYNC_THRESHOLD, MAX_GAP_FILL);
     s.update(10);
@@ -431,6 +453,7 @@ static int runAllTests(void) {
     RUN_TEST(test_seq_intended_repeat_is_dropped_without_a_dupe);
     RUN_TEST(test_seq_repeat_stands_in_for_a_lost_original);
     RUN_TEST(test_seq_both_copies_lost_is_one_loss);
+    RUN_TEST(test_seq_recovered_block_is_not_lost);
     RUN_TEST(test_seq_single_loss_fills_one_packet);
     RUN_TEST(test_seq_long_gap_is_counted_fully_but_fill_is_capped);
     RUN_TEST(test_seq_wraps_cleanly_at_65535);

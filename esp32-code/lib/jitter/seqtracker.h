@@ -44,6 +44,14 @@ public:
      */
     SeqResult update(uint16_t seq, bool repeat = false);
 
+    /**
+     * `n` of the packets the last update() reported missing were rebuilt from
+     * the redundant copy the next packet carries, and played. They come off
+     * `lost`, which stays the count of blocks that were never heard -- the
+     * holes. Never takes `lost` below zero.
+     */
+    void recovered(uint32_t n);
+
     /** Forget the stream. Next packet is treated as the first one. */
     void reset();
 

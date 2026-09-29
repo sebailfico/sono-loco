@@ -11,6 +11,10 @@ void SeqTracker::reset() {
     resync   = 0;
 }
 
+void SeqTracker::recovered(uint32_t n) {
+    lost = n < lost ? lost - n : 0;
+}
+
 SeqResult SeqTracker::update(uint16_t seq, bool repeat) {
     SeqResult r = {true, 0};
 

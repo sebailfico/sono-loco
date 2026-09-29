@@ -60,7 +60,7 @@ def encode(x):
     """One channel of int16 -> (codes, per-block (pred, idx) states, reconstruction)."""
     codes = np.zeros(len(x), np.uint8)
     states, recon = [], np.zeros(len(x), np.int16)
-    pred, idx = int(x[0]), 0
+    pred, idx = 0, 0                       # as AdpcmStereoEncoder::reset()
     for i, s in enumerate(x.tolist()):
         if i % BLOCK == 0:
             states.append((pred, idx))     # what the packet header carries

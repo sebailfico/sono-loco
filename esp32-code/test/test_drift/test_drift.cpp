@@ -10,9 +10,14 @@
  * the bench run afterwards becomes a confirmation rather than an exploration.
  *
  * The simulation is checked against reality before it is trusted: with the
- * controller switched off it must reproduce the 1.34 bytes/s slope recorded in
- * CHANGELOG.md for v0.1.0. If that assertion ever fails the model is wrong and
- * nothing below it means anything.
+ * controller switched off it must reproduce the slope recorded in CHANGELOG.md
+ * for v0.1.0 -- 1.34 bytes/s in that format, 22.05 kHz mono, which is 5.36 in
+ * today's 44.1 kHz stereo (4 bytes a frame, twice the frames). If that
+ * assertion ever fails the model is wrong and nothing below it means anything.
+ *
+ * All the byte figures here moved with the format on 2026-09-29: x4 for the
+ * same time, and corrections per second x2 for the same ppm. The comments give
+ * the old-format number where a measurement was taken in it.
  */
 
 #include <unity.h>
@@ -20,28 +25,30 @@
 #include "drift.h"
 
 // The client audio path these numbers describe; kept in step with config.h.
-static const int SAMPLE_RATE   = 22050;
-static const int BYTES_PER_SEC = SAMPLE_RATE * 2;   // 16-bit mono
-static const int BATCH_SAMPLES = 128;               // CLIENT_BATCH
-static const int BATCH_BYTES   = BATCH_SAMPLES * 2;
+static const int SAMPLE_RATE   = 44100;             // CLIENT_SAMPLE_RATE
+static const int FRAME_BYTES   = 4;                 // CLIENT_FRAME_BYTES, 16-bit stereo
+static const int BYTES_PER_SEC = SAMPLE_RATE * FRAME_BYTES;
+static const int BATCH_FRAMES  = 128;               // CLIENT_BATCH
+static const int BATCH_BYTES   = BATCH_FRAMES * FRAME_BYTES;
 // DRIFT_TARGET_BYTES: the prefill minus what the I2S DMA ring holds once
 // playback is running. The ring buffer only ever contains the remainder, which
 // is what the controller can see -- steering to the full prefill was a real bug,
 // caught on a C3 client, and test_target_is_the_ring_not_the_prefill pins it.
-static const int TARGET        = 4000 - 2048;
-static const int BUF_SIZE      = 8192;              // JITTER_BUF_SIZE
+static const int PREFILL       = 16000;             // JITTER_PREFILL
+static const int TARGET        = PREFILL - 8192;    // minus CLIENT_DMA_CAPACITY_BYTES
+static const int BUF_SIZE      = 32768;             // JITTER_BUF_SIZE
 // Health margins: how close the ring may come to empty (underrun) or full
 // (overflow). Not the DMA capacity -- the ring legitimately sits below that
 // number now, because the DMA is holding the rest of the prefill.
-static const double SAFE_MARGIN = 800.0;
+static const double SAFE_MARGIN = 3200.0;            // 18 ms
 
 static DriftController::Config defaultCfg() {
     DriftController::Config c;
     c.targetBytes    = TARGET;
-    c.targetCeilBytes = TARGET + 1024;
-    c.deadbandBytes = 200;
-    c.kp            = 0.02f;
-    c.maxRatePerSec = 5.0f;
+    c.targetCeilBytes = TARGET + 4096;
+    c.deadbandBytes = 800;
+    c.kp            = 0.01f;
+    c.maxRatePerSec = 10.0f;
     c.emaTauMs      = 4000.0f;
     c.settleMs      = 12000;
     return c;
@@ -79,8 +86,8 @@ static void test_no_correction_inside_deadband(void) {
     d.begin(defaultCfg(), 0);
     // One byte inside the deadband, held for a minute: the controller must not
     // twitch. The calibration clamps to the configured floor at this level, so
-    // the error really is -199 and not zero.
-    TEST_ASSERT_EQUAL_INT(0, runAt(d, TARGET - 199, 60000));
+    // the error really is -799 and not zero.
+    TEST_ASSERT_EQUAL_INT(0, runAt(d, TARGET - 799, 60000));
     TEST_ASSERT_EQUAL_UINT32(0, d.inserted);
     TEST_ASSERT_EQUAL_UINT32(0, d.dropped);
 }
@@ -89,7 +96,7 @@ static void test_draining_buffer_asks_to_insert(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
     // Longer than settleMs: nothing is corrected inside the dead time.
-    int net = runAt(d, TARGET - 1400, 25000);
+    int net = runAt(d, TARGET - 5600, 25000);
     TEST_ASSERT_LESS_THAN_INT(0, net);
     TEST_ASSERT_TRUE(d.inserted > 0);
     TEST_ASSERT_EQUAL_UINT32(0, d.dropped);
@@ -98,7 +105,7 @@ static void test_draining_buffer_asks_to_insert(void) {
 static void test_filling_buffer_asks_to_drop(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
-    int net = runAt(d, TARGET + 1400, 25000);
+    int net = runAt(d, TARGET + 5600, 25000);
     TEST_ASSERT_GREATER_THAN_INT(0, net);
     TEST_ASSERT_TRUE(d.dropped > 0);
     TEST_ASSERT_EQUAL_UINT32(0, d.inserted);
@@ -108,7 +115,7 @@ static void test_rate_is_clamped(void) {
     DriftController d;
     DriftController::Config c = defaultCfg();
     d.begin(c, 0);
-    // An error of 4000 bytes would ask for 18/s unclamped.
+    // An error of 7808 bytes would ask for 70/s unclamped.
     runAt(d, 0, 40000);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, -c.maxRatePerSec, d.rate());
 }
@@ -121,32 +128,32 @@ static void test_unapplied_correction_stays_owed(void) {
     DriftController::Correction c = DriftController::NONE;
     uint32_t t = 0;
     for (; t < 40000 && c == DriftController::NONE; t += 6) {
-        c = d.update(t, TARGET - 1400);
+        c = d.update(t, TARGET - 5600);
     }
     TEST_ASSERT_EQUAL_INT(DriftController::INSERT, c);
 
     // Not confirmed: it must ask again, and nothing is counted.
-    TEST_ASSERT_EQUAL_INT(DriftController::INSERT, d.update(t, TARGET - 1400));
+    TEST_ASSERT_EQUAL_INT(DriftController::INSERT, d.update(t, TARGET - 5600));
     TEST_ASSERT_EQUAL_UINT32(0, d.inserted);
 
     // Confirmed once: the debt is paid and it does not immediately re-ask.
     d.confirm(DriftController::INSERT);
     TEST_ASSERT_EQUAL_UINT32(1, d.inserted);
-    TEST_ASSERT_EQUAL_INT(DriftController::NONE, d.update(t + 6, TARGET - 1400));
+    TEST_ASSERT_EQUAL_INT(DriftController::NONE, d.update(t + 6, TARGET - 5600));
 }
 
 static void test_reset_forgets_everything(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
-    runAt(d, TARGET - 1400, 25000);
+    runAt(d, TARGET - 5600, 25000);
     TEST_ASSERT_TRUE(d.inserted > 0);
 
     d.reset(25000);
     TEST_ASSERT_EQUAL_FLOAT(0.0f, d.rate());
     // Re-seeds on the next reading rather than reading a post-underrun refill
-    // as a 3000-byte error.
-    TEST_ASSERT_EQUAL_INT(DriftController::NONE, d.update(25000, TARGET - 3000));
-    TEST_ASSERT_EQUAL_FLOAT((float)(TARGET - 3000), d.smoothedFill());
+    // as a 12000-byte error.
+    TEST_ASSERT_EQUAL_INT(DriftController::NONE, d.update(25000, TARGET - 12000));
+    TEST_ASSERT_EQUAL_FLOAT((float)(TARGET - 12000), d.smoothedFill());
 }
 
 static void test_settle_window_suppresses_the_arming_transient(void) {
@@ -155,9 +162,9 @@ static void test_settle_window_suppresses_the_arming_transient(void) {
 
     // What arming actually looks like: playback starts with the full prefill in
     // the ring and an empty DMA ring, and the DMA takes its share within about
-    // 50 ms. That step is 2,048 bytes and it is not drift.
+    // 50 ms. That step is 8,192 bytes and it is not drift.
     uint32_t t = 0;
-    for (; t < 60; t += 6) { d.confirm(d.update(t, 4000)); }
+    for (; t < 60; t += 6) { d.confirm(d.update(t, PREFILL)); }
     for (; t < 11000; t += 6) { d.confirm(d.update(t, TARGET)); }
 
     // Nothing corrected: the step was absorbed by the dead time, not chased.
@@ -166,15 +173,15 @@ static void test_settle_window_suppresses_the_arming_transient(void) {
 
     // And the filter was running throughout, so when the window closes the
     // estimate is essentially the settled level. Three time constants leaves
-    // about 5% of the 2,048-byte step -- ~100 bytes, well inside the deadband,
+    // about 5% of the 8,192-byte step -- ~400 bytes, well inside the deadband,
     // so it cannot provoke a correction on its own.
-    TEST_ASSERT_FLOAT_WITHIN(150.0f, (float)TARGET, d.smoothedFill());
+    TEST_ASSERT_FLOAT_WITHIN(600.0f, (float)TARGET, d.smoothedFill());
 }
 
 static void test_natural_level_needs_no_correction(void) {
     // The target is the prefill minus what the DMA ring holds -- the level the
     // ring actually settles at. Steering to the prefill instead pulled a real
-    // client 1,600 bytes above its natural level at nearly full rate for
+    // client 1,600 bytes (old format) above its natural level at nearly full rate for
     // minutes. Held at the natural level, the controller must do nothing at all.
     DriftController d;
     d.begin(defaultCfg(), 0);
@@ -189,20 +196,20 @@ static void test_survives_the_millis_wrap(void) {
     d.begin(defaultCfg(), nearWrap);
     // Straddle the wrap. A naive dt would go hugely positive or negative here
     // and either freeze the filter or dump a burst of corrections.
-    int net = runAt(d, TARGET - 1400, 30000, nearWrap);
+    int net = runAt(d, TARGET - 5600, 30000, nearWrap);
     TEST_ASSERT_LESS_THAN_INT(0, net);
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, -5.0f, d.rate());
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, -defaultCfg().maxRatePerSec, d.rate());
 }
 
 static void test_a_stall_cannot_dump_credit(void) {
     DriftController d;
     d.begin(defaultCfg(), 0);
-    runAt(d, TARGET - 1400, 30000);              // rate now clamped at -5/s
+    runAt(d, TARGET - 5600, 30000);              // rate now clamped at -10/s
     uint32_t before = d.inserted;
 
-    // A 10-second stall (mode change, a blocked write). At -5/s an unclamped dt
-    // would owe 50 corrections at once; the clamp caps it at one batch's worth.
-    DriftController::Correction c = d.update(40000, TARGET - 1400);
+    // A 10-second stall (mode change, a blocked write). At -10/s an unclamped dt
+    // would owe 100 corrections at once; the clamp caps it at one batch's worth.
+    DriftController::Correction c = d.update(40000, TARGET - 5600);
     d.confirm(c);
     TEST_ASSERT_TRUE(d.inserted - before <= 1);
 }
@@ -270,11 +277,11 @@ static SimResult simulate(double ppm, double seconds, bool correct) {
         if (correct) {
             DriftController::Correction c = d.update((uint32_t)tMs, (int)fill);
             // The caller can only apply a correction if the samples are there.
-            if (c == DriftController::DROP && fill >= consume + 2.0) {
-                consume += 2.0;
+            if (c == DriftController::DROP && fill >= consume + FRAME_BYTES) {
+                consume += FRAME_BYTES;
                 d.confirm(c);
-            } else if (c == DriftController::INSERT && fill >= consume - 2.0) {
-                consume -= 2.0;
+            } else if (c == DriftController::INSERT && fill >= consume - FRAME_BYTES) {
+                consume -= FRAME_BYTES;
                 d.confirm(c);
             }
         }
@@ -298,14 +305,15 @@ static SimResult simulate(double ppm, double seconds, bool correct) {
 
 /**
  * Model check. Uncorrected, the simulation must reproduce the slope measured on
- * hardware for v0.1.0: -1.34 bytes/s at -30.5 ppm. Everything below this test
- * depends on the model being right.
+ * hardware for v0.1.0: -1.34 bytes/s at -30.5 ppm, in that version's 22.05 kHz
+ * mono -- -5.36 bytes/s in today's format. Everything below this test depends
+ * on the model being right.
  */
 static void test_model_reproduces_the_measured_slope(void) {
     SimResult r = simulate(30.5, 600.0, false);
     // Float, not double: Unity is built here without double support, and this
     // margin is four decimal places wider than float can lose.
-    TEST_ASSERT_FLOAT_WITHIN(0.05f, -1.34f, (float)r.slopeBytesPerSec);
+    TEST_ASSERT_FLOAT_WITHIN(0.2f, -1.34f * 4.0f, (float)r.slopeBytesPerSec);
 }
 
 static void test_uncorrected_buffer_empties_within_the_hour(void) {
@@ -324,14 +332,14 @@ static void test_corrected_buffer_holds_for_an_hour(void) {
     // It parks below target: that offset is what generates the correction rate
     // the drift demands, and it is the documented cost of P-only control.
     TEST_ASSERT_TRUE(r.finalFill < (double)TARGET);
-    TEST_ASSERT_TRUE(r.finalFill > (double)TARGET - 1000.0);
+    TEST_ASSERT_TRUE(r.finalFill > (double)TARGET - 4000.0);
 
     // In the second half the loop has settled, and the correction rate must
-    // then equal the drift it is cancelling: 30.5 ppm at 22.05 kHz is
-    // 0.673 samples/s, so 1211 over the last 1800 s. Anything else and the
+    // then equal the drift it is cancelling: 30.5 ppm at 44.1 kHz is
+    // 1.345 frames/s, so 2421 over the last 1800 s. Anything else and the
     // buffer would still be going somewhere.
     const uint32_t steady = r.inserted - r.insertedAtHalf;
-    TEST_ASSERT_UINT32_WITHIN(60, 1211, steady);
+    TEST_ASSERT_UINT32_WITHIN(120, 2421, steady);
 
     // Over the whole hour it is lower, because nothing happens until the error
     // clears the deadband -- ~300 s of untouched drift at the start. That is the
@@ -347,7 +355,7 @@ static void test_corrected_the_other_way_round(void) {
     TEST_ASSERT_TRUE(r.maxFill < (double)BUF_SIZE - SAFE_MARGIN);
     TEST_ASSERT_TRUE(r.minFill > SAFE_MARGIN);
     const uint32_t steady = r.dropped - r.droppedAtHalf;
-    TEST_ASSERT_UINT32_WITHIN(60, 1211, steady);
+    TEST_ASSERT_UINT32_WITHIN(120, 2421, steady);
     TEST_ASSERT_EQUAL_UINT32(0, r.inserted);
 }
 
@@ -371,23 +379,24 @@ static void test_equilibrium_depth_survives_a_hiccup(void) {
     // underran on a two-packet loss with 1,304 bytes showing one second earlier,
     // so ~1,300 bytes (29 ms) is a depth that demonstrably does not survive
     // ordinary conditions. The original gain parked a -58 ppm client at exactly
-    // that. 1,500 bytes is the floor this asserts; the current gain leaves ~1,990.
+    // that. 34 ms is the floor this asserts -- 1,500 bytes in the old format,
+    // 6,000 in today's; the current gain leaves ~38 ms.
     static const double worstCase[] = {-80.0, -58.0, 58.0, 80.0};
     for (unsigned i = 0; i < sizeof(worstCase) / sizeof(worstCase[0]); i++) {
         SimResult r = simulate(worstCase[i], 3600.0, true);
-        TEST_ASSERT_TRUE(r.finalFill > 1500.0);
-        TEST_ASSERT_TRUE(r.minFill   > 1200.0);
+        TEST_ASSERT_TRUE(r.finalFill > 6000.0);
+        TEST_ASSERT_TRUE(r.minFill   > 4800.0);
     }
 }
 
 static void test_drift_beyond_authority_degrades_gracefully(void) {
-    // 400 ppm is far outside anything two crystals do, and past the 5/s clamp
+    // 400 ppm is far outside anything two crystals do, and past the 10/s clamp
     // (227 ppm). The buffer loses the race, but the controller must still be
     // pulling at its maximum rather than winding up or oscillating.
     SimResult r = simulate(400.0, 600.0, true);
     TEST_ASSERT_TRUE(r.inserted > 0);
     TEST_ASSERT_EQUAL_UINT32(0, r.dropped);
-    TEST_ASSERT_TRUE(r.inserted > (uint32_t)(4.0 * 600.0 * 0.5));
+    TEST_ASSERT_TRUE(r.inserted > (uint32_t)(8.0 * 600.0 * 0.5));
 }
 
 // ---------------------------------------------------------------------------

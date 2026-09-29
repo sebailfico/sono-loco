@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Automated multi-board mesh test: flash, stream, and measure clock drift.
 
@@ -11,7 +11,7 @@
       1. discovers ESP32 serial ports and identifies the chip on each
       2. optionally flashes the right firmware for that chip (-Flash)
       3. reboots every node into bench mode, where Bluetooth is never started
-      4. elects one node to generate a synthetic 22.05 kHz test stream over
+      4. elects one node to generate a synthetic 44.1 kHz stereo test stream over
          ESP-NOW; the rest fall into CLIENT and play it
       5. collects [BENCH] telemetry for -Duration seconds
       6. reports stream health and per-board clock drift
@@ -50,6 +50,12 @@
     same boards, same session, and compare. Without it the correction is on,
     which is the shipping behaviour.
 
+.PARAMETER Mute
+    Mute every client's speaker for the run (`m`). Nothing else changes: the
+    stream is received, buffered, drift-corrected and consumed exactly as
+    before, only the samples handed to I2S are zeros. The bench tone is loud
+    on any amp, and a 600 s run is ten minutes of it.
+
 .PARAMETER KeepBenchMode
     Leave the nodes in bench mode at the end instead of rebooting them back to
     normal speaker behaviour.
@@ -67,7 +73,8 @@ param(
     [string[]]$Ports = @(),
     [int]$PollMs = 10,
     [switch]$KeepBenchMode,
-    [switch]$NoDrift
+    [switch]$NoDrift,
+    [switch]$Mute
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,12 +84,14 @@ $projectDir = Join-Path $repoRoot 'esp32-code'
 $logDir     = Join-Path $repoRoot 'logs'
 
 # Mesh audio format, needed to turn byte counts into rates. Keep in step with
-# config.h -- CLIENT_SAMPLE_RATE and ESPNOW_PAYLOAD_SIZE.
-$SampleRate  = 22050
-$BytesPerSec = $SampleRate * 2          # 16-bit mono
-$PayloadSize = 200
-$PktPerSec   = $BytesPerSec / $PayloadSize
-$JitterBufSize = 8192
+# config.h -- CLIENT_SAMPLE_RATE, CLIENT_FRAME_BYTES, MESH_BLOCK_FRAMES and
+# JITTER_BUF_SIZE. The jitter buffer holds decoded 44.1 kHz stereo; a packet
+# carries one new block of MESH_BLOCK_FRAMES frames.
+$SampleRate  = 44100
+$BytesPerSec = $SampleRate * 4          # 16-bit stereo, decoded
+$BlockFrames = 114
+$PktPerSec   = $SampleRate / $BlockFrames
+$JitterBufSize = 32768
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -464,6 +473,19 @@ if (-not $sourceNode) { throw 'No node with ESP-NOW active could be the source.'
 $sourceNode.IsSource = $true
 
 Write-Host "Source: $($sourceNode.Port) ($($sourceNode.Chip))" -ForegroundColor Green
+
+if ($Mute) {
+    Write-Host 'Muting every client ...' -ForegroundColor Yellow
+    foreach ($n in $nodes) {
+        if ($n.IsSource) { continue }
+        $null = $n.Sp.ReadExisting()
+        Send-Cmd -Sp $n.Sp -Cmd 'm'
+        $line = Wait-ForLine -Sp $n.Sp -Pattern '^\[OUT\] mute=' -TimeoutSec 4
+        if (-not $line -or $line -notmatch 'mute=1') {
+            Write-Warning "$($n.Port) did not confirm mute ($line) -- it may be playing"
+        }
+    }
+}
 
 # Drift correction defaults to on, because that is what ships. -NoDrift turns it
 # off on every node so the uncorrected baseline can be reproduced on the same
