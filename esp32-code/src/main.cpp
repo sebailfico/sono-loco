@@ -1885,6 +1885,16 @@ static void benchServiceSerial() {
                 DEBUG_SERIAL.printf("[A2DP] jingle guarded=0 streaming=%d\n", txReady ? 1 : 0);
                 playConnectedSound();
                 break;
+            case 'V': {
+                // `V<0..127>`: the A2DP volume, as a phone's slider would set
+                // it -- applied before forwarding, so it moves every room. A
+                // node that dialled the PC with `k` starts at VOLUME_DEFAULT.
+                char line[8];
+                benchReadLine(line, sizeof(line));
+                if (line[0] != '\0') a2dpSink.set_volume((uint8_t)constrain(atoi(line), 0, 127));
+                DEBUG_SERIAL.printf("[A2DP] volume=%d\n", a2dpSink.get_volume());
+                break;
+            }
             case 'm':
                 serverMuted = !serverMuted;
                 a2dpSink.set_stream_reader(a2dpDataCallback, !serverMuted);

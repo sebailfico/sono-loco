@@ -227,6 +227,7 @@ def main():
         import ser
         cp = ser.open_port(a.client)
         c0 = client_counters(ser, cp)
+        ser.talk(cp, 'l', 0.3, show=False)      # reset the loss-run histogram
     print(f'{datetime.datetime.now():%H:%M:%S} playing {len(sig) / fs_out:.1f} s '
           f'to {a.device!r} at {a.level:.0f} dBFS')
     # The board's window is reset as late as possible, right as playback opens;
@@ -243,10 +244,13 @@ def main():
         sp.close()
     if cp:
         c1 = client_counters(ser, cp)
+        runs = [l for l in ser.talk(cp, 'l', 0.3, show=False) if l.startswith('[LOSS]')]
         cp.close()
         if c0 and c1:
             print('client ' + ' '.join(f'{k}=+{int(c1[k]) - int(c0[k])}' for k in CLIENT_KEYS)
                   + f" jit={c1['jit']} mode={c1['mode']}")
+            if runs:
+                print('client ' + runs[0].split(' runs=')[-1].join(['lost runs of 1..7,8+ = ', '']))
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     base = os.path.join(ROOT, 'logs', f'listen-{stamp}' + (f'-{a.label}' if a.label else ''))
     os.makedirs(os.path.dirname(base), exist_ok=True)

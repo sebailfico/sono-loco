@@ -28,8 +28,10 @@ def open_port(port):
 
 def talk(sp, cmds='', secs=1.0, show=True):
     out = []
-    for c in cmds:
-        sp.write(c.encode())
+    # One write: a command with an argument (`e0`, `k<mac>`) is read by the
+    # firmware against a 250 ms deadline, which a character every 50 ms missed.
+    if cmds:
+        sp.write(cmds.encode())
         time.sleep(0.05)
     t0 = time.time()
     buf = b''
