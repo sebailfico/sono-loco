@@ -59,10 +59,10 @@ Every node runs the same three-state machine:
 ```
 Phone ──BT A2DP──► ESP32 ──I2S──► PCM5102 ──► TPA3116 ──► Speaker
                      │
-                     └── 4-tap FIR, then downsample 44.1kHz stereo → 22.05kHz mono
+                     └── IMA ADPCM, 44.1kHz stereo, 4 bits a sample
                                 │
-                           ESP-NOW broadcast (200-byte packets, ~220/sec, 44 KB/s,
-                           each sent twice at 12 Mbps)
+                           ESP-NOW broadcast at 12 Mbps (246-byte packets,
+                           ~387/sec: each a 2.6 ms block plus the one before)
                            stamped with this household's 16-bit mesh id
                                 │
                      ┌──────────┴──────────┐
@@ -77,14 +77,15 @@ ESP-NOW RX ──► jitter buffer ──► I2S DMA ──► PCM5102 ──►
 ```
 
 Client-side latency is about **137 ms**: playback starts once `JITTER_PREFILL`
-(4000 bytes ≈ 91 ms) has accumulated, and the I2S DMA ring holds a further
-1024 frames ≈ 46 ms. The ring itself is 8192 bytes ≈ 185 ms, which is its
+(16000 bytes of decoded stereo ≈ 91 ms) has accumulated, and the I2S DMA ring
+holds a further 2048 frames ≈ 46 ms. The ring itself is 32768 bytes ≈ 185 ms, which is its
 capacity, not its latency — the prefill must stay above the DMA capacity, see
 the gotchas.
 
-The 4x reduction is 2x from halving the sample rate and 2x from stereo → mono. The
-server plays the full 44.1 kHz stereo stream locally, so rooms do not currently sound
-identical — see `TODO.md`.
+Clients get what the server plays: full-rate stereo, in a quarter of the bytes,
+through IMA ADPCM (D5). Until 2026-09-29 the mesh carried 22.05 kHz mono PCM
+instead — same bytes, no stereo, and nothing above ~11 kHz. A client with one
+speaker mixes the two channels (`M`).
 
 ## Current Status
 
@@ -117,7 +118,7 @@ build, and range at 12 Mbps is untested; see `TODO.md`.
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the
 same WROOM and an ESP32-C3, enough to drain a client's jitter buffer to an
 underrun within a 600 s run. `lib/drift/` holds the buffer at depth by
-duplicating or dropping one mono sample at a time, roughly one edit a second at
+duplicating or dropping one sample (a stereo frame since D5 changed) at a time, roughly one edit a second at
 that offset. Measured over 600 s each way on the same boards: zero underruns
 corrected, and the correction rate agrees with the uncorrected drift to within
 1.4 ppm. See `CHANGELOG.md` and D11.
@@ -361,7 +362,7 @@ To test the **mesh** — real boards, real radio:
 ```
 
 It discovers every attached ESP32, identifies each by chip, flashes the matching
-firmware, streams a synthetic 22.05 kHz tone between them and reports packet loss
+firmware, streams a synthetic 44.1 kHz stereo tone between them and reports packet loss
 and clock drift. No board limit. Full detail in `docs/bench-test.md`.
 
 ### Bench mode
@@ -387,11 +388,12 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `j` / `J` | BT server: play the connect jingle now — `j` the way a connection does (the library's local output muted meanwhile), `J` the old unguarded way. For comparing the two during a stream |
 | `k` | BT server: `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, the way a headset reconnects to a phone. What lets a reflashed server get its link back with nobody clicking Connect; the PC here is `aa:bb:cc:dd:ee:ff` |
 | `V` | BT server: `V<0..127>` sets the A2DP volume, as a phone's slider would. Applied before forwarding, so it moves every room; a server that dialled in with `k` starts at 1 |
-| `m` | BT server: mute its own speaker, mesh untouched — so a mic next to a client hears the client |
+| `m` | mute this node's speaker until reboot — a server's local output (mesh untouched) or a client's I2S. How a mic hears one node alone, and how `bench-mesh.ps1 -Mute` runs silent |
+| `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS |
 | `e` | BT server: `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
 | `t` | `t<n>` sends each mesh frame n times (1–3) until reboot; `ESPNOW_TX_COPIES` is the default |
 | `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
-| `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks only the repeat copy saved |
+| `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks rebuilt from the next packet or a repeat copy |
 | `q` | BT server: `q<frames>` reinstalls the local I2S DMA ring with that buffer length (8 buffers; 256 = 46 ms is the default, 64 = the library's 11.6 ms), between streams only. Bare `q` prints it |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
@@ -416,12 +418,18 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   on a string, and in a library because two nodes disagreeing about what a name
   hashes to produces silence with nothing in the log — the one failure mode
   worth pinning on the host rather than chasing on a bench. See D12.
+- `esp32-code/lib/adpcm/` — the mesh codec: IMA ADPCM, stereo, in blocks that
+  each carry their decoder state, so any block decodes alone. Pinned to the
+  Python reference in `tools/codec/abtest.py` by golden vectors: two nodes built
+  from codecs that disagree decode each other into noise. See D5.
 - `esp32-code/lib/drift/` — the clock-drift controller. Decides when a client
   should duplicate or drop a sample to hold its buffer at depth; it never touches
   I2S or the ring buffer itself, which is what makes the closed loop simulable on
   a PC. See D11.
 - `esp32-code/test/test_jitter/` — host tests for the ring buffer and sequence
   accounting. Each one corresponds to a real bug or a real invariant.
+- `esp32-code/test/test_adpcm/` — the codec against the reference's own output,
+  byte for byte, including the block layout that is the wire format.
 - `esp32-code/test/test_mesh/` — host tests for mesh identity, including known
   names pinned to known ids: changing the hash would split every deployed mesh
   silently, so it should take a failing test to do it.
@@ -442,6 +450,10 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   puts every node into bench mode by design.
 - `tools/capture-serial.ps1` — timestamped serial capture of a single node, so
   two manual runs can be compared.
+- `tools/codec/abtest.py` — hear what a client plays before it is firmware: a
+  WAV in, the original, the old 22.05 kHz mono path and the ADPCM path out, at
+  the same rate and level. It decided D5, and its encoder is the reference
+  `lib/adpcm` is tested against.
 - `tools/btlisten/` — the Bluetooth half's test signal. The PC streams a 997 Hz
   tone to a server and records it with its own microphone, then counts holes,
   clicks and pitch error; with `--serial` the board's `a` window for the same
@@ -456,19 +468,27 @@ Each of these was a real bug. Don't re-introduce them.
 
 - **`i2s_write()` may accept fewer bytes than requested.** Always use `i2sWriteAll()`,
   or advance by the returned `bytes_written`. Ignoring it silently discards audio.
-- **The jitter buffer must be pushed whole blocks or not at all.** Dropping an odd
-  number of bytes shifts every later 16-bit sample by one byte and never re-aligns —
-  a permanent noise stream, not a glitch. `JITTER_BUF_SIZE` must stay a power of two
-  (a `static_assert` enforces it).
+- **The jitter buffer must be pushed whole blocks or not at all, and moved in
+  whole stereo frames.** Dropping an odd number of bytes shifts every later 16-bit
+  sample by one byte and never re-aligns — a permanent noise stream, not a glitch.
+  Moving by two bytes instead of four swaps left and right for the rest of the
+  stream. Every push, advance and drift correction is a multiple of
+  `CLIENT_FRAME_BYTES`. `JITTER_BUF_SIZE` must stay a power of two (a
+  `static_assert` enforces it).
 - **`a2dpSink.end(true)` frees the BT controller permanently.** The node can then never
   be a SERVER again until it is power-cycled. Use `end(false)`.
-- **Never `Serial.print` from the ESP-NOW send/recv callbacks.** They fire ~220×/s and a
+- **Never `Serial.print` from the ESP-NOW send/recv callbacks.** They fire ~390×/s and a
   blocking UART write there causes the very dropouts it would be reporting. Bump a
   counter, print from `loop()`.
 - **`esp_now_send()` back-to-back** without waiting for the send callback returns
   `ESP_ERR_ESPNOW_NO_MEM` and drops silently. TX is gated on a semaphore.
-- **Decimation must go through the 4-tap FIR.** Taking every other sample folds
-  11–22 kHz straight back into the audible band.
+- **A node on an older firmware must not hear the new stream.** Before ADPCM a
+  client pushed any payload straight into its buffer as PCM; fed ADPCM, that is
+  full-scale noise through the amp. The mesh id on the wire is XORed with
+  `MESH_WIRE_FORMAT`, so a node on the other format drops these packets as a
+  foreign mesh (`fgn=` climbing). Change it whenever the payload changes
+  meaning. (The old path's own trap — decimation that skips the FIR folds
+  11–22 kHz into the audible band — went with the decimation.)
 - **Sequence-gap arithmetic is unsigned.** A duplicate or reordered packet computes as
   a gap of ~65535; it has to be treated as a resync, not as 65535 lost packets.
 - **Elapsed-time comparisons against a timestamp another task writes must be signed.**

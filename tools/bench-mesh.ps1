@@ -92,6 +92,7 @@ $BytesPerSec = $SampleRate * 4          # 16-bit stereo, decoded
 $BlockFrames = 114
 $PktPerSec   = $SampleRate / $BlockFrames
 $JitterBufSize = 32768
+$RearmStepBytes = [int]($BytesPerSec * 0.0113)   # a step up bigger than this is a re-arm
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -645,7 +646,11 @@ foreach ($n in $nodes) {
         $und = [double]$k['und']
         # A re-arm shows up either as the underrun counter moving or as the level
         # stepping up by more than a packet can account for.
-        $rearmed = ($null -ne $prevUnd -and ($und -gt $prevUnd -or ($jit - $prevJit) -gt 500))
+        # 'More than a packet' is in bytes of the ring, so it moved with the format:
+        # 500 was 2.5 packets of 22.05 kHz mono and is one packet of decoded
+        # ADPCM stereo, which two back-to-back arrivals exceed in normal play --
+        # the first ADPCM run reported two re-arms with und=0. 11 ms, as before.
+        $rearmed = ($null -ne $prevUnd -and ($und -gt $prevUnd -or ($jit - $prevJit) -gt $RearmStepBytes))
         if ($rearmed) {
             $segments += ,$cur
             $cur = @()

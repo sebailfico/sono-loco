@@ -162,9 +162,10 @@ a runtime setting stored in NVS (D3), not a fourth build.
 
 ---
 
-## D5 — Mesh audio is 22.05 kHz mono
+## D5 — Mesh audio is 44.1 kHz stereo IMA ADPCM (was 22.05 kHz mono PCM)
 
-**Decided:** at implementation time. **Status:** holding, with a known cost.
+**Decided:** at implementation time (22.05 kHz mono); **changed 2026-09-29**
+to 44.1 kHz stereo ADPCM, see the amendment below. **Status:** holding.
 
 BT A2DP delivers 44.1 kHz stereo 16-bit = 176 KB/s. Broadcasting that over
 ESP-NOW while BT Classic shares the same radio is not realistic, so the server
@@ -182,6 +183,32 @@ server room and the client rooms do not sound identical. Unresolved — see
 ~11 KB/s, which would buy back enough headroom to reconsider the sample rate or
 the stereo fold. That is the first thing to try if bandwidth turns out to be the
 binding constraint on the bench.
+
+**Changed 2026-09-29 — 44.1 kHz stereo, through IMA ADPCM.** That is what the
+paragraph above said to try, spent the other way: not today's audio in a
+quarter of the bytes, but the server's own audio in today's bytes. The decision
+was made by ear before any firmware was written: `tools/codec/abtest.py` ran two
+20 s excerpts (drums and cymbals; a quiet acoustic track) through the old path
+and through ADPCM, and the listener found ADPCM "way better". The numbers
+agree: the old path was 8–10 dB down above 8 kHz and 31–36 dB down above
+12 kHz — the `[1 3 3 1]/8` FIR rolls off long before the 11 kHz Nyquist —
+and had no stereo at all; ADPCM keeps both, at 28–31 dB SNR. The noise it adds
+follows the music's level and was judged "pretty noisy" when isolated and
+turned up, and not a reason to stay.
+
+So the server forwards what A2DP gives it: no fold, no decimation, no FIR. A
+packet carries its own 114-frame block and the previous one (D13), 387
+packets/s of 246 bytes. Every block carries the decoder's state, so any block
+decodes alone — which is what lets a client rebuild a lost packet from the next
+one. The known cost above is gone: every room plays what the server plays. A
+node with one speaker mixes to mono (`M`), because a MAX98357A plays only one
+channel.
+
+**What would change it now:** the noise. If it is audible in real listening,
+the next step is not back to PCM but a better codec — SBC is what the phone
+already sends, but this Arduino core hands over only decoded PCM, so the server
+would re-encode. Or an ADPCM variant with more bits per sample, if the airtime
+allows it.
 
 ---
 
@@ -538,6 +565,13 @@ recovers almost every single loss. 12 Mbps with two copies lost nothing in
 (`CHANGELOG.md`). 12 rather than 54 because it costs about 4 dB of sensitivity
 against 6, where 54 costs 17, and bought nearly as much. The copies are marked
 in the header (`ESPNOW_LEN_REPEAT`) so a client's counters still count blocks.
+
+**Then, the same day, the redundancy moved inside the packet.** With ADPCM
+(D5) a 114-frame block is 120 bytes, so a packet has room for its own block and
+the previous one: every block goes out twice, 2.6 ms apart, instead of in two
+copies 0.3 ms apart — the bursts that took both copies of a frame were the
+losses left over. The copies are back to one (`ESPNOW_TX_COPIES`, and `t2` still
+sends two for comparison). The rate stays 12 Mbps.
 
 **What was considered:** the coexistence preference (WiFi first: no change,
 332 lost against 338); 2 Mbps (behind a BT server every frame waited 20–50 ms

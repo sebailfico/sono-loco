@@ -42,9 +42,14 @@ code, not the docs — assume the code is the truth and fix the doc.
   same instructions. If a board needs different *behaviour*, detect it at runtime
   or make it a setting — don't add a build config.
 - **Anything touching the client audio path must be re-measured, not reasoned
-  about.** Run `./tools/bench-mesh.ps1 -Flash -Duration 600` and compare against
-  the recorded baseline in `CHANGELOG.md`: zero lost/ovf/und/dup/rsy, source at
-  220.5 pkt/s, drift about -30 ppm. The worst bug found so far — a permanent
-  24/s underrun — was invisible in the code and obvious in that output.
+  about.** Run `./tools/bench-mesh.ps1 -Flash -Duration 600 -Mute` and compare
+  against the recorded baseline in `CHANGELOG.md`: zero lost/ovf/und/dup/rsy,
+  source at 386.8 pkt/s (220.5 before the ADPCM format), and the drift recorded
+  for that pair of boards (-30 ppm WROOM/S3, about -5 ppm between the two
+  WROVERs). The worst bug found so far — a permanent 24/s underrun — was
+  invisible in the code and obvious in that output.
+- **Ask before anything the user has to hear for long.** Without `-Mute` the
+  bench tone plays on every client with an amp for the whole run; a 10-minute
+  tone was started once while the user was away and they came back to it.
 - Drift figures need long runs. At 45 s the measurement noise exceeds the effect;
   600 s is the shortest run worth quoting.

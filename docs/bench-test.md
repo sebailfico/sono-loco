@@ -21,8 +21,14 @@ drift. There is no board limit — a third node is picked up automatically.
 
 **It is loud.** Every client with an amp plays the bench tone (440 Hz at
 about -15 dBFS) for the whole run — ten minutes at `-Duration 600`, and even
-the MAX98357A that sounds faint at `listen.py`'s levels is loud with it. Plan
-the run for when nobody has to listen, and say so before starting one.
+the MAX98357A that sounds faint at `listen.py`'s levels is loud with it.
+**Add `-Mute`** and every client zeroes what it hands to I2S and nothing else:
+the stream is received, buffered, drift-corrected and consumed as always. Run
+unmuted only to hear it, and say so before starting one.
+
+```powershell
+./tools/bench-mesh.ps1 -Duration 600 -Mute
+```
 
 It works around the fact that the normal SERVER role needs a phone: bench mode
 generates the stream itself and never starts Bluetooth. That is also why a WROOM
@@ -45,7 +51,8 @@ What to read in its output:
   and dropped as somebody else's.
 - **Stream table** — `lost`, `ovf`, `und`, `dup`, `rsy` should all be 0. `rx`
   should be within a few packets of the source's `tx`.
-- **Source line** — packets per second should be 220.5. `qfull`, `senderr` and
+- **Source line** — packets per second should be 386.8 (44,100 frames/s in
+  blocks of 114; it was 220.5 before ADPCM). `qfull`, `senderr` and
   `radiofail` at 0 mean the radio kept up.
 - **Clock drift** — three measures. `log ppm` regresses each node's `millis()`
   against PC time; `audio ppm` derives the same thing from how fast the jitter
@@ -92,7 +99,7 @@ takes three boards to test: two in one mesh, one pretending to be next door.
 
 **Pass:** the matched pair is as clean as a normal run — zero
 `lost/ovf/und/dup/rsy` — and the odd node out reports `rx=0` with `fgn=` climbing
-at roughly 220/s. A stationary `fgn=` on that node means it is not hearing the
+at roughly 387/s. A stationary `fgn=` on that node means it is not hearing the
 source at all, which is a different fault and not evidence of isolation.
 
 Then put it back with `gcasa rossi` and watch it join within a few seconds, no
@@ -338,7 +345,7 @@ broadcast ===`, then `BT audio started → ESP-NOW TX will activate in 1000ms`.
 - The connect tone plays without distorting the music that follows.
 - Status lines every 10 s show `mode=SERVER` with **`qfull=0 senderr=0
   radiofail=0`**. Any of those climbing means the radio cannot keep up with
-  ~220 packets/s and nothing downstream will be trustworthy.
+  ~387 packets/s and nothing downstream will be trustworthy.
 
 `radiofail` in particular counts frames the radio reported as not delivered. With
 no client listening yet, broadcast frames are not acknowledged, so treat a

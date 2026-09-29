@@ -38,28 +38,21 @@ COM11.
 
 ## Blocking
 
-- [ ] **What is left of the mesh loss behind a Bluetooth server.** The 12–24%
-      is gone: every frame now goes out twice at 12 Mbps, and 600 s behind a
-      streaming server lost 0.094% (`CHANGELOG.md`, 2026-09-29). What remains
-      comes in runs of 2 or more blocks, about one every 10 s, each a 9–40 ms
-      hole of silence — audible as an occasional tick. In order of cost:
-      1. **Concealment** ("Surviving the wild" below): fill a lost block from
-         the one before it, faded, instead of zeros. Softens every hole the
-         copies miss, whatever caused it.
-      2. **Copies further apart.** Both copies go out back to back, so a
-         burst that takes one takes both. Sending the second a few frames
-         later would decorrelate them, but the client then sees a sequence
-         number *behind* the last one, which `SeqTracker` treats as a resync
-         today; it would need to accept a late copy and patch the silence it
-         already queued for that block, while it is still in the ring.
-      3. **ADPCM with the previous block in every packet** (the "Bandwidth"
-         item): half today's bytes, and any single lost packet is recovered
-         from the next one, 4.5 ms later rather than 0.3.
-      A **two-chip server** (an A2DP chip handing PCM to a €2 C3 that only
-      does ESP-NOW) is no longer needed for this, and stays the answer only
-      if the coexistence cost grows again — with a phone, say, which has not
-      been measured since the fix. Measure the same way: `listen.py --serial
-      <server> --client <client>`, and `l` on the client for the run lengths.
+- [ ] **Measure the ADPCM stream behind a Bluetooth server.** The 12–24%
+      loss was fixed with 12 Mbps and two copies of every frame: 600 s behind
+      a streaming server lost 0.094% (`CHANGELOG.md`, 2026-09-29). The same
+      day the mesh moved to ADPCM (D5), and the second copy moved inside the
+      packet: each carries the previous block, so a lost packet is rebuilt
+      from the next one 2.6 ms later instead of 0.3 ms — which should catch the
+      bursts that took both back-to-back copies, the whole of what was left.
+      Not yet measured behind a server: the PC's Bluetooth was off. Run
+      `listen.py --serial <server> --client <client>` short, then 600 s
+      quiet, and read `lost` (holes), `rec` (rebuilt) and `l` (run lengths).
+      If holes remain: **concealment** ("Surviving the wild") for what any
+      scheme misses, then XOR parity for bursts longer than one packet. A
+      **two-chip server** (an A2DP chip handing PCM to a €2 C3 that only does
+      ESP-NOW) stays the answer only if the coexistence cost grows again —
+      with a phone, say, which has not been measured since the fix.
       Also unexplained: the server's own output crackled once on 2026-09-28
       (27 holes/s, one per A2DP packet) and never again after a reboot. If
       it comes back, run `listen.py --serial` at once and compare the `a`
@@ -201,16 +194,15 @@ here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
       and a WROVER server is already hopping its BT radio under the
       coexistence arbiter. Hopping is for a band you cannot survey; this one
       can be surveyed.
-- [ ] **Redundancy, so a lost frame is not a hole.** The only thing that
-      recovers a broadcast frame nobody heard is having sent the data twice.
-      Cheapest form: each packet carries its own block and the previous one
-      (2× payload; with ADPCM 4:1 that is still half of today's bytes and a
-      third of today's airtime at 6 Mbps). Any single lost packet is
-      recovered from its successor with one packet of extra latency. Next
-      form up: XOR parity every N packets, recovering one loss per group for
-      1/N overhead. Measure on the bench with the monitor watching and the
-      router deliberately loaded (a phone video is a repeatable enough
-      "wild"): the counter that matters becomes `und`, not `lost`.
+- [ ] **Redundancy against somebody else's traffic.** The cheapest form is in
+      (2026-09-29, D13): every packet carries its own block and the previous
+      one, so any single lost packet is rebuilt from its successor. It was
+      made for a Bluetooth server's own radio; how far it carries under a
+      loaded router is unmeasured. Next form up: XOR parity every N packets,
+      recovering one loss per group for 1/N overhead, or the previous *two*
+      blocks. Measure on the bench with the monitor watching and the router
+      deliberately loaded (a phone video is a repeatable enough "wild"): the
+      counters that matter are `lost` (holes left) and `rec` (rebuilt).
 - [ ] **Concealment instead of silence.** Bursts longer than the redundancy
       window will still happen — 214 consecutive-ish packets in one second
       were seen at 1 Mbps. Repeat-and-fade the last block on a gap rather
@@ -220,12 +212,14 @@ here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
       rides out longer bursts at the cost of latency, and latency is only a
       problem relative to the server's own local playback (every client is
       delayed equally). Consider delaying the server's local output to match
-      the clients — the "rooms will not sound alike" item under "Audio
-      quality" is the same decision from the other side.
-- [ ] **Smaller frames.** ADPCM (the "Bandwidth" item) is not just for BT
-      coexistence any more: a 50-byte payload at 6 Mbps is a tenth of the
-      airtime of today's 200 bytes at 1 Mbps. Every collision the mesh does
-      not have is one it does not need to recover from.
+      the clients — the "not time-aligned" item under "Timing / sync" is the
+      same decision from the other side.
+- [ ] **Smaller frames.** ADPCM spent its 4:1 on stereo, full rate and a
+      redundant block (D5, D13), not on short frames: a packet is 246 bytes,
+      about 0.2 ms at 12 Mbps. Under heavy interference shorter would collide
+      less — 114-frame blocks could be halved at the cost of twice the
+      packets and headers, or a household could choose mono. Measure under
+      load before trading audio for it.
 - [ ] **Test in an actual building.** Take the boards and the monitor to the
       real flat. Survey first, then a 600 s run on the channel the survey
       picks, with `-NoDrift` off and the monitor logging beside it, and
@@ -305,38 +299,16 @@ proof and polish.
       client that already runs I2S, drift correction and a radio — measure before
       believing it fits.
 
-### Bandwidth
-
-- [ ] 44 KB/s of ESP-NOW while BT Classic shares the same radio is thin. IMA
-      ADPCM (4:1, cheap) would bring it to ~11 KB/s. This is also what would buy
-      back the headroom to revisit D5. **Measured 2026-09-14 evening: the
-      radio is the binding constraint the moment BT streams** — see the first
-      "Blocking" item. This said frame *count* was what mattered; measured on
-      2026-09-29 it is frame *length*: the same 220 frames/s lost 12% at
-      6 Mbps and 2% at 12, and doubling the count to 441/s (two copies) cost
-      nothing. So ADPCM's value here is shorter frames, and bytes to spare for
-      carrying the previous block in every packet.
-
-      Half-measured. `./tools/bench-mesh.ps1 -Flash -Duration 300` (v0.2.0-5-
-      g9c371f9, clean tree, WROOM on COM8 + ESP32-C3 on COM10) shows pure
-      ESP-NOW has headroom at the current rate with **zero** BT contention:
-      source queued 65,930 packets in 299.0 s at 220.5 pkt/s — exactly the
-      expected rate — with `qfull=0 senderr=0 radiofail=0` the whole run; the
-      client received 65,928 at 0.00% loss, zero ovf/und/dup/rsy. That rules
-      out the radio saturating itself against its own traffic at 220.5 pkt/s.
-
-      It answers nothing about the actual concern. Bench mode never starts
-      Bluetooth — that's what lets a WROOM take part at all (D3) — so this
-      measured zero airtime contention because there was none to measure.
-      Whether BT Classic actually stealing airtime from ESP-NOW degrades the
-      client is now answered: yes, ~20% of frames at the source. Numbers and
-      the plan are under "Blocking".
-
 ### Audio quality
 
-- [ ] The server plays 44.1 kHz stereo locally while clients get 22.05 kHz mono,
-      so rooms will not sound alike. Decide whether that is acceptable or whether
-      the server should downgrade its own output to match.
+- [ ] **Listen to real music through the mesh on the ADPCM build.** The format
+      was chosen by ear on the PC (`tools/codec/abtest.py`, D5); the board
+      has only played test tones so far. Music from the PC or a phone into a
+      server, a client beside it, and the question the A/B left open: is the
+      noise ADPCM adds audible on these speakers? If it is, D5 says what next.
+- [ ] **A stereo pair.** Every client now gets both channels. Two nodes in one
+      room could play left and right -- a per-node channel setting beside `M`.
+      Nothing asked for it yet.
 
 ### Housekeeping
 

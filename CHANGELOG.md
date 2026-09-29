@@ -30,6 +30,39 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **The mesh carries 44.1 kHz stereo, as IMA ADPCM** (`04751ea`, D5). Until
+  now a client played 22.05 kHz mono: nothing above ~11 kHz, the anti-alias
+  FIR 8–10 dB down above 8 kHz, and no stereo. Chosen by ear first:
+  `tools/codec/abtest.py` ran two 20 s excerpts through both paths, and ADPCM
+  was "way better" (28–31 dB SNR; the added noise "pretty noisy" isolated,
+  not a reason to stay). The server now encodes what A2DP gives it — no fold,
+  no FIR — in 114-frame blocks that each carry their decoder state; a packet
+  carries its block and the previous one (246 bytes, 386.8/s), so a lost
+  packet is rebuilt from the next and counts in `rec`, not `lost`. The second
+  copy of every frame is gone again (`ESPNOW_TX_COPIES` 1). The codec lives in
+  `lib/adpcm`, pinned by golden vectors to the Python reference the listening
+  test used; `test_drift` was ported to the new byte scale (same behaviour in
+  time: bytes ×4, corrections per ppm ×2). All four suites pass on a board.
+
+  The mesh id is XORed with `MESH_WIRE_FORMAT` on the wire, so a node still
+  on the old firmware drops the new stream as a foreign mesh instead of
+  playing ADPCM bytes as PCM — full-scale noise. The client ring (32 KB) is
+  now allocated in PSRAM where there is PSRAM: the static array had sat in a
+  WROVER server's internal DRAM even when unused (−7.8 KB static RAM). New:
+  `M` mixes a client to mono for one speaker (set on WROVER1, whose MAX98357A
+  plays one channel), `m` mutes any node's speaker, and `bench-mesh.ps1 -Mute`
+  runs silent.
+
+  Bench regression, `v0.2.0-36-g04751ea`, clean tree, 600 s, muted, WROVER2
+  sourcing to WROVER1: **386.8 pkt/s as expected, `qfull=0`; 231,543 blocks,
+  zero lost/ovf/und/dup/rsy**. Drift between these two WROVERs is small —
+  −4.4 ± 1.2 ppm from the logs, +8.2 ppm from the buffer slope over the whole
+  run — and the controller made no correction in 600 s. The harness reported
+  two re-arms with `und=0`: its 500-byte "level jumped" threshold was in the
+  old format's bytes, and one decoded packet is 456. Now scaled with the
+  format. Not yet measured behind a Bluetooth server: the PC's Bluetooth was
+  off.
+
 - **Mesh audio behind a Bluetooth server no longer crackles.** A client
   playing a server's stream lost 12–24% of its packets, every loss a single
   frame. That was the crackle, one hole per lost frame, and it was the same
