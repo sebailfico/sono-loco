@@ -177,12 +177,26 @@ def analyze(x, fs, freq, plot=None):
         fig.tight_layout(); fig.savefig(plot + '.png', dpi=90)
 
 
+CLIENT_KEYS = ('rx', 'lost', 'ovf', 'und', 'dup', 'rsy', 'ins', 'drp')
+
+
+def client_counters(ser, sp):
+    """The client's [BENCH] telemetry line (`r`), as a dict, or None."""
+    sp.reset_input_buffer()
+    for line in ser.talk(sp, 'r', 0.4, show=False):
+        if line.startswith('[BENCH] ms='):
+            return dict(kv.split('=', 1) for kv in line.split()[1:] if '=' in kv)
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--analyze', metavar='WAV', help='analyse an earlier recording instead')
     ap.add_argument('--device', default='SonoLoco', help='output endpoint name (substring)')
     ap.add_argument('--mic', default='Microphone', help='input endpoint name (substring)')
     ap.add_argument('--serial', metavar='COMn', help="the node's port, for its A2DP window")
+    ap.add_argument('--client', metavar='COMn',
+                    help="a mesh client's port: its counters before and after, for the mesh path")
     ap.add_argument('--pre', default='', help='serial commands to send first, e.g. f')
     ap.add_argument('--at', action='append', default=[], metavar='SEC:CMD',
                     help='send CMD over serial SEC seconds into playback, e.g. 3.5:j')
@@ -207,6 +221,12 @@ def main():
         sp = ser.open_port(a.serial)
         if a.pre:
             ser.talk(sp, a.pre, 0.5)
+    cp = None
+    if a.client:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import ser
+        cp = ser.open_port(a.client)
+        c0 = client_counters(ser, cp)
     print(f'{datetime.datetime.now():%H:%M:%S} playing {len(sig) / fs_out:.1f} s '
           f'to {a.device!r} at {a.level:.0f} dBFS')
     # The board's window is reset as late as possible, right as playback opens;
@@ -221,6 +241,12 @@ def main():
         sp.reset_input_buffer()
         ser.talk(sp, 'a', 0.6)
         sp.close()
+    if cp:
+        c1 = client_counters(ser, cp)
+        cp.close()
+        if c0 and c1:
+            print('client ' + ' '.join(f'{k}=+{int(c1[k]) - int(c0[k])}' for k in CLIENT_KEYS)
+                  + f" jit={c1['jit']} mode={c1['mode']}")
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     base = os.path.join(ROOT, 'logs', f'listen-{stamp}' + (f'-{a.label}' if a.label else ''))
     os.makedirs(os.path.dirname(base), exist_ok=True)

@@ -42,6 +42,7 @@
 #ifdef ENABLE_BLUETOOTH
 #include "BluetoothA2DPSink.h"
 #include <esp_bt.h>
+#include <esp_coexist.h>
 #endif
 
 // ============================================================================
@@ -384,6 +385,21 @@ static volatile uint32_t txSendErr    = 0;
 static volatile uint32_t txSent       = 0;
 static volatile uint32_t txRadioFail  = 0;
 
+// How long each frame took from esp_now_send() to its send callback, in
+// buckets of <0.5, <1, <2, <5, <10, <20, <50 and >=50 ms. On a server that
+// also runs Bluetooth this is where the coexistence arbiter shows: a frame
+// the radio could not have for a while waits here. Printed and reset by `a`.
+static volatile uint32_t txLatHist[8];
+static volatile uint32_t txLatMaxUs   = 0;
+static uint32_t          txStartUs    = 0;
+
+// Each frame is handed to the radio this many times (`t<n>`). A broadcast
+// has no acknowledgement and so no retry; a frame the air or the arbiter
+// took is gone unless it was sent again. The client already drops the
+// repeats as exact duplicates (SeqTracker), so this is invisible to it
+// except as fewer holes. 1 is the plain stream.
+static volatile uint8_t  txRepeat     = 1;
+
 // --- RX (CLIENT mode) ---
 // The ring buffer and the packet sequence accounting live in lib/jitter: they
 // are pure logic, they are where the nastiest bugs in this project came from,
@@ -423,6 +439,10 @@ static volatile uint32_t rxCount    = 0;
 static volatile uint32_t rxOverflow = 0;   // packets dropped, jitter buffer full
 static volatile uint32_t rxUnderrun = 0;   // times playback outran the buffer
 // lost / dupe / resync counters live on seqTracker.
+// Lengths of the runs of consecutive lost packets: 1..7, and 8 or more. Loss
+// in single packets is what redundancy or a repeat can recover; loss in long
+// bursts is not. Printed and reset by `l`.
+static volatile uint32_t rxLossRuns[8];
 
 // Lock onto the first node we hear so two simultaneous servers can never
 // interleave their streams into one jitter buffer.
@@ -434,24 +454,34 @@ static void espnowTxTask(void *) {
     while (true) {
         if (xQueueReceive(txQueue, &pkt, portMAX_DELAY) != pdTRUE) continue;
 
-        // Wait for the previous frame to actually leave the radio. Firing
-        // esp_now_send() back-to-back at ~220 pkt/s returns
-        // ESP_ERR_ESPNOW_NO_MEM and drops audio without any indication.
-        xSemaphoreTake(txDone, pdMS_TO_TICKS(50));
+        const uint8_t copies = pkt.len ? txRepeat : 1;   // beacons go once
+        for (uint8_t c = 0; c < copies; c++) {
+            // Wait for the previous frame to actually leave the radio. Firing
+            // esp_now_send() back-to-back at ~220 pkt/s returns
+            // ESP_ERR_ESPNOW_NO_MEM and drops audio without any indication.
+            xSemaphoreTake(txDone, pdMS_TO_TICKS(50));
 
-        esp_err_t err = esp_now_send(BROADCAST_ADDR, (uint8_t *)&pkt,
-                                     ESPNOW_HEADER_SIZE + pkt.len);
-        if (err != ESP_OK) {
-            txSendErr++;
-            xSemaphoreGive(txDone);   // no callback will come; release the gate
-        } else {
-            txSent++;
+            txStartUs = micros();
+            esp_err_t err = esp_now_send(BROADCAST_ADDR, (uint8_t *)&pkt,
+                                         ESPNOW_HEADER_SIZE + pkt.len);
+            if (err != ESP_OK) {
+                txSendErr++;
+                xSemaphoreGive(txDone);   // no callback will come; release the gate
+            } else {
+                txSent++;
+            }
         }
     }
 }
 
 static void onEspNowSent(const uint8_t *, esp_now_send_status_t status) {
     if (status != ESP_NOW_SEND_SUCCESS) txRadioFail++;
+    const uint32_t us = micros() - txStartUs;
+    if (us > txLatMaxUs) txLatMaxUs = us;
+    static const uint32_t edges[7] = {500, 1000, 2000, 5000, 10000, 20000, 50000};
+    int b = 0;
+    while (b < 7 && us >= edges[b]) b++;
+    txLatHist[b]++;
     if (txDone) xSemaphoreGive(txDone);
 }
 
@@ -530,8 +560,11 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
 
     // Duplicate / reordered / restarted-server handling, including the unsigned
     // 65535-gap trap, is in SeqTracker and covered by the host tests.
+    const uint32_t lostBefore = seqTracker.lost;
     const SeqResult sr = seqTracker.update(seq);
     if (!sr.accept) return;   // exact retransmit — replaying it is an audible stutter
+    const uint32_t run = seqTracker.lost - lostBefore;
+    if (run) rxLossRuns[run < 8 ? run - 1 : 7]++;
 
     // Substitute silence for lost packets so playback keeps its timing instead
     // of splicing the stream shorter on every loss.
@@ -703,6 +736,12 @@ static inline void decimReset() {
 // without the mesh's transmissions competing for the radio.
 static volatile bool a2dpForward = true;
 
+// `m`: the server's own speaker off, the mesh untouched -- so a microphone
+// next to a client hears the client alone. Packets are still decoded and
+// forwarded; only the library's i2s_write() is skipped, the same switch the
+// jingle uses (playJingleOverA2DP).
+static volatile bool serverMuted = false;
+
 // How the Bluetooth task spends its time, as seen from the two hooks the
 // library gives us: the stream reader runs after a packet is decoded and
 // before the library's blocking i2s_write(), data_received runs after it.
@@ -776,6 +815,8 @@ static void a2dpStatsReset() {
     a2dpPktMin = UINT32_MAX;
     a2dpPktMax = a2dpIdleMaxUs = a2dpGapMaxUs = a2dpWriteMaxUs = a2dpCbMaxUs = 0;
     for (auto &h : a2dpGapHist) h = 0;
+    for (auto &h : txLatHist) h = 0;
+    txLatMaxUs = 0;
     a2dpWriteEndUs = 0;   // the first packet after a reset has no gap to measure
     a2dpWindowMs = millis();
 }
@@ -794,7 +835,11 @@ static void a2dpStatsPrint() {
         (unsigned long)ESP.getFreeHeap());
     for (int i = 0; i < 8; i++)
         DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)a2dpGapHist[i]);
-    DEBUG_SERIAL.printf(" tx=%lu\n", (unsigned long)txSent);
+    DEBUG_SERIAL.printf(" tx=%lu txlat=", (unsigned long)txSent);
+    for (int i = 0; i < 8; i++)
+        DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)txLatHist[i]);
+    DEBUG_SERIAL.printf(" txlatmax=%.1fms rep=%u mute=%d qfull=%lu\n", txLatMaxUs / 1000.0f,
+                        txRepeat, serverMuted ? 1 : 0, (unsigned long)txQueueFull);
 }
 
 static void a2dpWriteDone() {
@@ -1051,7 +1096,7 @@ static void playJingleOverA2DP(void (*jingle)()) {
     jingleActive = true;
     a2dpSink.set_stream_reader(a2dpDataCallback, false);
     jingle();
-    a2dpSink.set_stream_reader(a2dpDataCallback, true);
+    a2dpSink.set_stream_reader(a2dpDataCallback, !serverMuted);
     if (txReady) a2dpPrefill = true;
     jingleActive = false;
 }
@@ -1798,6 +1843,23 @@ static void benchServiceSerial() {
                                     meshId, meshNameForLog());
                 break;
             }
+            case 'l':
+                DEBUG_SERIAL.printf("[LOSS] rx=%lu lost=%lu runs=", (unsigned long)rxCount,
+                                    (unsigned long)seqTracker.lost);
+                for (int i = 0; i < 8; i++) {
+                    DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)rxLossRuns[i]);
+                    rxLossRuns[i] = 0;
+                }
+                DEBUG_SERIAL.println();
+                break;
+            case 't': {
+                char line[8];
+                benchReadLine(line, sizeof(line));
+                const int n = atoi(line);
+                if (n >= 1 && n <= 3) txRepeat = (uint8_t)n;
+                DEBUG_SERIAL.printf("[MESH] repeat=%u\n", txRepeat);
+                break;
+            }
             case 'p': meshStartPairing();  break;
             case 'o': meshStartOffering(); break;
 #ifdef ENABLE_BLUETOOTH
@@ -1823,6 +1885,41 @@ static void benchServiceSerial() {
                 DEBUG_SERIAL.printf("[A2DP] jingle guarded=0 streaming=%d\n", txReady ? 1 : 0);
                 playConnectedSound();
                 break;
+            case 'm':
+                serverMuted = !serverMuted;
+                a2dpSink.set_stream_reader(a2dpDataCallback, !serverMuted);
+                DEBUG_SERIAL.printf("[A2DP] mute=%d\n", serverMuted ? 1 : 0);
+                break;
+            case 'e': {
+                // Coexistence preference, at runtime, so one Bluetooth session
+                // can compare them: 0 WiFi, 1 Bluetooth, 2 balance (the default).
+                char line[8];
+                benchReadLine(line, sizeof(line));
+                if (line[0] != '\0') {
+                    const int p = atoi(line);
+                    DEBUG_SERIAL.printf("[A2DP] coex prefer=%d -> %s\n", p,
+                        esp_err_to_name(esp_coex_preference_set((esp_coex_prefer_t)p)));
+                }
+                break;
+            }
+            case 'k': {
+                // `k<aa:bb:cc:dd:ee:ff>`: dial an A2DP source that is already
+                // bonded, the way a headset reconnects to a phone. What lets a
+                // bench reflash a server without a person clicking Connect.
+                char line[24];
+                benchReadLine(line, sizeof(line));
+                unsigned b[6];
+                if (sscanf(line, "%x:%x:%x:%x:%x:%x",
+                           &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+                    esp_bd_addr_t addr;
+                    for (int i = 0; i < 6; i++) addr[i] = (uint8_t)b[i];
+                    DEBUG_SERIAL.printf("[A2DP] connect %s -> %d\n", line,
+                                        a2dpSink.connect_to(addr) ? 1 : 0);
+                } else {
+                    DEBUG_SERIAL.println("[A2DP] error reason=address (k aa:bb:cc:dd:ee:ff)");
+                }
+                break;
+            }
             case 'q': {
                 char line[8];
                 benchReadLine(line, sizeof(line));
