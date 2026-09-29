@@ -30,6 +30,62 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **Mesh audio behind a Bluetooth server no longer crackles.** A client
+  playing a server's stream lost 12–24% of its packets, every loss a single
+  frame. That was the crackle, one hole per lost frame, and it was the same
+  with the client's own Bluetooth off (client-only mode). So the server was
+  losing them to its own BT link, as the air monitor had said on 09-14. Two
+  changes (`025af5c`): ESP-NOW frames go out at **12 Mbps** instead of 6, and
+  **every frame is sent twice**. Measured with the PC streaming a 997 Hz tone
+  into WROVER1 (MAX98357A, muted with `m`) and the mic next to WROVER2 (TPA3116)
+  as the client, `v0.2.0-30`…`-33`, one Bluetooth session:
+
+  | rate | copies | lost | mic: dips/s |
+  |---|---|---|---|
+  | 6 Mbps (before) | 1 | 12–24% | 22.8–24.4 |
+  | 12 Mbps | 1 | 1.0–2.0% | 1.6–2.5 |
+  | 24 Mbps | 1 | 4.0% | 6.6 |
+  | 54 Mbps | 1 | 1.6% | 2.5 |
+  | 6 Mbps | 2 | 0.5–1.3% | 0.7–1.8 |
+  | **12 Mbps** | **2** | **0 in 15 s** | **0** |
+  | 54 Mbps | 2 | 0 in 15 s | 0 |
+
+  Then the shipped build (`v0.2.0-33-g025af5c`) with the server's own speaker
+  on, as in use: three 6 s tones at 0, 0.36 and 0.18 dips/s, 0–8 of ~3,000
+  blocks lost; and **600 s at 0.094% lost** (126 of 133,875), zero
+  underruns, overflows and resyncs. The copy stood in for 2,347 blocks whose
+  original never arrived (`rec`). The server's local output stayed clean
+  throughout: `late=0` over 606 s, longest gap 34 ms against its 46 ms ring,
+  `qfull=0`. What is left comes in runs of 2 or more blocks, about one every
+  10 s, which a second copy sent right behind the first cannot catch.
+  Without Bluetooth (bench mode, WROVER2 sourcing to WROVER1, a 600 s run
+  stopped at ~290 s and logged to 183 s): 220.5 pkt/s, `qfull=0`, 5 lost of
+  40,286, 93 rescued by the copy, zero ovf/und/dup/rsy. Too short for drift;
+  the full regression run is in `TODO.md`.
+
+  Two things that did not help: the coexistence preference (`e0`, WiFi
+  first: 332 lost against 338 at the default), and 2 Mbps, where every frame
+  waited 20–50 ms for the radio and the client fell back to DISCOVERY.
+  Airtime is about what it was: 441 frames/s at 12 Mbps against 220 at 6.
+  Range at 12 Mbps is untested, and so was 6; see `TODO.md`.
+
+  The copies carry `ESPNOW_LEN_REPEAT` (top bit of `len`), so a client counts
+  *blocks*: `rx` still matches the source's `tx`, a copy of a block that
+  arrived is not a `dup`, and the new `rec` counter is the blocks the copy
+  saved. Three new `SeqTracker` tests; 26/26 on a board.
+
+- **A server can be driven without anybody at the PC.** `k<mac>` makes a
+  server dial an A2DP source it is bonded with, the way a headset reconnects
+  to a phone, and Windows accepts. A reflash no longer costs the link:
+  flash, `kaa:bb:cc:dd:ee:ff`, carry on. Also new, all at runtime so one
+  Bluetooth session can compare them: `V<0..127>` the A2DP volume (a board
+  that dialled in starts at `VOLUME_DEFAULT`, 1 of 127, which forwards a mesh
+  stream too quiet to hear), `m` mutes the server's own speaker, `t<n>` sets
+  the copies, `R<Mbps>` the PHY rate, `e<n>` the coexistence preference,
+  and `l` prints a client's histogram of lost-run lengths. `a` now also
+  shows how long frames wait for the radio (`txlat`). `listen.py --client
+  COMn` prints a client's counters for the recorded seconds.
+
 - **WROVER1's MAX98357A plays — it was never broken.** Silent on two
   speakers while WROVER1 streamed as a server, with its I2S clock running
   and its mesh stream audible on WROVER2. At the amp's pins a meter read

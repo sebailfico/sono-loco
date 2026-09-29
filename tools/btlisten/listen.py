@@ -177,7 +177,7 @@ def analyze(x, fs, freq, plot=None):
         fig.tight_layout(); fig.savefig(plot + '.png', dpi=90)
 
 
-CLIENT_KEYS = ('rx', 'lost', 'ovf', 'und', 'dup', 'rsy', 'ins', 'drp')
+CLIENT_KEYS = ('rx', 'lost', 'rec', 'ovf', 'und', 'dup', 'rsy', 'ins', 'drp')
 
 
 def client_counters(ser, sp):
@@ -247,7 +247,7 @@ def main():
         runs = [l for l in ser.talk(cp, 'l', 0.3, show=False) if l.startswith('[LOSS]')]
         cp.close()
         if c0 and c1:
-            print('client ' + ' '.join(f'{k}=+{int(c1[k]) - int(c0[k])}' for k in CLIENT_KEYS)
+            print('client ' + ' '.join(f'{k}=+{int(c1.get(k, 0)) - int(c0.get(k, 0))}' for k in CLIENT_KEYS)
                   + f" jit={c1['jit']} mode={c1['mode']}")
             if runs:
                 print('client ' + runs[0].split(' runs=')[-1].join(['lost runs of 1..7,8+ = ', '']))

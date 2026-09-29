@@ -19,6 +19,11 @@ matching firmware, reboots them all into bench mode, elects one to generate a
 synthetic test stream, collects telemetry, and reports stream health and clock
 drift. There is no board limit — a third node is picked up automatically.
 
+**It is loud.** Every client with an amp plays the bench tone (440 Hz at
+about -15 dBFS) for the whole run — ten minutes at `-Duration 600`, and even
+the MAX98357A that sounds faint at `listen.py`'s levels is loud with it. Plan
+the run for when nobody has to listen, and say so before starting one.
+
 It works around the fact that the normal SERVER role needs a phone: bench mode
 generates the stream itself and never starts Bluetooth. That is also why a WROOM
 can take part (see D3).
@@ -140,6 +145,27 @@ WiFi until the next reboot. To compare I2S ring depths in one session, send
 stream open for 2–3 s after the last sound, so retry until it answers
 `install=ESP_OK`. `--at 3.0:j` sends a command three seconds into playback —
 `j`/`J` play the connect jingle over the test tone, the new way and the old.
+
+**Listening to the mesh path instead.** The same tone, but heard from a
+*client* of the server: `m` mutes the server's own speaker, and `--client`
+prints the client's counters for the recorded seconds — `lost`, `rec` (blocks
+only the repeat copy saved) and the lengths of the lost runs:
+
+```
+python tools/btlisten/ser.py COM23 m
+python tools/btlisten/listen.py --serial COM23 --client COM11 --level -30 --label mesh
+```
+
+A server that reboots or is reflashed drops the Bluetooth link; `k` gets it
+back without anybody clicking Connect — the board dials the PC, which accepts
+as it would a headset. Then set the volume, because a board that dialled in
+starts at 1 of 127 and forwards a stream too quiet to hear:
+
+```
+python tools/btlisten/ser.py COM23 "kaa:bb:cc:dd:ee:ff
+V40
+" 8
+```
 
 **What clean looks like** (the control through the laptop's own speaker, and
 WROVER2 on 2026-09-28 after a reboot): tone **997.00 Hz**, **6.02 s** long,

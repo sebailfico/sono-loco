@@ -493,10 +493,10 @@ id stays but stops being the only thing keeping the two apart.
 
 ---
 
-## D13 — ESP-NOW frames go out at 6 Mbps, not the 1 Mbps default
+## D13 — ESP-NOW frames go out at 12 Mbps, twice, not once at the 1 Mbps default
 
-**Decided:** 2026-09-14, on one back-to-back measurement. **Status:** holding,
-range untested.
+**Decided:** 2026-09-14 (6 Mbps), amended 2026-09-29 (12 Mbps, two copies).
+**Status:** holding, range untested.
 
 ESP-NOW sends broadcast frames at 1 Mbps DSSS unless `esp_wifi_config_espnow_rate`
 says otherwise. That is the most robust rate 802.11 has — the best receiver
@@ -526,7 +526,31 @@ nobody needs and sensitivity everybody does). Changing the channel is not an
 alternative to this, it is the other half of it: see the channel item in
 `TODO.md`.
 
-**What would change this:** a range measurement showing 1 Mbps reaching a room
-that 6 Mbps does not — then 2 Mbps is the next thing to try, not a return to 1.
-Or ADPCM (the bandwidth item in `TODO.md`) shrinking the frames to the point
-where 1 Mbps airtime stops mattering.
+**Amended 2026-09-29 — 12 Mbps, and every frame twice.** The first real
+Bluetooth server (the PC streaming into a WROVER) lost 12–24% of its mesh
+frames, every loss a single frame, with nothing else on the channel and the
+client's own Bluetooth off: the server loses them to its own BT link, and a
+broadcast has no retry. Shorter frames lose fewer, by more than their length
+alone would suggest — one copy each, same session: 6 Mbps 12%, 12 Mbps 2.0%,
+24 Mbps 4.0%, 54 Mbps 1.6% — and a second copy sent straight after the first
+recovers almost every single loss. 12 Mbps with two copies lost nothing in
+15 s and 0.094% over 600 s, for about the airtime one copy at 6 Mbps used
+(`CHANGELOG.md`). 12 rather than 54 because it costs about 4 dB of sensitivity
+against 6, where 54 costs 17, and bought nearly as much. The copies are marked
+in the header (`ESPNOW_LEN_REPEAT`) so a client's counters still count blocks.
+
+**What was considered:** the coexistence preference (WiFi first: no change,
+332 lost against 338); 2 Mbps (behind a BT server every frame waited 20–50 ms
+for the radio and the client dropped out — so it is no longer the fallback
+below); unicast to known clients, which gets the MAC's own retries for free
+but needs a peer list (D6) and multiplies the airtime by the number of rooms;
+and ADPCM with the previous block in every packet, which recovers a lost
+packet from its successor 4.5 ms later instead of 0.3 ms, and is the next step
+if the bursts that take both copies turn out to matter (`TODO.md`).
+
+**What would change this:** a range measurement showing 6 Mbps reaching a room
+that 12 does not — then 9 Mbps, or the copies alone at 6, before anything
+slower. A server with no Bluetooth of its own (the two-chip server in
+`TODO.md`) would make the copies a hedge against interference only, and worth
+re-measuring against their airtime. Or ADPCM shrinking the frames so far that
+the rate stops mattering.

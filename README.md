@@ -61,7 +61,8 @@ Phone ──BT A2DP──► ESP32 ──I2S──► PCM5102 ──► TPA3116 
                      │
                      └── 4-tap FIR, then downsample 44.1kHz stereo → 22.05kHz mono
                                 │
-                           ESP-NOW broadcast (200-byte packets, ~220/sec, 44 KB/s)
+                           ESP-NOW broadcast (200-byte packets, ~220/sec, 44 KB/s,
+                           each sent twice at 12 Mbps)
                            stamped with this household's 16-bit mesh id
                                 │
                      ┌──────────┴──────────┐
@@ -100,22 +101,17 @@ router, not to each other; `tools/airmon/` is the sniffer that showed which.
 What a building full of routers does to it is the open question, and the plan
 for it is "Surviving the wild" in `TODO.md`.
 
-**The Bluetooth server path carries audio, badly.** As of 2026-09-14 evening a
-phone streams into a WROVER-E, which plays it locally and forwards it over
-ESP-NOW — after a boot loop (`WIFI_PS_NONE` gotcha) and a crash on connect
-(15 KB of internal DRAM was not enough for one L2CAP link; it is 43 KB now).
-With the BT radio streaming, a fifth of the ESP-NOW frames never made it onto
-the air (24% loss at the client) — BT/WiFi coexistence on one chip, measured,
-and the first item in `TODO.md`. The server's *own* speaker crackled too; as of
-2026-09-28 the PC can stream a test tone to a server and listen to it through
-its microphone (`tools/btlisten/`), which found two things. The loud-volume
-distortion was the amp's supply running below its 12 V — nothing to do with
-the stream. And the crackle itself — a ~3 ms hole in the audio at every
-A2DP packet, measured once — did not come back after a reboot, with forwarding
-on or off. The server's own I2S ring was also half a packet deep; at 46 ms
-(v0.2.0-22) the board and the mic both find no holes where the old ring left
-13–22 ms ones. The clients' MAX98357A boards have not made a
-sound yet — that is the second item.
+**The Bluetooth server path works**, as of 2026-09-29: the PC streaming into
+a WROVER-E, which plays it and forwards it, and a second WROVER playing the
+mesh stream, **0.094% lost over 600 s**, and no holes a microphone could find in
+short runs. Getting there took a boot loop (`WIFI_PS_NONE` gotcha), a crash on
+connect (15 KB of internal DRAM was not enough for one L2CAP link; it is 43 KB
+now), a 46 ms I2S ring for the server's own speaker, and one finding: a server
+streaming Bluetooth loses 12–24% of its mesh frames to its own BT radio, one
+frame at a time. Every frame now goes out twice, at 12 Mbps instead of 6 (D13).
+The PC can drive all of it with nobody at the keyboard (`tools/btlisten/`, and
+`k` to reconnect a reflashed server). A phone has not been tried on the new
+build, and range at 12 Mbps is untested; see `TODO.md`.
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the
@@ -296,8 +292,8 @@ name per board that might be plugged in:
 | Environment   | Board        | Port | Build | Role |
 |---------------|--------------|------|-------|------|
 | `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
-| `esp32wrover` | ESP32 WROVER-E | COM12 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 |
-| `esp32wrover2` | ESP32 WROVER-E + DAC | COM19 | `esp32_classic` | Same binary, second name so a phone can tell the two apart. Was COM13 until it moved USB socket |
+| `esp32wrover` | ESP32 WROVER-E + MAX98357A | COM23 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 (COM12, then COM20) |
+| `esp32wrover2` | ESP32 WROVER-E + PCM5102 + TPA3116 | COM11 | `esp32_classic` | Same binary, second name so a phone can tell the two apart. COM13, COM19, COM21 before: a CH340 is numbered by USB socket, so check the MAC |
 | `esp32s3`     | ESP32-S3     | COM9 | `esp32s3_client` | CLIENT only (no BT Classic) |
 | `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
 
@@ -389,6 +385,13 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
 | `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
 | `j` / `J` | BT server: play the connect jingle now — `j` the way a connection does (the library's local output muted meanwhile), `J` the old unguarded way. For comparing the two during a stream |
+| `k` | BT server: `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, the way a headset reconnects to a phone. What lets a reflashed server get its link back with nobody clicking Connect; the PC here is `aa:bb:cc:dd:ee:ff` |
+| `V` | BT server: `V<0..127>` sets the A2DP volume, as a phone's slider would. Applied before forwarding, so it moves every room; a server that dialled in with `k` starts at 1 |
+| `m` | BT server: mute its own speaker, mesh untouched — so a mic next to a client hears the client |
+| `e` | BT server: `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
+| `t` | `t<n>` sends each mesh frame n times (1–3) until reboot; `ESPNOW_TX_COPIES` is the default |
+| `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
+| `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks only the repeat copy saved |
 | `q` | BT server: `q<frames>` reinstalls the local I2S DMA ring with that buffer length (8 buffers; 256 = 46 ms is the default, 64 = the library's 11.6 ms), between streams only. Bare `q` prints it |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
@@ -517,7 +520,16 @@ Each of these was a real bug. Don't re-introduce them.
   anything else on channel 1 the weakest receiver loses one packet in ten and
   the strongest loses none, in bursts every board sees at the same moment,
   which looks exactly like "clients degrade each other" until you check the
-  timestamps. `ESPNOW_PHY_RATE` sets 6 Mbps; measured, see `CHANGELOG.md`.
+  timestamps. `ESPNOW_PHY_RATE` sets 12 Mbps; measured, see D13.
+- **A node streaming Bluetooth loses mesh frames to its own radio, and the
+  send callback calls every one a success.** 12–24% of broadcasts, one frame at
+  a time, with `senderr=0 radiofail=0` on the server and nothing else on the
+  channel. Only a receiver's `lost` shows it. That is why every frame goes out
+  twice (D13) — and why "the server reports it sent them" proves nothing.
+- **The top bit of `len` marks a repeat copy (`ESPNOW_LEN_REPEAT`). Mask it
+  before using `len` as a length.** The first build that set it also sent it:
+  `ESPNOW_HEADER_SIZE + pkt.len` asked the radio for a 33 KB frame. The
+  receiver masks it as it reads the header, before anything else looks.
 - **A node that runs Bluetooth cannot turn WiFi power save off.** The IDF
   coexistence layer requires modem sleep while the BT controller is enabled and
   enforces it with `abort()`: `esp_wifi_set_ps(WIFI_PS_NONE)` before BT starts

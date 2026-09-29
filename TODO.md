@@ -27,75 +27,50 @@ by hand with retries.
 channel 11 with the house router busy on channel 1. What is *not* proven is a
 building; see "Surviving the wild" below, which is the real list.
 
-Still unproven: the Bluetooth server path end to end. A phone (2026-09-14)
-and the PC (2026-09-28) have both streamed into WROVER2, which plays and
-forwards; what reaches a client is lossy, and the server's own output has
-crackled — both under "Blocking" below.
+The Bluetooth server path works end to end, as of 2026-09-29: the PC
+streaming into WROVER1, WROVER2 playing the mesh stream, 0.094% lost over
+600 s where it had lost 12–24% (`CHANGELOG.md`). What is left of the loss, and
+a phone on the new build, are under "Blocking" below. Both WROVERs moved USB
+sockets again that day: WROVER1 (MAX98357A) on COM23, WROVER2 (TPA3116) on
+COM11.
 
 ---
 
 ## Blocking
 
-- [ ] **A server streaming over Bluetooth loses a fifth of its ESP-NOW frames
-      at the radio — and its own local playback crackles.** This is the whole
-      product's path, first exercised on 2026-09-14 evening (phone → WROVER2
-      → WROVER1 with a MAX98357A). **The crackle was heard on WROVER2's own
-      TPA output**, i.e. the BT side is losing frames; the clients' MAX98357A
-      boards produced nothing at all (see the next item), so the 24% mesh
-      loss below has not been heard yet. Three logs recorded together (`logs/server-20260914-231730-COM13.log`, `client-…-COM12.log`, `air-…-ch11.log`):
-      - server: `tx=` climbing **~215/s**, `senderr=0 radiofail=0` — the
-        driver reports every frame sent. Also 2.5% below the 220.5/s that
-        44.1 kHz implies, so the A2DP side is losing a little too.
-      - air monitor on channel 11, 30 cm away at -24 dBm: **~170
-        ESP-NOW frames/s**. It saw 219–221 of 220.5 from a bench source that
-        afternoon, so it is not the monitor.
-      - client: **rx ~153/s, `lost` 24%**, `und` every second, "Jitter buffer
-        ready — starting I2S" 144 times in 150 s. A gap every few packets is
-        the crackle; a 90 ms prefill after each re-arm is the lag.
-      Nothing else changed between the clean 0-loss channel-11 bench run and
-      this one except that the source's BT radio was streaming A2DP. That is
-      the BT/WiFi coexistence cost the "Bandwidth" item said needed a WROVER
-      to measure: the arbiter lets BT have the radio, WiFi frames get aborted
-      or mangled, and the ESP-NOW send callback still reports success for a
-      broadcast. Things to try, cheapest first, each measured the same way
-      (server `tx=`, monitor `espnow=`, client `rx=`/`lost=`):
-      1. `esp_coex_preference_set(ESP_COEX_PREFER_WIFI)` before BT starts
-         (IDF 4.4 API). Expect fewer lost ESP-NOW frames and more lost A2DP
-         frames; the server's local output will say whether the phone side
-         still holds. `ESP_COEX_PREFER_BALANCE` is today's default.
-      2. **Fewer frames.** The arbiter cost is per WiFi transmission, not per
-         byte: 250-byte payloads are 176/s instead of 220; IMA ADPCM at
-         today's 22.05 k mono is **55/s** — four times fewer radio hand-offs
-         for the same audio. This moves the ADPCM item from "nice" to "the
-         fix", and it is `lib/`-shaped with host tests. Do mono ADPCM before
-         stereo ADPCM: stereo at 44.1 k puts the count straight back to 220.
-      3. If neither is enough: a **two-chip server** — one ESP32 is the A2DP
-         sink and plays locally, hands PCM over I2S to a second chip (a C3
-         is €2) that only does ESP-NOW. No coexistence at all, at the cost of
-         one module per server. Record the decision in `docs/decisions.md`
-         if it comes to that; D3 already says what would change it.
-      The crackle being local means the coexistence hurts both directions:
-      BT loses ~2.5% of its frames (a gap every ~40 ms — a crackle), ESP-NOW
-      loses ~20%. So a coexistence *preference* (1.) only moves the damage
-      between the two; fewer WiFi transmissions (2.) or two chips (3.) are
-      the real candidates.
-
-      **2026-09-28, the local crackle measured instead of listened to.** The
-      PC streamed a 997 Hz tone to WROVER2 and recorded it with its mic
-      (`tools/btlisten/`, `docs/bench-test.md`). Caught once, forwarding on:
-      27 holes/s of ~3 ms, one per A2DP packet, tone at 987 Hz and 6.55 s
-      long for 6.0 s sent. After a reflash (`8b49010`, adding the `a`/`f`/`w`
-      commands): WiFi off clean — but after a reboot, WiFi on was clean too,
-      forwarding on or off, at low volume and at 40%: 997.0 Hz, 6.02 s, 0–1.4
-      dips/s. So the WROOM test above is answered on the same board and does
-      not pin it on coexistence; what put the node in the crackling state is
-      unknown. If it comes back, run `listen.py --serial` at once and compare
-      the `a` window with the clean ones in `CHANGELOG.md`: packet size and
-      rate, `late`, and the gap histogram. The "very
-      distorted" sound at high volume the same day was the amp's supply
-      running below 12 V, not the stream. The ESP-NOW side ran
-      at the full 220.6 frames/s from the PC; nothing was listening to
-      measure the air loss.
+- [ ] **What is left of the mesh loss behind a Bluetooth server.** The 12–24%
+      is gone: every frame now goes out twice at 12 Mbps, and 600 s behind a
+      streaming server lost 0.094% (`CHANGELOG.md`, 2026-09-29). What remains
+      comes in runs of 2 or more blocks, about one every 10 s, each a 9–40 ms
+      hole of silence — audible as an occasional tick. In order of cost:
+      1. **Concealment** ("Surviving the wild" below): fill a lost block from
+         the one before it, faded, instead of zeros. Softens every hole the
+         copies miss, whatever caused it.
+      2. **Copies further apart.** Both copies go out back to back, so a
+         burst that takes one takes both. Sending the second a few frames
+         later would decorrelate them, but the client then sees a sequence
+         number *behind* the last one, which `SeqTracker` treats as a resync
+         today; it would need to accept a late copy and patch the silence it
+         already queued for that block, while it is still in the ring.
+      3. **ADPCM with the previous block in every packet** (the "Bandwidth"
+         item): half today's bytes, and any single lost packet is recovered
+         from the next one, 4.5 ms later rather than 0.3.
+      A **two-chip server** (an A2DP chip handing PCM to a €2 C3 that only
+      does ESP-NOW) is no longer needed for this, and stays the answer only
+      if the coexistence cost grows again — with a phone, say, which has not
+      been measured since the fix. Measure the same way: `listen.py --serial
+      <server> --client <client>`, and `l` on the client for the run lengths.
+      Also unexplained: the server's own output crackled once on 2026-09-28
+      (27 holes/s, one per A2DP packet) and never again after a reboot. If
+      it comes back, run `listen.py --serial` at once and compare the `a`
+      window with the clean ones in `CHANGELOG.md`.
+- [ ] **Finish the bench regression for 12 Mbps with two copies.** CLAUDE.md
+      asks for a 600 s `bench-mesh.ps1` after any client-path change; the one
+      run on 2026-09-29 was stopped at ~290 s (log flushed to 183 s). What it
+      showed, WROVER2 sourcing to WROVER1: 220.5 pkt/s, `qfull=0`, 5 lost of
+      40,286 with 93 blocks rescued by the copy, zero ovf/und/dup/rsy — no
+      drift figure yet. **The bench tone is loud on any amp: ask before
+      running it, and run it where nobody has to listen.
 - [ ] **The S3's MAX98357A has never made a sound.** WROVER1's does, since
       2026-09-28 (`CHANGELOG.md`); its silence was a wiring mistake, not
       the board. The S3's I2S pins 4/5/6 have never driven a DAC. SD: WROVER1's clone
@@ -256,14 +231,16 @@ here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
       picks, with `-NoDrift` off and the monitor logging beside it, and
       keep both logs. Until then every number in this file is one room, one
       router.
-- [ ] **Range-test 6 Mbps against 1 Mbps.** `ESPNOW_PHY_RATE` is now 6 Mbps
-      OFDM (D13) on the strength of one back-to-back comparison under
-      interference: total loss 4.6× lower, worst board 9× better, but the two
-      WROVERs that were clean at 1 Mbps picked up 86 and 708 lost — the OFDM
-      sensitivity cost is real and was measured at one metre. A flat is not
-      one metre. Walk a client into the next room and the one after, at each
-      rate, 600 s each, before trusting either number. If 6 Mbps loses at
-      range, 2 Mbps is the next thing to try, not a return to 1.
+- [ ] **Range-test 12 Mbps.** `ESPNOW_PHY_RATE` went 1 → 6 Mbps on
+      2026-09-14 (interference) and 6 → 12 on 2026-09-29 (a Bluetooth
+      server's own radio), each on bench measurements at one metre. 12 Mbps
+      is about 4 dB less sensitive than 6 and 9 dB less than 1, and the two
+      copies of every frame buy some of that back. A flat is not one metre:
+      walk a client into the next room and the one after, 600 s each at 12
+      and at 6 (`R<Mbps>` switches a source at runtime), with `rec` and
+      `lost` on the client. 2 Mbps is not the fallback any more — behind a
+      streaming BT server every frame waited 20–50 ms for the radio and the
+      client dropped out (D13).
 
 ### Mesh isolation
 
@@ -334,8 +311,11 @@ proof and polish.
       ADPCM (4:1, cheap) would bring it to ~11 KB/s. This is also what would buy
       back the headroom to revisit D5. **Measured 2026-09-14 evening: the
       radio is the binding constraint the moment BT streams** — see the first
-      "Blocking" item. What matters is frame *count*, so ADPCM's 55 frames/s
-      is the point, not its bytes.
+      "Blocking" item. This said frame *count* was what mattered; measured on
+      2026-09-29 it is frame *length*: the same 220 frames/s lost 12% at
+      6 Mbps and 2% at 12, and doubling the count to 441/s (two copies) cost
+      nothing. So ADPCM's value here is shorter frames, and bytes to spare for
+      carrying the previous block in every packet.
 
       Half-measured. `./tools/bench-mesh.ps1 -Flash -Duration 300` (v0.2.0-5-
       g9c371f9, clean tree, WROOM on COM8 + ESP32-C3 on COM10) shows pure
