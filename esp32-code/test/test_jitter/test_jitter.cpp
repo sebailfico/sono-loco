@@ -254,6 +254,50 @@ static void test_seq_exact_duplicate_is_dropped(void) {
     TEST_ASSERT_EQUAL_INT(0, r.fillPackets);
 }
 
+// Every frame goes out twice (ESPNOW_TX_COPIES). The copy of a frame that did
+// arrive is dropped like any duplicate, but it was meant, so `dupe` -- the count
+// of duplicates nobody sent on purpose -- must not move.
+static void test_seq_intended_repeat_is_dropped_without_a_dupe(void) {
+    SeqTracker s(RESYNC_THRESHOLD, MAX_GAP_FILL);
+    for (uint16_t i = 10; i < 20; i++) {
+        TEST_ASSERT_TRUE(s.update(i).accept);
+        TEST_ASSERT_FALSE(s.update(i, true).accept);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, s.dupe);
+    TEST_ASSERT_EQUAL_UINT32(0, s.lost);
+    TEST_ASSERT_EQUAL_UINT32(0, s.resync);
+}
+
+// The point of sending twice: the original is lost, the copy arrives, and the
+// block plays as if nothing happened -- no silence, nothing charged to `lost`.
+static void test_seq_repeat_stands_in_for_a_lost_original(void) {
+    SeqTracker s(RESYNC_THRESHOLD, MAX_GAP_FILL);
+    s.update(10);
+    s.update(10, true);
+    // 11's original lost in the air; its copy arrives.
+    SeqResult r = s.update(11, true);
+    TEST_ASSERT_TRUE(r.accept);
+    TEST_ASSERT_EQUAL_INT(0, r.fillPackets);
+    // Then 12 as normal, both copies.
+    TEST_ASSERT_TRUE(s.update(12).accept);
+    TEST_ASSERT_FALSE(s.update(12, true).accept);
+    TEST_ASSERT_EQUAL_UINT32(0, s.lost);
+    TEST_ASSERT_EQUAL_UINT32(0, s.dupe);
+}
+
+// Both copies lost is an ordinary loss, found when the next block arrives.
+static void test_seq_both_copies_lost_is_one_loss(void) {
+    SeqTracker s(RESYNC_THRESHOLD, MAX_GAP_FILL);
+    s.update(10);
+    s.update(10, true);
+    SeqResult r = s.update(12);   // both copies of 11 gone
+    TEST_ASSERT_TRUE(r.accept);
+    TEST_ASSERT_EQUAL_INT(1, r.fillPackets);
+    TEST_ASSERT_FALSE(s.update(12, true).accept);
+    TEST_ASSERT_EQUAL_UINT32(1, s.lost);
+    TEST_ASSERT_EQUAL_UINT32(0, s.dupe);
+}
+
 static void test_seq_single_loss_fills_one_packet(void) {
     SeqTracker s(RESYNC_THRESHOLD, MAX_GAP_FILL);
     s.update(10);
@@ -384,6 +428,9 @@ static int runAllTests(void) {
     RUN_TEST(test_seq_first_packet_is_accepted);
     RUN_TEST(test_seq_in_order_stream_reports_nothing);
     RUN_TEST(test_seq_exact_duplicate_is_dropped);
+    RUN_TEST(test_seq_intended_repeat_is_dropped_without_a_dupe);
+    RUN_TEST(test_seq_repeat_stands_in_for_a_lost_original);
+    RUN_TEST(test_seq_both_copies_lost_is_one_loss);
     RUN_TEST(test_seq_single_loss_fills_one_packet);
     RUN_TEST(test_seq_long_gap_is_counted_fully_but_fill_is_capped);
     RUN_TEST(test_seq_wraps_cleanly_at_65535);

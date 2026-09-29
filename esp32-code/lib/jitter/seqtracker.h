@@ -33,8 +33,16 @@ public:
      */
     SeqTracker(uint16_t resyncThreshold, int maxGapFillPkts);
 
-    /** Feed the sequence number of a freshly received packet. */
-    SeqResult update(uint16_t seq);
+    /**
+     * Feed the sequence number of a freshly received packet.
+     *
+     * `repeat` marks a copy the sender sent on purpose (every frame goes out
+     * twice, see ESPNOW_TX_COPIES). It is handled exactly like any other packet
+     * -- accepted if its original never arrived, dropped if it did -- except
+     * that dropping it is expected and is not charged to `dupe`, which stays
+     * the count of duplicates nobody meant to send.
+     */
+    SeqResult update(uint16_t seq, bool repeat = false);
 
     /** Forget the stream. Next packet is treated as the first one. */
     void reset();

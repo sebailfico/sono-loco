@@ -177,7 +177,25 @@
 // few dB of receiver sensitivity, which a house does not miss. Every chip on
 // the bench (ESP32, S3, C3) decodes 802.11g. Applies to what this node
 // *sends*, so it is set on every node because any node can be a source. See D13.
-#define ESPNOW_PHY_RATE      WIFI_PHY_RATE_6M
+//
+// 12, not 6, since 2026-09-29: a server that is also streaming Bluetooth
+// loses frames to its own BT link, and loses fewer the shorter they are. PC
+// streaming A2DP into WROVER1, WROVER2 listening, one copy of each frame:
+// 6 Mbps lost 12%, 12 Mbps 2.0%, 24 Mbps 4.0%, 54 Mbps 1.6% -- every loss a
+// single frame. 12 costs about 4 dB of sensitivity against 6 (ESP32
+// datasheet: -89 against -93 dBm); 54 would cost 17.
+#define ESPNOW_PHY_RATE      WIFI_PHY_RATE_12M
+
+// How many times each audio frame is sent. A broadcast has no acknowledgement
+// and so no retry: a frame lost in the air, or to the node's own Bluetooth
+// radio, is a hole in the audio unless it went out twice. The copies go back
+// to back and are not lost together (measured: with 14% of copies lost, fewer
+// blocks lost both than chance predicts), so the second copy recovers almost
+// every single loss -- and every loss measured behind a Bluetooth server was a
+// single frame. 12 Mbps with two copies: zero lost in 15 s, against 12% at
+// 6 Mbps with one, for about the same airtime. The receiver plays the first
+// copy that arrives; see ESPNOW_LEN_REPEAT in main.cpp.
+#define ESPNOW_TX_COPIES     2
 
 // Audio payload per packet (bytes). Must be ≤ 250 (ESP-NOW max).
 // At 22050Hz mono 16-bit: 200 bytes = ~4.5ms of audio per packet (~220 pkt/s)

@@ -357,6 +357,12 @@ typedef struct __attribute__((packed)) {
 
 static_assert(ESPNOW_HEADER_SIZE + ESPNOW_PAYLOAD_SIZE <= 250,
               "ESP-NOW cannot send more than 250 bytes per frame");
+
+// Set in `len` on the second and later copies of a frame (ESPNOW_TX_COPIES).
+// A payload is at most 250 bytes, so the top bit is free. The receiver needs
+// it only for its counters: a copy whose original arrived is dropped either
+// way, but it was meant, and must not read as a duplicate nobody sent.
+#define ESPNOW_LEN_REPEAT  0x8000
 // The accumulator fills two bytes at a time and the RX side masks off odd byte
 // counts, so an odd payload size would either overrun accumBuf or truncate a
 // sample on every packet.
@@ -393,12 +399,9 @@ static volatile uint32_t txLatHist[8];
 static volatile uint32_t txLatMaxUs   = 0;
 static uint32_t          txStartUs    = 0;
 
-// Each frame is handed to the radio this many times (`t<n>`). A broadcast
-// has no acknowledgement and so no retry; a frame the air or the arbiter
-// took is gone unless it was sent again. The client already drops the
-// repeats as exact duplicates (SeqTracker), so this is invisible to it
-// except as fewer holes. 1 is the plain stream.
-static volatile uint8_t  txRepeat     = 1;
+// Each frame is handed to the radio this many times; see ESPNOW_TX_COPIES.
+// `t<n>` changes it until reboot, so one Bluetooth session can compare.
+static volatile uint8_t  txRepeat     = ESPNOW_TX_COPIES;
 
 // --- RX (CLIENT mode) ---
 // The ring buffer and the packet sequence accounting live in lib/jitter: they
@@ -443,6 +446,9 @@ static volatile uint32_t rxUnderrun = 0;   // times playback outran the buffer
 // in single packets is what redundancy or a repeat can recover; loss in long
 // bursts is not. Printed and reset by `l`.
 static volatile uint32_t rxLossRuns[8];
+// Blocks whose original frame was lost and whose repeat copy arrived instead:
+// each one is a hole ESPNOW_TX_COPIES filled. `rec` on the status lines.
+static volatile uint32_t rxRecovered = 0;
 
 // Lock onto the first node we hear so two simultaneous servers can never
 // interleave their streams into one jitter buffer.
@@ -456,6 +462,7 @@ static void espnowTxTask(void *) {
 
         const uint8_t copies = pkt.len ? txRepeat : 1;   // beacons go once
         for (uint8_t c = 0; c < copies; c++) {
+            if (c == 1) pkt.len |= ESPNOW_LEN_REPEAT;
             // Wait for the previous frame to actually leave the radio. Firing
             // esp_now_send() back-to-back at ~220 pkt/s returns
             // ESP_ERR_ESPNOW_NO_MEM and drops audio without any indication.
@@ -463,7 +470,7 @@ static void espnowTxTask(void *) {
 
             txStartUs = micros();
             esp_err_t err = esp_now_send(BROADCAST_ADDR, (uint8_t *)&pkt,
-                                         ESPNOW_HEADER_SIZE + pkt.len);
+                                         ESPNOW_HEADER_SIZE + (pkt.len & ~ESPNOW_LEN_REPEAT));
             if (err != ESP_OK) {
                 txSendErr++;
                 xSemaphoreGive(txDone);   // no callback will come; release the gate
@@ -504,6 +511,8 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     memcpy(&group, data,     2);
     memcpy(&seq,   data + 2, 2);
     memcpy(&plen,  data + 4, 2);
+    const bool repeat = (plen & ESPNOW_LEN_REPEAT) != 0;
+    plen &= ~ESPNOW_LEN_REPEAT;
 
     const bool beacon = meshIsBeacon(seq, plen);
 
@@ -549,9 +558,9 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     if (n <= 0) return;
 
     lastRxMs = millis();
-    rxCount++;
 
     if (currentMode == MODE_DISCOVERY) {
+        rxCount++;
         rxActive = true;   // signal main loop to switch to CLIENT
         return;
     }
@@ -561,8 +570,12 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     // Duplicate / reordered / restarted-server handling, including the unsigned
     // 65535-gap trap, is in SeqTracker and covered by the host tests.
     const uint32_t lostBefore = seqTracker.lost;
-    const SeqResult sr = seqTracker.update(seq);
+    const SeqResult sr = seqTracker.update(seq, repeat);
     if (!sr.accept) return;   // exact retransmit — replaying it is an audible stutter
+    // Blocks, not frames: with every frame sent twice, counting frames would
+    // make rx twice the source's tx and halve every loss percentage.
+    rxCount++;
+    if (repeat) rxRecovered++;   // the original was lost and the copy stood in
     const uint32_t run = seqTracker.lost - lostBefore;
     if (run) rxLossRuns[run < 8 ? run - 1 : 7]++;
 
@@ -1264,6 +1277,7 @@ static void resetRxState() {
     rxOverflow   = 0;
     rxUnderrun   = 0;
     rxForeign    = 0;
+    rxRecovered  = 0;
 }
 
 static void enterDiscovery() {
@@ -1681,7 +1695,7 @@ static void benchReport() {
     DEBUG_SERIAL.printf(
         "[BENCH] ms=%lu role=%s mode=%s heap=%lu jit=%d rx=%lu lost=%lu ovf=%lu "
         "und=%lu dup=%lu rsy=%lu fgn=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu "
-        "drift=%d ins=%lu drp=%lu dr=%.3f tgt=%d srx=%ld maxalloc=%lu\n",
+        "drift=%d ins=%lu drp=%lu dr=%.3f tgt=%d srx=%ld maxalloc=%lu rec=%lu\n",
         (unsigned long)millis(),
         benchSource ? "SOURCE" : "SINK",
         modeStr,
@@ -1719,7 +1733,9 @@ static void benchReport() {
         lastRxMs ? (long)(millis() - lastRxMs) : -1L,
         // Largest allocatable block. Free heap can sit perfectly still while
         // this one falls, which is exactly what heap fragmentation looks like.
-        (unsigned long)ESP.getMaxAllocHeap());
+        (unsigned long)ESP.getMaxAllocHeap(),
+        // Blocks that played only because their repeat copy arrived.
+        (unsigned long)rxRecovered);
 }
 
 static void benchIdentify() {
@@ -1844,8 +1860,8 @@ static void benchServiceSerial() {
                 break;
             }
             case 'l':
-                DEBUG_SERIAL.printf("[LOSS] rx=%lu lost=%lu runs=", (unsigned long)rxCount,
-                                    (unsigned long)seqTracker.lost);
+                DEBUG_SERIAL.printf("[LOSS] rx=%lu lost=%lu rec=%lu runs=", (unsigned long)rxCount,
+                                    (unsigned long)seqTracker.lost, (unsigned long)rxRecovered);
                 for (int i = 0; i < 8; i++) {
                     DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)rxLossRuns[i]);
                     rxLossRuns[i] = 0;
@@ -2202,6 +2218,7 @@ void loop() {
                      " und=" + String(rxUnderrun) +
                      " dup=" + String(seqTracker.dupe) +
                      " rsy=" + String(seqTracker.resync) +
+                     " rec=" + String(rxRecovered) +
                      " fgn=" + String(rxForeign));
         } else if (currentMode == MODE_SERVER) {
             LOG_INFO(String("Status: mode=") + modeStr +

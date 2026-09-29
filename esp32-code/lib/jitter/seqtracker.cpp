@@ -11,13 +11,13 @@ void SeqTracker::reset() {
     resync   = 0;
 }
 
-SeqResult SeqTracker::update(uint16_t seq) {
+SeqResult SeqTracker::update(uint16_t seq, bool repeat) {
     SeqResult r = {true, 0};
 
     if (first_) {
         first_ = false;
     } else if (seq == lastSeq_) {
-        dupe++;
+        if (!repeat) dupe++;
         r.accept = false;
         return r;   // playing an exact retransmit twice is an audible stutter
     } else {
