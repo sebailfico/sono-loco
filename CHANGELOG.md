@@ -30,6 +30,41 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **Every node plays on the server's schedule, the server included**
+  (2026-09-30, `38a7532`, `cb355de`, D14). Reported by ear first: with
+  WROVER2 muted, WROVER1 and the S3 were "a clear echo". Measured with the new
+  `tools/btlisten/sync.py` (clicks into WROVER1 from the PC, one node unmuted
+  at a time, every board on `v0.2.0-51-g8183ddc`): the S3 **51.0 ms** and
+  WROVER2 **43.8 ms** behind WROVER1's own speaker, the server's reference
+  steady to 0.4 ms across the run. Two causes. The server played through the
+  A2DP library's 46 ms I2S ring, and a client through its 91 ms prefill. On
+  top of that a client armed wherever in a 23 ms burst of blocks its ring
+  happened to reach the prefill, which is why the two clients were 7 ms apart.
+
+  The server now plays its own stream through its own ring and the client's
+  output code (the library's I2S output is off). Every packet carries `due`,
+  when its block plays on the server's speaker, counted from its sending.
+  Each node reads its own output clock off its blocking DMA writes. A client
+  keeps the earliest estimate of the server's schedule in each 250 ms window,
+  aligns to it before it plays anything, and then steers on the timing error
+  with the drift controller at a fixed target. A bench source stamps a
+  schedule of its own, 90 ms after generation. Wire format `0xAD04`: an
+  8-byte header, 248-byte packets, the same 386.8/s. `lib/sync` holds the
+  arithmetic, and its 11 tests pass on a board. Writing them found one bug,
+  in a test: an unsigned frame index that went "negative" and wrapped.
+
+  Gone with the library's I2S output: `q` (its DMA depth), `J` (the jingle
+  written alongside the library), `serverPrefill`, and the write-timing half
+  of `a`. That window now reports the gaps between Bluetooth packets and the
+  server's own ring (`jit`, `und`, `ovf`, `dry`). A jingle is written from
+  `loop()` into the output `loop()` also feeds, so it cannot interleave, and
+  the clients jump to the schedule that follows it. Telemetry gains `sync=`,
+  `se=` (µs, + = late), `sjmp=` and `dry=`.
+
+  **Not yet measured**: after flashing, WROVER2 and the S3 were no longer on
+  USB and the PC's Bluetooth was off, so the microphone check and the bench
+  regression are the first item in `TODO.md`.
+
 - **Behind a Bluetooth server, measured for real: two client bugs, and the
   redundant block moved 11 packets back** (2026-09-30, `541f717` … `26691a0`).
   The ADPCM stream had not yet been measured behind a streaming server; the

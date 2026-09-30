@@ -380,7 +380,7 @@ exchange. The full reasoning, including why there is no integral term, is in
 `lib/drift/drift.h`.
 
 Placing the edit at a batch boundary rather than hunting for a zero crossing is
-also deliberate: the partial-write accounting in `driveClientI2S` is the code
+also deliberate: the partial-write accounting in `driveRingI2S` is the code
 that once shifted the 16-bit framing permanently, and an edit in the middle of a
 buffer that I2S may only half accept is exactly how that bug would come back.
 One sample either side of a write whose length is already handled correctly
@@ -617,3 +617,74 @@ slower. A server with no Bluetooth of its own (the two-chip server in
 re-measuring against their airtime — and would remove the 4–5-packet runs
 the distance exists for, so distance 1 might win again. Or ADPCM shrinking the frames so far that
 the rate stops mattering.
+
+---
+
+## D14 — Every node plays on the server's schedule, the server included
+
+**Decided:** 2026-09-30. **Status:** coded (`cb355de`), `lib/sync`'s 11 tests
+pass on a board; not yet measured with the microphone.
+
+Measured with `tools/btlisten/sync.py` before any of this, clicks through
+the PC into WROVER1: the S3 played **51 ms** after the server and WROVER2
+**44 ms** after it. Anyone standing between two rooms heard an echo. There
+were two causes, and neither is visible in any counter:
+
+- *A fixed difference in latency.* The server played through the A2DP
+  library's I2S output, a 46 ms DMA ring. A client played through its
+  jitter buffer, and then through its own 46 ms DMA ring behind that.
+- *A random one on top.* A client started playing when its ring reached the
+  prefill, and that happens part way through a burst: Windows sends a
+  1024-frame packet every 23 ms and it arrives as nine blocks within a few
+  ms. So each client's latency was anywhere in a 23 ms spread, different on
+  every stream start and every re-arm. That explains why the two clients
+  differed from each other by 7 ms.
+
+**The design.** One output path, and a shared idea of when each block plays:
+
+- The server no longer lets the library write I2S (`set_stream_reader(cb,
+  false)`). It pushes each A2DP packet into its own ring and plays it
+  through exactly the code a client uses (`driveRingI2S`). Its speaker is
+  now as late as a client's (~90 ms against ~40), with a buffer as deep as a
+  client's against Bluetooth's own pauses. Its level controller also locks
+  it to the source's clock, which the library's output never was.
+- Every node reads its own output clock: an `i2s_write()` that had to wait
+  returns just after a DMA buffer finished. At that moment the frames queued
+  ahead of the next write are a whole number of buffers plus what the write
+  put in its own, which the frame count gives exactly. Only the interrupt
+  latency is unknown, and that is only ever late, so the earliest reading
+  wins.
+- Every packet carries `due`: how long after this frame left the radio its
+  block plays on the sender's speaker. A client adds it to its receive time
+  and has the server's play time on its own clock, late only by that packet's
+  transit beyond the fastest. Keeping the earliest estimate from each window
+  of ~97 packets removes the transit: the fast packets carry the truth, and
+  a slow packet only ever makes the estimate later.
+- A client aligns before it plays anything. It primes the DMA with silence
+  until its clock is known, then lets go of (or waits out) exactly what
+  separates its first frame from the server's schedule. After that it
+  steers on the timing error rather than on its depth, using the D11
+  controller with a fixed target and a 0.2 ms deadband. An error beyond
+  4 ms (a server re-arming, a DMA running dry) is a jump, not a steer.
+
+There is no clock-synchronisation protocol, no shared timebase and no extra
+packets: two bytes per packet and a minimum. A bench source stamps a
+schedule of its own (`BENCH_PLAY_DELAY_US`), so the automated harness
+exercises the same path.
+
+**What was considered.** *Delaying the server's own output by a fixed
+amount.* That was the `TODO.md` item as written, and it fixes only the first
+cause. The 23 ms arming spread stays, and a server whose A2DP input runs
+slower than its I2S drains its ring and slips a little more every time it
+runs dry. *Pacing the server's sends to the stream's clock*, so that arrival
+time means stream time: that adds up to a packet of latency and fights the
+coexistence losses D13 is about. *NTP-style offset estimation from absolute
+timestamps*: the same minimum filter plus a clock offset to track, and more
+bytes on the wire. The relative stamp needs neither.
+
+**What would change this:** a microphone showing a constant offset between
+server and clients. `MESH_TRANSIT_MIN_US` (300 µs) is the least transit
+assumed, and differences in DAC latency are not modelled at all; either
+would call for a per-node trim. A source whose schedule moves often — each
+move costs every client a jump. And a sample rate other than 44.1 kHz, which
+changes every conversion in `lib/sync` along with everything else (`TODO.md`).

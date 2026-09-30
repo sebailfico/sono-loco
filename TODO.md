@@ -37,6 +37,20 @@ are under "Blocking" below.
 
 ## Blocking
 
+- [ ] **Confirm with the microphone that every node plays in time** (D14,
+      `cb355de`). Coded and unit-tested; not yet heard. With WROVER1 serving
+      over Bluetooth from the PC and WROVER2 and the S3 as clients:
+      `python tools/btlisten/sync.py --server COM20 --node COM9 --node COM22:-24
+      --level -6 --volume 120` — about 35 s, mostly silence, the server's
+      volume put back afterwards. The baseline on `v0.2.0-51-g8183ddc` was S3
+      +51 ms and WROVER2 +44 ms. Expect all three within a millisecond or two
+      of each other, plus up to ~3 ms a metre of path difference to the mic.
+      A constant offset shared by both clients means `MESH_TRANSIT_MIN_US`
+      or the DACs; clients that disagree mean the output clock. Then the
+      telemetry: `sync=1`, `se=` inside ±0.5 ms, `sjmp=` not climbing. Then
+      the bench regression (`bench-mesh.ps1 -Flash -Duration 600 -Mute`,
+      flashing the WROVERs by name afterwards), because the client audio
+      path changed.
 - [ ] **The server still drops 3–9% of its own frames.** Measured behind a
       streaming server on 2026-09-30 (`CHANGELOG.md`): every client loses the
       same packets, run for run — singles, and runs of 4–5 (10–13 ms) when the
@@ -89,8 +103,9 @@ are under "Blocking" below.
       volume is applied on the server before forwarding, so every room follows
       one slider and no node can differ. Proposal: a gain in dB per node, in
       NVS like the mesh name, set over serial (`v<dB>`), applied at that
-      node's output — on a client in `driveClientI2S`, on the server to its
-      local output only, after the forward is taken. The phone slider still
+      node's output — in `driveRingI2S`, which since D14 is every node's
+      output, the server's included, and runs after the forward is taken.
+      `sync.py --node COMn:dB` works around the lack of it for measuring. The phone slider still
       moves every room together; the trim sets each room's offset. Worth
       deciding at the same time whether the mesh should carry pre-volume
       audio plus the volume value instead: at a low phone volume the forwarded
@@ -106,12 +121,13 @@ are under "Blocking" below.
       might be affordable; otherwise document the two-step. Separately,
       Windows then also failed on the freshly rebooted node with nothing at
       all reaching it, and later connected fine; not understood.
-- [ ] **Measure the jingle fix** (`563833a`). `listen.py --serial COM21
-      --pre f --at 3.0:J` against `--at 3.0:j`, in a quiet room with nothing
-      else playing (the one attempt had music under it), and the notes broken
-      out of each recording: the old way should show each note in pieces with
-      the test tone between them, the new way one piece per note and no test
-      tone under the jingle.
+- [ ] **Hear a jingle during a stream.** Since D14 the connect and
+      disconnect jingles are written from `loop()` into the server's own
+      output, which `loop()` also feeds from the ring, so they cannot
+      interleave any more and the old unguarded `J` is gone. What is left to
+      check: `listen.py --serial COM20 --at 3.0:j` — the notes whole, the
+      stream resuming after, and the clients jumping onto the server's new
+      schedule once (`sjmp=` +1) rather than repeatedly.
 - [ ] **The TPA3116 on WROVER2 is too hot for its speaker**: very loud by
       50% on the phone, which on the library's curve is already −17.5 dB.
       Fix it on the amp — the module's gain jumper, or a divider between DAC
@@ -135,12 +151,12 @@ are under "Blocking" below.
 
 ### Timing / sync
 
-- [ ] **Server and clients are not time-aligned.** The server plays through A2DP
-      with its own 46 ms I2S ring (prefilled at every stream start) plus
-      whatever the BT stack holds; clients play after ~137 ms (91 ms prefill
-      plus 46 ms of I2S DMA).
-      Adjacent rooms will slap-echo. The server needs to delay its own local
-      playback to match.
+- [ ] **A per-node latency trim, if the microphone asks for one.** D14 puts
+      every node on the server's schedule to the precision of the DMA
+      interrupt, but not the DAC after it or the air: a PCM5102 and a
+      MAX98357A may differ by a fraction of a millisecond, and two rooms by
+      metres of sound. If `sync.py` shows a steady offset on one board, a
+      trim in µs next to the volume trim is the place for it.
 - [ ] **Re-measure drift on the WROOM/S3 pair.** Correction is proven on the
       WROOM/C3 pair (v0.2.0: -57.7 ppm uncorrected, zero underruns corrected, the
       two measures agreeing within 1.4 ppm). The S3 measured -30.5 ppm against the
@@ -203,12 +219,11 @@ here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
       fade the last block on a gap rather than zero-fill; the drift controller
       already knows how to insert. A hole that is later patched (D13) must not
       be faded twice. This is what stops a hole being a click.
-- [ ] **Buffer for bursts, and decide who waits.** A deeper jitter buffer
-      rides out longer bursts at the cost of latency, and latency is only a
-      problem relative to the server's own local playback (every client is
-      delayed equally). Consider delaying the server's local output to match
-      the clients — the "not time-aligned" item under "Timing / sync" is the
-      same decision from the other side.
+- [ ] **Buffer for bursts.** A deeper jitter buffer rides out longer bursts
+      at the cost of latency. Who waits is decided (D14): the server plays
+      through a ring as deep as its clients', so a deeper `JITTER_PREFILL`
+      now delays every room together, the server included, and costs only
+      lip-sync against the phone.
 - [ ] **Smaller frames.** ADPCM spent its 4:1 on stereo, full rate and a
       redundant block (D5, D13), not on short frames: a packet is 246 bytes,
       about 0.2 ms at 12 Mbps. Under heavy interference shorter would collide

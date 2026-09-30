@@ -57,12 +57,13 @@ Every node runs the same three-state machine:
 
 **SERVER mode:**
 ```
-Phone ──BT A2DP──► ESP32 ──I2S──► PCM5102 ──► TPA3116 ──► Speaker
-                     │
+Phone ──BT A2DP──► ESP32 ──► ring ──► I2S DMA ──► PCM5102 ──► TPA3116 ──► Speaker
+                     │      (its own, exactly as a client's)
                      └── IMA ADPCM, 44.1kHz stereo, 4 bits a sample
                                 │
-                           ESP-NOW broadcast at 12 Mbps (246-byte packets,
-                           ~387/sec: each a 2.6 ms block plus the one 11 back)
+                           ESP-NOW broadcast at 12 Mbps (248-byte packets,
+                           ~387/sec: each a 2.6 ms block plus the one 11 back,
+                           and when that block plays on the server's speaker)
                            stamped with this household's 16-bit mesh id
                                 │
                      ┌──────────┴──────────┐
@@ -72,15 +73,23 @@ Phone ──BT A2DP──► ESP32 ──I2S──► PCM5102 ──► TPA3116 
 
 **CLIENT mode:**
 ```
-ESP-NOW RX ──► jitter buffer ──► I2S DMA ──► PCM5102 ──► TPA3116 ──► Speaker
-                (~91ms prefill)   (~46ms)
+ESP-NOW RX ──► ring ──► I2S DMA ──► PCM5102 ──► TPA3116 ──► Speaker
+            (~47 ms)    (~44 ms)
 ```
 
-Client-side latency is about **137 ms**: playback starts once `JITTER_PREFILL`
-(16000 bytes of decoded stereo ≈ 91 ms) has accumulated, and the I2S DMA ring
-holds a further 2048 frames ≈ 46 ms. The ring itself is 32768 bytes ≈ 185 ms, which is its
+**Every node plays each block at the same moment**, the server included
+(D14, `lib/sync`). The server plays its own stream through its own ring and
+DMA, exactly as a client does, about 90 ms after the A2DP packet reached it:
+`JITTER_PREFILL` (16000 bytes of decoded stereo ≈ 91 ms) is what its ring
+starts from. Each packet says when its block plays on the server's speaker,
+and a client starts, then steers, onto that schedule, rather than onto a
+depth of its own. The ring itself is 32768 bytes ≈ 185 ms, which is its
 capacity, not its latency — the prefill must stay above the DMA capacity, see
 the gotchas.
+
+Before 2026-09-30 the server played through the A2DP library's own 46 ms I2S
+ring, and a microphone put the clients 44–51 ms behind it: an echo between
+any two rooms. `tools/btlisten/sync.py` is that measurement.
 
 Clients get what the server plays: full-rate stereo, in a quarter of the bytes,
 through IMA ADPCM (D5). Until 2026-09-29 the mesh carried 22.05 kHz mono PCM
@@ -120,6 +129,14 @@ server's own ~3–9% — is the open problem in `TODO.md`. The PC can drive all
 of it with nobody at the keyboard (`tools/btlisten/`, and `k` to reconnect a
 reflashed server). A phone has not been tried on the new build, and range at
 12 Mbps is untested; see `TODO.md`.
+
+**Every node is meant to play each block at the same moment**, as of
+2026-09-30 (D14) — coded and unit-tested on a board, not yet confirmed with
+the microphone. Before it, clicks through the PC put the S3 51 ms and WROVER2
+44 ms behind the server's own speaker: a clear echo between rooms. Now the
+server plays through the same ring as its clients, every packet says when its
+block plays on the server, and each client starts and steers on that.
+`tools/btlisten/sync.py` measures it.
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the
@@ -389,13 +406,13 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once — no reboot, because nothing about the id is decided at boot |
 | `p` | listen for 60 s and join the mesh that offers itself — the speaker half of pairing. Same as a three-second BOOT hold on a node that cannot be a server |
 | `o` | offer this mesh for 60 s, so a listening node can join it — the server half. Same as a three-second BOOT hold on a server-capable node |
-| `a` | BT server: print and reset the A2DP timing window — packets/s, packet size, and a histogram of the gaps between I2S writes. A gap longer than the DMA ring is a hole in the local output, counted as `late` |
+| `a` | BT server: print and reset the A2DP window — packets/s, packet size, a histogram of the gaps between packets from the Bluetooth stack, and the server's own ring (`jit`, `und`, `ovf`, `dry`). A gap longer than the ring holds is a hole in every room |
 | `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
 | `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
-| `j` / `J` | BT server: play the connect jingle now — `j` the way a connection does (the library's local output muted meanwhile), `J` the old unguarded way. For comparing the two during a stream |
+| `j` | BT server: play the connect jingle now, the way a connection does — into the server's own output, from `loop()`, so it cannot interleave with the stream; the ring re-arms afterwards and the clients follow |
 | `k` | BT server: `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, the way a headset reconnects to a phone. What lets a reflashed server get its link back with nobody clicking Connect; the PC here is `aa:bb:cc:dd:ee:ff` |
 | `V` | BT server: `V<0..127>` sets the A2DP volume, as a phone's slider would. Applied before forwarding, so it moves every room; a server that dialled in with `k` starts at 1 |
-| `m` | mute this node's speaker until reboot — a server's local output (mesh untouched) or a client's I2S. How a mic hears one node alone, and how `bench-mesh.ps1 -Mute` runs silent |
+| `m` | mute this node's speaker until reboot — zeroes what its ring hands to I2S, on a server and a client alike; the mesh and every timing are untouched. How a mic hears one node alone, and how `bench-mesh.ps1 -Mute` runs silent |
 | `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS |
 | `e` | BT server: `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
 | `t` | `t<n>` sends each mesh frame n times (1–3) until reboot; `ESPNOW_TX_COPIES` is the default |
@@ -403,7 +420,6 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `P` | `P<us>` spaces audio packets at least that far apart (0 = send each as soon as the radio is free) until reboot; `ESPNOW_TX_PACE_US` is the default |
 | `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
 | `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks rebuilt from a later packet or a repeat copy |
-| `q` | BT server: `q<frames>` reinstalls the local I2S DMA ring with that buffer length (8 buffers; 256 = 46 ms is the default, 64 = the library's 11.6 ms), between streams only. Bare `q` prints it |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
 A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs
@@ -436,6 +452,11 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   should duplicate or drop a sample to hold its buffer at depth; it never touches
   I2S or the ring buffer itself, which is what makes the closed loop simulable on
   a PC. See D11.
+- `esp32-code/lib/sync/` — playing in time: a node's output clock, read from
+  its own blocking DMA writes, and the server's schedule as a client sees it
+  through the packets' `due` stamps, earliest of each window. The arithmetic
+  behind D14, where an error is a node playing cleanly a few ms away from the
+  others — which nothing but a microphone would notice.
 - `esp32-code/test/test_jitter/` — host tests for the ring buffer and sequence
   accounting. Each one corresponds to a real bug or a real invariant.
 - `esp32-code/test/test_adpcm/` — the codec against the reference's own output,
@@ -447,6 +468,9 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   hour-long closed-loop simulations at the drift measured on these boards. The
   model is checked against the recorded 1.34 B/s slope before anything built on
   it is believed.
+- `esp32-code/test/test_sync/` — host tests for `lib/sync`: wake latency, an
+  output slower than nominal, a window of slow packets, a server clock with
+  its own slope, a schedule that moves, and the 32-bit wrap in every one.
 - `esp32-code/scripts/version.py` — a PlatformIO pre-build step that defines
   `FW_VERSION` from `git describe`. There is no version constant to bump by hand;
   see D10.
@@ -468,7 +492,8 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   tone to a server and records it with its own microphone, then counts holes,
   clicks and pitch error; with `--serial` the board's `a` window for the same
   seconds is printed beside it. `mon.py` logs that window every 2 s during
-  ordinary use.
+  ordinary use. `sync.py` measures how far apart the nodes play: clicks
+  through the server, one node unmuted at a time.
 
 Comments in the code explain *why*, particularly where a line looks wrong but isn't.
 
@@ -497,15 +522,25 @@ Each of these was a real bug. Don't re-introduce them.
   library remembers having initialised it and skips `esp_bluedroid_init()` on
   the next `start()`, which then loops forever on "Failed to enable bluedroid"
   — the node is wedged and never becomes a speaker again.
-- **Mute by zeroing samples, not by turning the A2DP library's output off.**
-  The library installs its I2S driver in `start()` and uninstalls it in `end()`
-  only while `set_stream_reader(cb, true)`. `m` once turned that off, so a
-  muted node kept the driver, and its next CLIENT install failed with
-  `ESP_ERR_INVALID_STATE` every 5 s: stuck in DISCOVERY, counting the server's
-  packets and playing none. Now `m` zeroes the library's buffer at the end of
-  our callback — after the mesh has taken its copy, before the library writes
-  it to I2S — and the output flag is left alone. (The jingle still turns it
-  off, for 0.6 s inside `loop()`, where Bluetooth cannot be stopped meanwhile.)
+- **Mute by zeroing samples, not by switching an output off.** When the A2DP
+  library still wrote I2S itself, it installed its driver in `start()` and
+  uninstalled it in `end()` only while `set_stream_reader(cb, true)`. `m`
+  once turned that off, so a muted node kept the driver, and its next CLIENT
+  install failed with `ESP_ERR_INVALID_STATE` every 5 s: stuck in DISCOVERY,
+  counting the server's packets and playing none. The library's output is
+  now off for good (D14) and `m` zeroes what the ring hands to I2S, on every
+  node — the ring, the mesh and the schedule never notice.
+- **Every write to the output driver must be counted in `outFrames`, tones
+  included.** The output clock (D14) reads the DMA position as that count
+  modulo the buffer length; a write that bypasses it puts every later
+  reading off by up to a buffer (5.8 ms), in a way no counter shows.
+  `outWrite()` and `i2sWriteAll()` both count.
+- **The ring's frame numbering must advance for every frame that enters the
+  ring, silence included, and for nothing else.** `ringPushed` is what a
+  packet's `due` and a client's timeline are expressed in. A push that fails,
+  or a gap longer than the silence it was given, leaves the numbering behind
+  the stream, and the timeline is flushed (`timelineFlush`) rather than
+  steered by.
 - **Never `Serial.print` from the ESP-NOW send/recv callbacks.** They fire ~390×/s and a
   blocking UART write there causes the very dropouts it would be reporting. Bump a
   counter, print from `loop()`.

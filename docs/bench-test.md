@@ -146,12 +146,11 @@ python tools/btlisten/listen.py --serial COM19 --pre f --label no-forwarding
 Each run is ~11 s, writes `logs/listen-<time>-<label>.wav` and a plot beside it,
 and prints the node's `a` window for the same seconds. `--pre f` toggles
 forwarding before the run (send it again to turn it back on); `--pre w` stops
-WiFi until the next reboot. To compare I2S ring depths in one session, send
-`q64` (the library's old 11.6 ms) or `q256` (the default, 46 ms) over serial
-*between* runs — it is refused while a stream is running, and Windows keeps a
-stream open for 2–3 s after the last sound, so retry until it answers
-`install=ESP_OK`. `--at 3.0:j` sends a command three seconds into playback —
-`j`/`J` play the connect jingle over the test tone, the new way and the old.
+WiFi until the next reboot. `--at 3.0:j` sends a command three seconds into
+playback — `j` plays the connect jingle over the test tone. (Until D14 the
+server played through the A2DP library's own I2S ring, and `q<frames>`
+changed its depth between runs; the server now plays through a ring exactly
+like a client's, and `q` is gone.)
 
 **Listening to the mesh path instead.** The same tone, but heard from a
 *client* of the server: `m` mutes the server's own speaker, and `--client`
@@ -187,22 +186,58 @@ second longer to play than it was.
 The `a` window, one line per run:
 
 ```
-[A2DP] win=11.9s pk=467 pk/s=39.4 pkB=4096..4096 ring=11.6ms late=3 nb=0
-       gapmax=31.9ms idlemax=30.8ms cbmax=1.91ms writemax=23.2ms fwd=1 wifi=1
-       heap=29404 gap5ms=0,456,9,0,0,0,1,0 tx=17580
+[A2DP] win=11.9s pk=467 pk/s=39.4 pkB=4096..4096 gapmax=31.9ms cbmax=1.91ms
+       jit=8412 und=0 ovf=0 dry=0 fwd=1 wifi=1 heap=29404
+       gap5ms=0,456,9,0,0,0,1,0 tx=17580 ...
 ```
 
-`gap5ms` is a histogram in 5 ms buckets of the time between one `i2s_write()`
-and the next: waiting for the packet, decoding it, and forwarding it in our
-callback (`cbmax`). While that runs, only the DMA ring plays, so a gap longer
-than `ring` is a stretch of zeros on the speaker, counted as `late`. The line
-above is the old 11.6 ms ring: 3 late, and the 31.9 ms gap is the 22 ms hole
-the mic heard in the same run (31.9 − 11.6 = 20.3). `nb` counts writes that did
-not block — moments the ring was not full, when `late` undercounts; a few per
-run on the 46 ms ring are the ring refilling after a long gap. (Until
-`b8273ae` the histogram was of the idle part only, which missed the callback's
-time; windows logged before that, such as `a2dp-20260928-173606`, say
-`idle5ms` and undercount.)
+`gap5ms` is a histogram in 5 ms buckets of the time between one packet from
+the Bluetooth stack and the next, and `cbmax` the longest our callback took
+(pushing into the server's own ring, forwarding to the mesh). Since D14 the
+server plays from its own ring, as a client does, so a gap is absorbed by the
+ring (`jit`, bytes) and only a gap longer than the ring holds is a hole —
+counted in `und`, on the server's speaker and, a moment later, in every room.
+`dry` counts the times its DMA ran dry under a playing ring.
+
+Before D14 the library wrote I2S itself and the window measured that: the
+time between two `i2s_write()` calls against a DMA ring of 11.6 or 46 ms,
+with `late` for the gaps longer than the ring. On the 11.6 ms ring a 31.9 ms
+gap was the 22 ms hole the mic heard in the same run. Windows logged before
+`cb355de` carry `ring=`, `late=`, `nb=` and `writemax=`; windows before
+`b8273ae` say `idle5ms` and undercount.
+
+**How far apart the nodes play.** `sync.py` plays clicks into the server and
+unmutes one node at a time: the server, each `--node` in turn, the server
+again. All of it is one Bluetooth stream, so the PC's own latency cancels and
+each line is that node's delay against the server's, plus the sound's flight
+to the mic (~2.9 ms a metre). The two server phases must agree to a fraction
+of a millisecond, or the reference moved and nothing between is worth
+quoting:
+
+```
+python tools/btlisten/sync.py --server COM20 --node COM9 --node COM22:-24 --level -6 --volume 120 --clicks 12
+```
+
+About 35 s, mostly silence, each node clicking for ~5 s. The MAX98357A nodes
+need the level and the volume that high to be heard over a quiet room;
+`:-24` keeps WROVER2's TPA3116 from being deafening meanwhile. `--volume`
+sets the server's A2DP volume for the run and puts back what it found, and
+every mute is read before it is toggled and restored as it was. A client
+reported with `und=+1` re-armed during the run and its figure is suspect.
+The baseline, every board on `v0.2.0-51-g8183ddc`
+(`logs/sync-20260930-131656-baseline`):
+
+```
+phase                    clicks  delay ms  spread  vs server
+COM20 (server)               12    -97.09    0.09      +0.00
+COM9                         12    -46.10    2.52     +50.99
+COM22                        11    -53.27    1.94     +43.82
+COM20 (server)               12    -96.67    0.09      +0.42
+```
+
+The absolute column means nothing (it is against a guess at when playback
+started); the last column is the echo. A room with people in it drowns the
+MAX98357A's clicks — the first attempt found 2 of 8 — so run it quiet.
 
 Traps, each of which cost a run on 2026-09-28:
 
