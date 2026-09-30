@@ -1076,13 +1076,16 @@ static void startBluetooth() {
 
     a2dpSink.set_pin_config(serverI2SPins());
     a2dpSink.set_i2s_config(serverI2SConfig(serverDmaLen));
-    a2dpSink.set_stream_reader(a2dpDataCallback, !outputMuted);  // true = keep local I2S output
+    // Output on through start(), whatever the mute: the library installs its
+    // I2S driver there only if it is. The mute goes on after; see stopBluetooth().
+    a2dpSink.set_stream_reader(a2dpDataCallback, true);  // true = keep local I2S output
     a2dpSink.set_on_data_received(a2dpWriteDone);
     a2dpSink.set_on_connection_state_changed(btConnectionChanged);
     a2dpSink.set_on_audio_state_changed(btAudioChanged);
     a2dpSink.set_auto_reconnect(false);
     a2dpSink.set_volume(VOLUME_DEFAULT);
     a2dpSink.start(BT_DEVICE_NAME);
+    if (outputMuted) a2dpSink.set_stream_reader(a2dpDataCallback, false);
     btSinkStarted = true;
     LOG_INFO("BT discoverable as: " BT_DEVICE_NAME);
     LOG_INFO("Heap after BT start: " + String(ESP.getFreeHeap()) + " bytes, maxalloc " +
@@ -1161,6 +1164,11 @@ static void stopBluetooth() {
     // end(true) releases it, and every later attempt to become a SERVER fails
     // until the node is power-cycled — which breaks the whole "any node can be
     // either role" premise.
+    //
+    // Output back on first: end() uninstalls the library's I2S driver only if
+    // it is. A muted node (`m`) kept the driver, and its next CLIENT install
+    // failed with ESP_ERR_INVALID_STATE -- every 5 s, stuck in DISCOVERY.
+    a2dpSink.set_stream_reader(a2dpDataCallback, true);
     a2dpSink.end(false);
     btSinkStarted = false;
     LOG_INFO("BT stopped (controller retained for restart)");
