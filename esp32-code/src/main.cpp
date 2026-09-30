@@ -1549,10 +1549,19 @@ static void driveRingI2S() {
     static const int BATCH_BYTES = CLIENT_BATCH * CLIENT_FRAME_BYTES;
 
     if (!jbuf.peek((uint8_t *)stereo, BATCH_BYTES)) {
-        // Underrun. tx_desc_auto_clear already zeroes the DMA as it drains, so
-        // pushing extra silence here would only add a click. Re-arm the prefill
-        // gate and let the buffer refill. Counted, not logged — logging every
-        // loop tick during an underrun makes the underrun worse.
+        // The ring is empty, but the DMA behind it still holds ~44 ms: until
+        // that has played out, nothing is missing yet. Wait for the next packet
+        // and carry on where it left off -- the schedule is untouched. Windows
+        // pauses its A2DP stream for up to 54 ms, longer than the ring alone
+        // holds, and treating an empty ring as an underrun turned each of those
+        // pauses into a re-arm and a hole of a prefill's length: 8-10 a minute
+        // on each client, 2026-09-30.
+        if (outClock.valid() && (int32_t)(micros() - outClock.playUs(outFrames)) < 0) return;
+
+        // Underrun: the DMA has run dry. tx_desc_auto_clear already zeroes the
+        // DMA as it drains, so pushing extra silence here would only add a click.
+        // Re-arm the prefill gate and let the buffer refill. Counted, not logged
+        // — logging every loop tick during an underrun makes the underrun worse.
         jReady    = false;
         outSynced = false;
         rxUnderrun++;
