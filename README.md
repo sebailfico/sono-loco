@@ -293,9 +293,9 @@ name per board that might be plugged in:
 | Environment   | Board        | Port | Build | Role |
 |---------------|--------------|------|-------|------|
 | `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
-| `esp32wrover` | ESP32 WROVER-E + MAX98357A | COM23 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 (COM12, then COM20) |
-| `esp32wrover2` | ESP32 WROVER-E + PCM5102 + TPA3116 | COM11 | `esp32_classic` | Same binary, second name so a phone can tell the two apart. COM13, COM19, COM21 before: a CH340 is numbered by USB socket, so check the MAC |
-| `esp32s3`     | ESP32-S3     | COM9 | `esp32s3_client` | CLIENT only (no BT Classic) |
+| `esp32wrover` | ESP32 WROVER-E + MAX98357A | COM20 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 (COM12, COM20, COM23 before) |
+| `esp32wrover2` | ESP32 WROVER-E + PCM5102 + TPA3116 | COM22 | `esp32_classic` | Same binary, second name so a phone can tell the two apart. COM13, COM19, COM21, COM11 before: a CH340 is numbered by USB socket, so check the MAC |
+| `esp32s3`     | ESP32-S3 + MAX98357A (since 2026-09-30) | COM9 | `esp32s3_client` | CLIENT only (no BT Classic). Plug its native USB port: on the CH343 port it flashes but prints nothing |
 | `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
 
 Ports confirmed with `pio device list` and `esptool chip_id` (2026-08-19; the

@@ -155,12 +155,13 @@ stream open for 2–3 s after the last sound, so retry until it answers
 
 **Listening to the mesh path instead.** The same tone, but heard from a
 *client* of the server: `m` mutes the server's own speaker, and `--client`
-prints the client's counters for the recorded seconds — `lost`, `rec` (blocks
-only the repeat copy saved) and the lengths of the lost runs:
+prints the client's counters for the recorded seconds — `lost` (holes left),
+`rec` (blocks rebuilt from the next packet) and the lengths of the lost runs.
+Repeat `--client` for every client; the mic hears whichever are not muted:
 
 ```
-python tools/btlisten/ser.py COM23 m
-python tools/btlisten/listen.py --serial COM23 --client COM11 --level -30 --label mesh
+python tools/btlisten/ser.py COM20 m
+python tools/btlisten/listen.py --serial COM20 --client COM22 --client COM9 --level -30 --label mesh
 ```
 
 A server that reboots or is reflashed drops the Bluetooth link; `k` gets it
@@ -169,7 +170,7 @@ as it would a headset. Then set the volume, because a board that dialled in
 starts at 1 of 127 and forwards a stream too quiet to hear:
 
 ```
-python tools/btlisten/ser.py COM23 "kaa:bb:cc:dd:ee:ff
+python tools/btlisten/ser.py COM20 "kaa:bb:cc:dd:ee:ff
 V40
 " 8
 ```

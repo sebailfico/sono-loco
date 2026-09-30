@@ -25,6 +25,8 @@ starts and printed at the end, so each recording comes with the board's own
 view of the same seconds. --pre sends commands first: `f` toggles forwarding
 to the mesh, `w` stops WiFi until reboot. --at 3.5:j sends one mid-playback:
 `j` plays the connect jingle as a connection would, `J` the old unguarded way.
+--client COMn (repeatable) prints each mesh client's counters for the same
+seconds: lost, rec, and the lengths of the lost runs.
 
 Recordings go to logs/listen-<time>[-label].wav, with a plot of 250 ms of the
 tone beside it. Needs numpy, scipy, sounddevice, pyserial and matplotlib; see
@@ -195,8 +197,9 @@ def main():
     ap.add_argument('--device', default='SonoLoco', help='output endpoint name (substring)')
     ap.add_argument('--mic', default='Microphone', help='input endpoint name (substring)')
     ap.add_argument('--serial', metavar='COMn', help="the node's port, for its A2DP window")
-    ap.add_argument('--client', metavar='COMn',
-                    help="a mesh client's port: its counters before and after, for the mesh path")
+    ap.add_argument('--client', metavar='COMn', action='append', default=[],
+                    help="a mesh client's port: its counters before and after, for the "
+                         "mesh path. Repeat it for every client")
     ap.add_argument('--pre', default='', help='serial commands to send first, e.g. f')
     ap.add_argument('--at', action='append', default=[], metavar='SEC:CMD',
                     help='send CMD over serial SEC seconds into playback, e.g. 3.5:j')
@@ -221,13 +224,14 @@ def main():
         sp = ser.open_port(a.serial)
         if a.pre:
             ser.talk(sp, a.pre, 0.5)
-    cp = None
+    clients = []                                # (port, serial, counters before)
     if a.client:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import ser
-        cp = ser.open_port(a.client)
-        c0 = client_counters(ser, cp)
-        ser.talk(cp, 'l', 0.3, show=False)      # reset the loss-run histogram
+        for port in a.client:
+            cp = ser.open_port(port)
+            clients.append((port, cp, client_counters(ser, cp)))
+            ser.talk(cp, 'l', 0.3, show=False)  # reset the loss-run histogram
     print(f'{datetime.datetime.now():%H:%M:%S} playing {len(sig) / fs_out:.1f} s '
           f'to {a.device!r} at {a.level:.0f} dBFS')
     # The board's window is reset as late as possible, right as playback opens;
@@ -242,15 +246,17 @@ def main():
         sp.reset_input_buffer()
         ser.talk(sp, 'a', 0.6)
         sp.close()
-    if cp:
+    for port, cp, c0 in clients:
         c1 = client_counters(ser, cp)
         runs = [l for l in ser.talk(cp, 'l', 0.3, show=False) if l.startswith('[LOSS]')]
         cp.close()
         if c0 and c1:
-            print('client ' + ' '.join(f'{k}=+{int(c1.get(k, 0)) - int(c0.get(k, 0))}' for k in CLIENT_KEYS)
+            print(f'client {port} ' + ' '.join(f'{k}=+{int(c1.get(k, 0)) - int(c0.get(k, 0))}' for k in CLIENT_KEYS)
                   + f" jit={c1['jit']} mode={c1['mode']}")
             if runs:
-                print('client ' + runs[0].split(' runs=')[-1].join(['lost runs of 1..7,8+ = ', '']))
+                print(f'client {port} ' + runs[0].split(' runs=')[-1].join(['lost runs of 1..7,8+ = ', '']))
+        else:
+            print(f'client {port}: no [BENCH] line -- not a client, or not answering')
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     base = os.path.join(ROOT, 'logs', f'listen-{stamp}' + (f'-{a.label}' if a.label else ''))
     os.makedirs(os.path.dirname(base), exist_ok=True)
