@@ -118,6 +118,10 @@ def main():
     # und, ovf and dry are running totals on the server; gapmax is per window.
     out(f'{a.server} (server): und=+{dd("und")} dry=+{dd("dry")} ovf=+{dd("ovf")} '
         f'gapmax={gap:.1f}ms (worst 10 s window)')
+    for p in a.node:   # reset at the start; late = copies that came after their silence played
+        for l in ser.talk(sps[p], 'l', 0.4, show=False):
+            if l.startswith('[LOSS]'):
+                out(f'{p} ' + l.split(' ', 1)[1].replace('runs=', 'lost runs 1..7,8+ = '))
     out(f'log: {os.path.relpath(path, listen.ROOT)}')
     for sp in sps.values():
         sp.close()

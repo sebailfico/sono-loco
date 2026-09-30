@@ -384,6 +384,11 @@
 // against a 1 s filter on an error that has no packet jitter left in it.
 #define SYNC_DEADBAND_US      200
 #define SYNC_KP               0.05f
+// Twice DRIFT_MAX_RATE: a client has to follow every correction the server's
+// own level controller makes (each moves the whole schedule) plus its own
+// crystal against the server's, so its authority must exceed the server's.
+// 20/s is 454 ppm; in steady state it uses a few per second.
+#define SYNC_MAX_RATE         20.0f
 #define SYNC_EMA_TAU_MS       1000.0f
 #define SYNC_SETTLE_MS        1000
 
@@ -424,6 +429,16 @@
 // steer by.
 #define DRIFT_TARGET_BYTES      (JITTER_PREFILL - CLIENT_DMA_CAPACITY_BYTES)
 #define DRIFT_TARGET_CEIL_BYTES (JITTER_PREFILL - CLIENT_DMA_CAPACITY_BYTES / 2)
+
+// The Bluetooth server's own level controller (D14) has a floor one A2DP
+// packet lower: its ring is fed a whole packet at a time -- 4 KB from Windows
+// every 23 ms, with gaps to 50 ms -- so its level runs up to a packet below a
+// client's. With the client's floor, 600 s behind the PC on 2026-09-30, the
+// server's measured level came out ~2 KB under it, the clamp raised its
+// target, and it inserted at DRIFT_MAX_RATE for half a minute -- 300 inserts,
+// each moving every client's schedule 23 us later, faster than they could
+// follow: -2 ms and a jump on each.
+#define SERVER_TARGET_BYTES     (DRIFT_TARGET_BYTES - 4096)
 
 // How long after playback arms before corrections may start, ms.
 //

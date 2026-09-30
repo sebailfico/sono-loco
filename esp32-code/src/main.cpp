@@ -656,6 +656,9 @@ static BlockStore   rxStore;
 // same boards with it on and off -- the before/after is the only evidence that
 // it does anything, and D9's reasoning applies: test the binary that ships.
 static DriftController driftCtl;
+// The same, on a Bluetooth server's own ring, which is fed a packet at a time
+// and so runs lower (SERVER_TARGET_BYTES). levelCtl() is whichever applies.
+static DriftController srvCtl;
 static bool            driftEnabled = true;
 
 static volatile bool jReady   = false;   // true once prefill threshold is met
@@ -677,6 +680,11 @@ static volatile uint32_t outDry    = 0;  // the DMA ran dry under a playing ring
 static const int SYNC_FILL_BASE = 65536;
 static inline int syncUsToBytes(int32_t us) {
     return (int)((int64_t)us * (CLIENT_SAMPLE_RATE * CLIENT_FRAME_BYTES) / 1000000LL);
+}
+
+/** The level controller for this node's ring: a server's own, or a client's. */
+static inline DriftController &levelCtl() {
+    return currentMode == MODE_SERVER ? srvCtl : driftCtl;
 }
 static volatile bool rxActive = false;   // set by recv callback, triggers mode switch
 static volatile unsigned long lastRxMs = 0;
@@ -1529,7 +1537,7 @@ static bool outArm(unsigned long nowMs) {
     }
 
     jReady = true;
-    driftCtl.reset(nowMs);
+    levelCtl().reset(nowMs);
     LOG_INFO("Ring ready (" + String(jbuf.fill()) + " bytes) — starting I2S" +
              (master ? ", setting the schedule" : outSynced ? ", on the server's schedule" : ""));
     return true;
@@ -1568,7 +1576,7 @@ static void driveRingI2S() {
         schedInvalidate();
         // The refill that follows is not drift. Integrating it would provoke a
         // burst of corrections on top of a buffer that is already unhappy.
-        driftCtl.reset(nowMs);
+        levelCtl().reset(nowMs);
         return;
     }
 
@@ -1592,7 +1600,7 @@ static void driveRingI2S() {
             (long)(nowMs - rxStampedMs) < (long)SYNC_MAX_AGE_MS)) {
         // The stamps stopped: carry on at depth, as a client of an older server.
         outSynced = false;
-        driftCtl.reset(nowMs);
+        levelCtl().reset(nowMs);
     }
 
     // Too far off to steer: something moved the schedule by more than a
@@ -1620,10 +1628,10 @@ static void driveRingI2S() {
         if (outSynced) {
             if (haveErr) corr = syncCtl.update(nowMs, SYNC_FILL_BASE + syncUsToBytes(syncErr));
         } else {
-            corr = driftCtl.update(nowMs, jbuf.fill());
+            corr = levelCtl().update(nowMs, jbuf.fill());
         }
     }
-    DriftController &ctl = outSynced ? syncCtl : driftCtl;
+    DriftController &ctl = outSynced ? syncCtl : levelCtl();
 
     // After the peek, so what is consumed is untouched: these change only what
     // this node's speaker hears, never the timing or the drift loop.
@@ -1690,6 +1698,7 @@ static void resetPlayState() {
     rxStore.clear();
     seqTracker.reset();
     driftCtl.reset(millis());
+    srvCtl.reset(millis());
     syncCtl.reset(millis());
     portENTER_CRITICAL(&timelineMux);
     timeline.clear();
@@ -2170,16 +2179,16 @@ static void benchReport() {
         driftEnabled ? 1 : 0,
         // Both controllers' edits: a client on the server's schedule corrects
         // the same drift, steering on time instead of depth.
-        (unsigned long)(driftCtl.inserted + syncCtl.inserted),
-        (unsigned long)(driftCtl.dropped + syncCtl.dropped),
+        (unsigned long)(driftCtl.inserted + srvCtl.inserted + syncCtl.inserted),
+        (unsigned long)(driftCtl.dropped + srvCtl.dropped + syncCtl.dropped),
         // Corrections per second the controller is currently asking for. Once
         // the loop is closed this is the only in-band measure of drift left:
         // a corrected buffer no longer has a slope to regress.
-        outSynced ? syncCtl.rate() : driftCtl.rate(),
+        outSynced ? syncCtl.rate() : levelCtl().rate(),
         // The level being steered to. It is measured after the settle window
         // rather than computed, so recording it is the only way to tell a
         // correctly calibrated client from one steering at the wrong depth.
-        driftCtl.target(),
+        levelCtl().target(),
         // Age of the last received packet, as the silence check sees it. Signed
         // and printed even when it is meaningless (a source has no rx), because
         // a value that goes *negative* or jumps is the evidence that the check
@@ -2304,6 +2313,7 @@ static void benchServiceSerial() {
                 // correction off and on without reflashing between them.
                 driftEnabled = !driftEnabled;
                 driftCtl.reset(millis());
+                srvCtl.reset(millis());
                 DEBUG_SERIAL.printf("[BENCH] drift=%d\n", driftEnabled ? 1 : 0);
                 break;
             case 's': benchStartSource(); break;
@@ -2571,6 +2581,8 @@ void setup() {
     // begin() here and reset() everywhere else: the correction counters have to
     // outlive a mode change, or a bench run cannot total them.
     driftCtl.begin(dcfg, millis());
+    dcfg.targetBytes = SERVER_TARGET_BYTES;   // fed a packet at a time: runs lower
+    srvCtl.begin(dcfg, millis());
 
     // The same controller steering on time: the error from the server's
     // schedule, in bytes, over a fixed target. See SYNC_KP.
@@ -2579,7 +2591,7 @@ void setup() {
     scfg.targetCeilBytes = SYNC_FILL_BASE;   // fixed: nothing to measure
     scfg.deadbandBytes   = syncUsToBytes(SYNC_DEADBAND_US);
     scfg.kp              = SYNC_KP;
-    scfg.maxRatePerSec   = DRIFT_MAX_RATE;
+    scfg.maxRatePerSec   = SYNC_MAX_RATE;
     scfg.emaTauMs        = SYNC_EMA_TAU_MS;
     scfg.settleMs        = SYNC_SETTLE_MS;
     syncCtl.begin(scfg, millis());
@@ -2754,6 +2766,9 @@ void loop() {
                      " jitter=" + String(jbuf.fill()) + "B" +
                      " und=" + String(rxUnderrun) +
                      " dry=" + String(outDry) +
+                     " tgt=" + String(srvCtl.target()) +
+                     " ins=" + String(srvCtl.inserted) +
+                     " drp=" + String(srvCtl.dropped) +
                      " qfull=" + String(txQueueFull) +
                      " senderr=" + String(txSendErr) +
                      " radiofail=" + String(txRadioFail));
