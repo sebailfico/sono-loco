@@ -41,6 +41,7 @@
 #include "jitter.h"
 #include "mesh.h"
 #include "seqtracker.h"
+#include "sync.h"
 
 #ifdef ENABLE_BLUETOOTH
 #include "BluetoothA2DPSink.h"
@@ -236,6 +237,13 @@ static void meshAdoptId(uint16_t id) {
 // I2S write helper
 // ============================================================================
 
+// Frames written to the output driver since it was installed -- tones, silence
+// and audio alike, because the driver fills its DMA buffers in exactly the
+// order they were written, and the output clock (lib/sync) reads its position
+// from this count. Reset by initI2SOutput().
+static uint32_t     outFrames = 0;
+static PlayoutClock outClock;
+
 /**
  * i2s_write() is allowed to accept FEWER bytes than requested — it returns what
  * it actually queued in `bytes_written` and that is frequently less than the
@@ -254,6 +262,7 @@ static size_t i2sWriteAll(const void *src, size_t bytes, TickType_t timeout) {
         if (bw == 0) break;   // DMA not draining — bail rather than spin forever
         done += bw;
     }
+    outFrames += done / 4;
     return done;
 }
 
@@ -361,7 +370,7 @@ void deinitI2SForTones() {
 // ESP-NOW — shared by all nodes
 // ============================================================================
 
-#define ESPNOW_HEADER_SIZE 6   // group (2) + seq (2) + len (2)
+#define ESPNOW_HEADER_SIZE 8   // group (2) + seq (2) + len (2) + due (2)
 
 // `group` is first because it is the field that decides whether the rest is
 // even ours to look at -- a receiver rejects a neighbour's packet having read
@@ -373,12 +382,22 @@ void deinitI2SForTones() {
 // `seq - 1` and `seq - distance`. `len` says how many bytes are there -- the
 // first packets of a stream have nothing older to carry -- and, in its upper
 // bits, the distance, the mode and whether this is a repeat.
+//
+// `due` is when block `seq` plays on the sender's own speaker, counted from the
+// moment this frame was handed to the radio, in MESH_DUE_UNIT_US steps; stamped
+// in the transmit task, so a repeat copy carries its own. A client adds it to
+// the time it received the frame and has the sender's play time on its own
+// clock -- see lib/sync. MESH_DUE_NONE while the sender is not playing on a
+// schedule yet (its own output still filling), and on beacons.
 typedef struct __attribute__((packed)) {
     uint16_t group;
     uint16_t seq;
     uint16_t len;
+    uint16_t due;
     uint8_t  data[ESPNOW_PAYLOAD_SIZE];
-} AudioPacket;  // 246 bytes total, under the 250-byte ESP-NOW limit
+} AudioPacket;  // 248 bytes total, under the 250-byte ESP-NOW limit
+
+#define MESH_DUE_NONE  0xFFFF
 
 static_assert(ESPNOW_HEADER_SIZE + ESPNOW_PAYLOAD_SIZE <= 250,
               "ESP-NOW cannot send more than 250 bytes per frame");
@@ -418,14 +437,62 @@ static_assert(MESH_REDUNDANCY_DISTANCE < MESH_TX_HISTORY, "the distance must be 
 // playing is the sign of a node left on the old firmware. Change it whenever
 // the payload changes meaning. XOR is its own inverse, so one helper both
 // stamps and reads. 0xAD01 was ADPCM with the previous block; 0xAD02 carried
-// the distance in `len`; 0xAD03 adds the parity mode, which a 0xAD02 client
-// would play as audio.
-#define MESH_WIRE_FORMAT   0xAD03
+// the distance in `len`; 0xAD03 added the parity mode, which a 0xAD02 client
+// would play as audio; 0xAD04 adds `due`, which moves the payload two bytes.
+#define MESH_WIRE_FORMAT   0xAD04
 static inline uint16_t wireGroup(uint16_t id) { return id ^ MESH_WIRE_FORMAT; }
 
 static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
+// --- Playing in time: when this node plays what (lib/sync) ---
+//
+// Written by whatever drives this node's speaker -- the ring's reader in
+// loop(), or the bench source's own clock -- and read by the transmit task,
+// which turns it into each packet's `due`. A frame index and a time that must
+// be read as a pair, and two tasks on two cores: hence the lock rather than a
+// pair of volatiles.
+//
+// The frame index is in ring numbering (ringPushed below): on a server, the
+// frames of the A2DP stream as they went into its own ring; on a bench source,
+// the frames it has generated.
+static portMUX_TYPE schedMux   = portMUX_INITIALIZER_UNLOCKED;
+static bool         schedValid = false;
+static uint32_t     schedFrame = 0;
+static uint32_t     schedUs    = 0;
+
+static void schedPublish(uint32_t frame, uint32_t us) {
+    portENTER_CRITICAL(&schedMux);
+    schedFrame = frame;
+    schedUs    = us;
+    schedValid = true;
+    portEXIT_CRITICAL(&schedMux);
+}
+
+static void schedInvalidate() {
+    portENTER_CRITICAL(&schedMux);
+    schedValid = false;
+    portEXIT_CRITICAL(&schedMux);
+}
+
+/** When ring frame `frame` plays on this node, if it is playing on a schedule. */
+static bool schedPlayUs(uint32_t frame, uint32_t *us) {
+    portENTER_CRITICAL(&schedMux);
+    const bool     ok = schedValid;
+    const uint32_t f0 = schedFrame, t0 = schedUs;
+    portEXIT_CRITICAL(&schedMux);
+    if (ok) *us = t0 + (uint32_t)syncFramesToUs((int32_t)(frame - f0), CLIENT_SAMPLE_RATE);
+    return ok;
+}
+
 // --- TX (SERVER mode) ---
+// A queued packet, and the ring frame its block starts at: `due` is worked out
+// from that as the packet leaves, not when it was queued, because only then is
+// the time it spent waiting for the radio known.
+typedef struct {
+    AudioPacket pkt;
+    uint32_t    first;
+} TxItem;
+
 static QueueHandle_t     txQueue      = nullptr;
 static SemaphoreHandle_t txDone       = nullptr;   // radio is free for the next frame
 static uint16_t          txSeq        = 0;
@@ -473,21 +540,30 @@ static uint8_t            txHistory[MESH_TX_HISTORY][MESH_BLOCK_BYTES];   // by 
 static uint16_t           txHistoryBlocks = 0;   // blocks since meshTxReset, saturating
 static volatile uint8_t   txDistance      = MESH_REDUNDANCY_DISTANCE;
 static volatile bool      txParity        = MESH_REDUNDANCY_PARITY;
+// The ring frame the block being encoded starts at, and how far into it we are.
+static uint32_t           txBlockFirst    = 0;
+static uint32_t           txBlockFrames   = 0;
 
 /** Start a new stream: no state carried over, and no older block to send. */
 static void meshTxReset() {
     txEncoder.reset();
     txHistoryBlocks = 0;
+    txBlockFrames   = 0;
 }
 
 /**
- * Add one stereo frame to the outgoing stream. Returns true when it completed
- * a packet, which has then been queued (or counted as `qfull`).
+ * Add one stereo frame to the outgoing stream; `frame` is its index in this
+ * node's ring numbering (see schedPlayUs). Returns true when it completed a
+ * packet, which has then been queued (or counted as `qfull`).
  */
-static bool meshTxFrame(int16_t left, int16_t right) {
+static bool meshTxFrame(int16_t left, int16_t right, uint32_t frame) {
+    if (txBlockFrames++ == 0) txBlockFirst = frame;
     if (!txEncoder.push(left, right)) return false;
+    txBlockFrames = 0;
 
-    AudioPacket pkt;
+    TxItem item;
+    item.first = txBlockFirst;
+    AudioPacket &pkt = item.pkt;
     pkt.group = wireGroup(meshId);
     pkt.seq   = txSeq++;
     memcpy(pkt.data, txEncoder.block(), MESH_BLOCK_BYTES);
@@ -509,7 +585,7 @@ static bool meshTxFrame(int16_t left, int16_t right) {
     memcpy(txHistory[pkt.seq & (MESH_TX_HISTORY - 1)], txEncoder.block(), MESH_BLOCK_BYTES);
     if (txHistoryBlocks < 0xFFFF) txHistoryBlocks++;
 
-    if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
+    if (xQueueSend(txQueue, &item, 0) != pdTRUE) txQueueFull++;
     return true;
 }
 
@@ -542,6 +618,31 @@ static_assert(MESH_BLOCK_FRAMES * CLIENT_FRAME_BYTES < JITTER_BUF_SIZE / 4,
 // PSRAM -- 8 KB then, and it is 32 KB now.
 static uint8_t     *jStorage = nullptr;
 static JitterBuffer jbuf;
+
+// The ring's two ends in frames, counted since boot and never reset, so that a
+// frame keeps one index for its whole life in the ring: its ringPushed at the
+// moment it went in. ringPushed is advanced only by the producer (the receive
+// callback, or a server's A2DP callback), ringConsumed only by loop() --
+// played, dropped, or discarded all count. The schedule (schedPlayUs) and the
+// server's timeline are both in this numbering.
+static volatile uint32_t ringPushed   = 0;
+static uint32_t          ringConsumed = 0;
+
+/** Empty the ring. The producer must not be running, as for jbuf.reset(). */
+static void ringReset() {
+    jbuf.reset();
+    ringConsumed = ringPushed;
+}
+
+// The server's schedule as the stamps describe it (lib/sync): add() from the
+// receive callback, harvest() from loop(), one lock between them.
+static portMUX_TYPE      timelineMux   = portMUX_INITIALIZER_UNLOCKED;
+static ServerTimeline    timeline;
+// Set by the receive callback when the ring's numbering stops matching the
+// stream -- a resync, a gap longer than the silence it was given, an overflow
+// -- so the next harvest forgets the line instead of steering by it.
+static volatile bool     timelineFlush = false;
+static volatile uint32_t rxStampedMs   = 0;   // the last packet carrying a `due`
 static SeqTracker   seqTracker(SEQ_RESYNC_THRESHOLD, MAX_GAP_FILL_PKTS);
 // Where each lost block's silence went, for the later packet that carries it,
 // and the encoded blocks held, for undoing a parity. Both keyed by seq:
@@ -550,7 +651,7 @@ static HoleTable    rxHoles;
 static uint8_t      rxStoreBuf[BlockStore::SLOTS * MESH_BLOCK_BYTES];
 static BlockStore   rxStore;
 
-// Clock-drift correction. The controller only decides; driveClientI2S applies.
+// Clock-drift correction. The controller only decides; driveRingI2S applies.
 // Runtime-switchable rather than compile-time so a bench run can measure the
 // same boards with it on and off -- the before/after is the only evidence that
 // it does anything, and D9's reasoning applies: test the binary that ships.
@@ -558,6 +659,25 @@ static DriftController driftCtl;
 static bool            driftEnabled = true;
 
 static volatile bool jReady   = false;   // true once prefill threshold is met
+
+// Playing on the server's schedule (lib/sync): steering on the error between
+// when this node plays a frame and when the server does, rather than on the
+// ring's depth. syncCtl is the drift controller with a fixed target, handed
+// that error as if it were a fill; driftCtl stays the level controller for a
+// server, and for a client whose server sends no stamps.
+static bool            outSynced  = false;
+static DriftController syncCtl;
+static volatile int32_t syncErrUs = 0;   // the last error, + = this node late (`se=`)
+static volatile uint32_t syncJumps = 0;  // realignments beyond SYNC_JUMP_US (`sjmp=`)
+static volatile uint32_t outDry    = 0;  // the DMA ran dry under a playing ring (`dry=`)
+
+// syncCtl works in bytes of fill, like driftCtl. Its target is this, fixed,
+// and a timing error is handed to it as a fill that much above or below:
+// any positive number clear of the error's range will do.
+static const int SYNC_FILL_BASE = 65536;
+static inline int syncUsToBytes(int32_t us) {
+    return (int)((int64_t)us * (CLIENT_SAMPLE_RATE * CLIENT_FRAME_BYTES) / 1000000LL);
+}
 static volatile bool rxActive = false;   // set by recv callback, triggers mode switch
 static volatile unsigned long lastRxMs = 0;
 static volatile uint32_t rxCount    = 0;
@@ -582,11 +702,26 @@ static volatile uint32_t rxLate = 0;
 static uint8_t          lockedSender[6] = {0};
 static volatile bool    senderLocked    = false;
 
+/**
+ * How long from now until ring frame `first` plays on this node, in the units
+ * `due` travels in -- or MESH_DUE_NONE if this node is not playing on a
+ * schedule, or the frame has already played (a packet that waited that long
+ * for the radio says nothing a client could use).
+ */
+static uint16_t meshDue(uint32_t first) {
+    uint32_t playUs;
+    if (!schedPlayUs(first, &playUs)) return MESH_DUE_NONE;
+    const int32_t ahead = (int32_t)(playUs - (uint32_t)micros());
+    if (ahead < 0 || ahead >= (int32_t)MESH_DUE_NONE * MESH_DUE_UNIT_US) return MESH_DUE_NONE;
+    return (uint16_t)(ahead / MESH_DUE_UNIT_US);
+}
+
 static void espnowTxTask(void *) {
-    AudioPacket pkt;
+    TxItem item;
+    AudioPacket &pkt = item.pkt;
     uint32_t lastAudioUs = 0;
     while (true) {
-        if (xQueueReceive(txQueue, &pkt, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(txQueue, &item, portMAX_DELAY) != pdTRUE) continue;
 
         if (pkt.len && txPaceUs && txPaceTimer &&
             uxQueueMessagesWaiting(txQueue) < ESPNOW_TX_PACE_BACKLOG) {
@@ -606,6 +741,9 @@ static void espnowTxTask(void *) {
             // ESP_ERR_ESPNOW_NO_MEM and drops audio without any indication.
             xSemaphoreTake(txDone, pdMS_TO_TICKS(50));
 
+            // The last moment before the radio: whatever the frame waits from
+            // here on is transit, which the client's minimum takes out.
+            pkt.due = pkt.len ? meshDue(item.first) : MESH_DUE_NONE;
             txStartUs = micros();
             esp_err_t err = esp_now_send(BROADCAST_ADDR, (uint8_t *)&pkt,
                                          ESPNOW_HEADER_SIZE + (pkt.len & ESPNOW_LEN_BYTES));
@@ -636,6 +774,9 @@ static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, i
 #else
 static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
 #endif
+    // First, before anything can delay it: `due` counts from the send, and
+    // everything between the air and this line is added to the transit.
+    const uint32_t rxUs = micros();
     if (len < ESPNOW_HEADER_SIZE) return;
 
     // A SERVER is the source, not a listener. Bailing before the lock below
@@ -645,10 +786,11 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
 
     // The received buffer has no alignment guarantee; copy the header out
     // instead of casting to a struct pointer.
-    uint16_t group, seq, plen;
+    uint16_t group, seq, plen, due;
     memcpy(&group, data,     2);
     memcpy(&seq,   data + 2, 2);
     memcpy(&plen,  data + 4, 2);
+    memcpy(&due,   data + 6, 2);
     const bool     repeat = (plen & ESPNOW_LEN_REPEAT) != 0;
     const bool     parity = (plen & ESPNOW_LEN_XOR) != 0;
     const uint16_t dist   = (plen >> ESPNOW_LEN_DIST_SHIFT) & ESPNOW_LEN_DIST_MAX;
@@ -698,7 +840,11 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
         (int)plen > len - ESPNOW_HEADER_SIZE) return;
     const uint8_t *payload = data + ESPNOW_HEADER_SIZE;
 
-    lastRxMs = millis();
+    // A stream that paused and resumed carries on in sequence, but the server
+    // re-armed its own output in between: the old line says nothing now.
+    const unsigned long nowMs = millis();
+    if (lastRxMs && (long)(nowMs - lastRxMs) > (long)SYNC_STREAM_GAP_MS) timelineFlush = true;
+    lastRxMs = nowMs;
 
     if (currentMode == MODE_DISCOVERY) {
         rxCount++;
@@ -717,6 +863,7 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     if (seqTracker.resync != resyncBefore) {   // numbering restarted
         rxHoles.clear();
         rxStore.clear();
+        timelineFlush = true;
     }
     // Blocks, not frames: with every frame sent twice, counting frames would
     // make rx twice the source's tx and halve every loss percentage.
@@ -729,18 +876,41 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     // its timing instead of splicing the stream shorter on every loss -- and
     // each block's place is remembered, for the packet that carries it later.
     static const int BLOCK_PCM = MESH_BLOCK_FRAMES * CLIENT_FRAME_BYTES;
+    const uint32_t ovfBefore = rxOverflow;
     for (int i = sr.fillPackets; i > 0; i--) {
         const int pos = jbuf.writePos();
-        if (jbuf.pushSilence(BLOCK_PCM)) rxHoles.add((uint16_t)(seq - i), pos);
-        else rxOverflow++;
+        if (jbuf.pushSilence(BLOCK_PCM)) {
+            rxHoles.add((uint16_t)(seq - i), pos);
+            ringPushed += MESH_BLOCK_FRAMES;
+        } else {
+            rxOverflow++;
+        }
     }
+    // A gap longer than the silence it was given: the ring is now shorter than
+    // the stream, and the server's timeline in ring frames has moved.
+    if (run > (uint32_t)sr.fillPackets) timelineFlush = true;
 
     // Static: this is the WiFi task's stack, and it is not ours to spend.
     static int16_t pcm[2 * MESH_BLOCK_FRAMES];
+    const uint32_t first = ringPushed;
+    bool pushed;
     if (adpcmDecodeStereoBlock(payload, MESH_BLOCK_FRAMES, pcm)) {
-        if (!jbuf.pushBlock((const uint8_t *)pcm, BLOCK_PCM)) rxOverflow++;
-    } else if (!jbuf.pushSilence(BLOCK_PCM)) {
-        rxOverflow++;
+        pushed = jbuf.pushBlock((const uint8_t *)pcm, BLOCK_PCM);
+    } else {
+        pushed = jbuf.pushSilence(BLOCK_PCM);
+    }
+    if (pushed) ringPushed += MESH_BLOCK_FRAMES;
+    else        rxOverflow++;
+    if (rxOverflow != ovfBefore) timelineFlush = true;   // frames missing from the ring
+
+    // When the server plays this block, on this node's clock -- late by this
+    // frame's transit beyond the fastest, which the timeline's minimum removes.
+    if (pushed && due != MESH_DUE_NONE) {
+        const uint32_t at = rxUs + (uint32_t)due * MESH_DUE_UNIT_US - MESH_TRANSIT_MIN_US;
+        portENTER_CRITICAL(&timelineMux);
+        timeline.add(first, at);
+        portEXIT_CRITICAL(&timelineMux);
+        rxStampedMs = millis();
     }
 
     rxStore.put(seq, payload);
@@ -898,7 +1068,7 @@ static void setupESPNow() {
         if (esp_timer_create(&pa, &txPaceTimer) != ESP_OK) txPaceTimer = nullptr;
     }
 
-    txQueue = xQueueCreate(ESPNOW_TX_QUEUE_DEPTH, sizeof(AudioPacket));
+    txQueue = xQueueCreate(ESPNOW_TX_QUEUE_DEPTH, sizeof(TxItem));
     if (!txQueue) {
         LOG_ERROR("TX queue alloc failed");
         return;
@@ -935,96 +1105,56 @@ static bool   btSinkStarted     = false;
 // without the mesh's transmissions competing for the radio.
 static volatile bool a2dpForward = true;
 
-// How the Bluetooth task spends its time, as seen from the two hooks the
-// library gives us: the stream reader runs after a packet is decoded and
-// before the library's blocking i2s_write(), data_received runs after it.
+// The server's own speaker plays from its own ring, as a client's does: the
+// A2DP callback pushes every packet into it, and loop() plays it through
+// driveRingI2S. Set once enterServer() has emptied the ring and installed the
+// driver, cleared before either is torn down -- the callback is the ring's
+// producer, and nothing may reset a ring its producer is writing.
 //
-//   write = data_received - end of our callback: time blocked in i2s_write()
-//   idle  = our callback - previous data_received: waiting for and decoding
-//           the next packet
-//   gap   = end of our callback - previous data_received: idle plus the
-//           forwarding in our callback, i.e. everything between one
-//           i2s_write() and the next
-//
-// i2s_write() returns once the packet's tail fits in the DMA ring, so -- as
-// long as writes block, which `nb` checks -- the ring is full at that moment
-// and holds serverDmaMs() of audio. A gap longer than that is a stretch in
-// which the DMA ran dry and played zeros (the library sets
-// tx_desc_auto_clear) -- an audible hole, counted as `late`.
-//
-// Writes only block if the ring is already full. With the library's 11.6 ms
-// ring that is automatic: a 23.2 ms packet cannot fit. A ring deeper than a
-// packet stays full only if something filled it, which is what
-// serverPrefill() does at the start of every stream; `nb` counts writes that
-// returned without blocking, i.e. moments the ring was not full.
-// The first version of this histogram measured idle alone, and with
-// forwarding on the callback's own 5 ms went uncounted. Printed and reset by
-// `a`.
+// Until 2026-09-30 the A2DP library wrote I2S itself, through a 46 ms DMA
+// ring, while clients played through a 91 ms prefill: measured with a
+// microphone, the S3 44-51 ms behind the server, a plain echo between rooms.
+// A server that plays through the same path as its clients can tell them
+// exactly when it plays each block (`due`), and has a buffer as deep as
+// theirs against Bluetooth's own pauses. See D14.
+static volatile bool loopbackOn = false;
+
+// How the Bluetooth task delivers audio, as seen from the stream reader: once
+// per decoded packet, after the library's volume. `gap` is the time between
+// two callbacks -- the Bluetooth stack's own jitter, which the ring has to
+// ride out -- and `cb` how long our callback took (the forwarding). Printed
+// and reset by `a`.
 static volatile uint32_t a2dpPackets    = 0;
 static volatile uint32_t a2dpBytes      = 0;
 static volatile uint32_t a2dpPktMin     = UINT32_MAX;
 static volatile uint32_t a2dpPktMax     = 0;
-static volatile uint32_t a2dpIdleMaxUs  = 0;
 static volatile uint32_t a2dpGapMaxUs   = 0;
-static volatile uint32_t a2dpWriteMaxUs = 0;
 static volatile uint32_t a2dpCbMaxUs    = 0;
-static volatile uint32_t a2dpLate       = 0;
-static volatile uint32_t a2dpNoBlock    = 0;
-static volatile bool     a2dpPrefill    = false;
-static volatile bool     jingleActive   = false;   // see playJingleOverA2DP()
 static volatile uint32_t a2dpGapHist[8];   // 5 ms buckets, last one open-ended
-static uint32_t          a2dpCbEndUs    = 0;
-static uint32_t          a2dpWriteEndUs = 0;
+static uint32_t          a2dpLastUs     = 0;
 static unsigned long     a2dpWindowMs   = 0;
 
-// The DMA ring the library's I2S driver was installed with. SERVER_DMA_BUF_LEN
-// at boot; `q<frames>` reinstalls it between streams, so one Bluetooth session
-// can compare two depths without a reflash and a reconnect in between.
-static int serverDmaLen = SERVER_DMA_BUF_LEN;
-
-static float serverDmaMs() {
-    return SERVER_DMA_BUF_COUNT * serverDmaLen * 1000.0f / BT_SAMPLE_RATE;
-}
-
-// The library's own default config (BluetoothA2DPOutputLegacy) with only the
-// DMA ring changed. The sample rate is overwritten on codec configuration.
-static i2s_config_t serverI2SConfig(int dmaLen) {
-    i2s_config_t cfg = {};
-    cfg.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
-    cfg.sample_rate          = BT_SAMPLE_RATE;
-    cfg.bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT;
-    cfg.channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT;
-    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-    cfg.intr_alloc_flags     = 0;
-    cfg.dma_buf_count        = SERVER_DMA_BUF_COUNT;
-    cfg.dma_buf_len          = dmaLen;
-    cfg.use_apll             = false;
-    cfg.tx_desc_auto_clear   = true;
-    return cfg;
-}
-
 static void a2dpStatsReset() {
-    a2dpPackets = a2dpBytes = a2dpLate = a2dpNoBlock = 0;
+    a2dpPackets = a2dpBytes = 0;
     a2dpPktMin = UINT32_MAX;
-    a2dpPktMax = a2dpIdleMaxUs = a2dpGapMaxUs = a2dpWriteMaxUs = a2dpCbMaxUs = 0;
+    a2dpPktMax = a2dpGapMaxUs = a2dpCbMaxUs = 0;
     for (auto &h : a2dpGapHist) h = 0;
     for (auto &h : txLatHist) h = 0;
     txLatMaxUs = 0;
-    a2dpWriteEndUs = 0;   // the first packet after a reset has no gap to measure
+    a2dpLastUs = 0;   // the first packet after a reset has no gap to measure
     a2dpWindowMs = millis();
 }
 
 static void a2dpStatsPrint() {
     const float secs = (millis() - a2dpWindowMs) / 1000.0f;
     DEBUG_SERIAL.printf(
-        "[A2DP] win=%.1fs pk=%lu pk/s=%.1f pkB=%lu..%lu ring=%.1fms late=%lu nb=%lu "
-        "gapmax=%.1fms idlemax=%.1fms cbmax=%.2fms writemax=%.1fms fwd=%d wifi=%d "
-        "heap=%lu gap5ms=",
+        "[A2DP] win=%.1fs pk=%lu pk/s=%.1f pkB=%lu..%lu gapmax=%.1fms cbmax=%.2fms "
+        "jit=%d und=%lu ovf=%lu dry=%lu fwd=%d wifi=%d heap=%lu gap5ms=",
         secs, (unsigned long)a2dpPackets, a2dpPackets / secs,
         (unsigned long)(a2dpPackets ? a2dpPktMin : 0), (unsigned long)a2dpPktMax,
-        serverDmaMs(), (unsigned long)a2dpLate, (unsigned long)a2dpNoBlock,
-        a2dpGapMaxUs / 1000.0f, a2dpIdleMaxUs / 1000.0f, a2dpCbMaxUs / 1000.0f,
-        a2dpWriteMaxUs / 1000.0f, a2dpForward ? 1 : 0, espnowActive ? 1 : 0,
+        a2dpGapMaxUs / 1000.0f, a2dpCbMaxUs / 1000.0f,
+        jbuf.fill(), (unsigned long)rxUnderrun, (unsigned long)rxOverflow,
+        (unsigned long)outDry, a2dpForward ? 1 : 0, espnowActive ? 1 : 0,
         (unsigned long)ESP.getFreeHeap());
     for (int i = 0; i < 8; i++)
         DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)a2dpGapHist[i]);
@@ -1037,68 +1167,41 @@ static void a2dpStatsPrint() {
                         outputMuted ? 1 : 0, (unsigned long)txQueueFull);
 }
 
-static void a2dpWriteDone() {
-    const uint32_t now = micros();
-    const uint32_t w = now - a2dpCbEndUs;
-    if (w > a2dpWriteMaxUs) a2dpWriteMaxUs = w;
-    if (w < 1000) a2dpNoBlock++;
-    a2dpWriteEndUs = now;
-}
+static void a2dpForwardPacket(const uint8_t *data, uint32_t length, uint32_t first);
 
-// Fill the whole DMA ring with silence before the first packet of a stream,
-// from the BT task, so the library's writes queue behind a full ring from the
-// start instead of running just in time. Costs the ring's depth in latency,
-// once; see SERVER_DMA_BUF_LEN in config.h.
-static void serverPrefill() {
-    static const uint8_t zeros[256] = {0};
-    int bytes = SERVER_DMA_BUF_COUNT * serverDmaLen * 4;
-    while (bytes > 0) {
-        const size_t n = min(bytes, (int)sizeof(zeros));
-        if (i2sWriteAll(zeros, n, pdMS_TO_TICKS(50)) < n) break;   // I2S not running
-        bytes -= n;
-    }
-}
-
-static void a2dpForwardPacket(const uint8_t *data, uint32_t length);
-
-// Called from BT task, once per decoded packet, before the library writes it
-// to I2S. Accounts for the packet, then forwards it to the mesh.
+// Called from the BT task, once per decoded packet, after the library's
+// volume. Into this node's own ring for its speaker, then to the mesh -- both
+// in the same frame numbering, which is what lets a packet say when its block
+// plays here.
 static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
-    // Not while a jingle owns the ring: the silence would land inside it.
-    // Left pending, it runs on the first packet after the jingle instead.
-    if (a2dpPrefill && !jingleActive) {
-        a2dpPrefill = false;
-        serverPrefill();
-    }
     const uint32_t t0 = micros();
     a2dpPackets++;
     a2dpBytes += length;
     if (length < a2dpPktMin) a2dpPktMin = length;
     if (length > a2dpPktMax) a2dpPktMax = length;
-
-    a2dpForwardPacket(data, length);
-
-    // The library writes this same buffer to I2S once we return, after its
-    // volume and our forward: zeroing it here is volume 0 for this speaker
-    // only. The buffer is the library's own, changed in place as its volume
-    // control changes it; the const is only in the callback's signature.
-    if (outputMuted) memset((void *)data, 0, length);
-
-    a2dpCbEndUs = micros();
-    if (a2dpCbEndUs - t0 > a2dpCbMaxUs) a2dpCbMaxUs = a2dpCbEndUs - t0;
-    if (a2dpWriteEndUs) {
-        const uint32_t idle = t0 - a2dpWriteEndUs;
-        const uint32_t gap  = a2dpCbEndUs - a2dpWriteEndUs;
-        if (idle > a2dpIdleMaxUs) a2dpIdleMaxUs = idle;
-        if (gap > a2dpGapMaxUs)   a2dpGapMaxUs = gap;
+    if (a2dpLastUs) {
+        const uint32_t gap = t0 - a2dpLastUs;
+        if (gap > a2dpGapMaxUs) a2dpGapMaxUs = gap;
         a2dpGapHist[min<uint32_t>(gap / 5000, 7)]++;
-        if (gap > (uint32_t)(serverDmaMs() * 1000.0f)) a2dpLate++;
     }
+    a2dpLastUs = t0;
+
+    const uint32_t first = ringPushed;
+    if (loopbackOn) {
+        const int bytes = (int)(length & ~(uint32_t)(CLIENT_FRAME_BYTES - 1));
+        if (jbuf.pushBlock(data, bytes)) ringPushed += bytes / CLIENT_FRAME_BYTES;
+        else                             rxOverflow++;
+    }
+    a2dpForwardPacket(data, length, first);
+
+    const uint32_t cb = micros() - t0;
+    if (cb > a2dpCbMaxUs) a2dpCbMaxUs = cb;
 }
 
 // Encodes the decoded A2DP stream -- 44.1 kHz stereo, after the volume -- into
-// mesh packets, frame by frame. The BT library still drives I2S locally.
-static void a2dpForwardPacket(const uint8_t *data, uint32_t length) {
+// mesh packets, frame by frame. `first` is the ring index of the packet's first
+// frame, whether or not this node's own ring took it.
+static void a2dpForwardPacket(const uint8_t *data, uint32_t length, uint32_t first) {
     if (currentMode != MODE_SERVER || !txReady || !espnowActive || !a2dpForward) return;
     // Signed, for the reason spelled out at the ESP-NOW silence check: this
     // timestamp is written from the A2DP state callback, and an unsigned
@@ -1108,7 +1211,7 @@ static void a2dpForwardPacket(const uint8_t *data, uint32_t length) {
 
     const int16_t *in     = (const int16_t *)data;
     const int      frames = length / 4;   // 4 bytes per stereo frame
-    for (int i = 0; i < frames; i++) meshTxFrame(in[2 * i], in[2 * i + 1]);
+    for (int i = 0; i < frames; i++) meshTxFrame(in[2 * i], in[2 * i + 1], first + i);
 }
 
 static void btConnectionChanged(esp_a2d_connection_state_t state, void *) {
@@ -1125,10 +1228,9 @@ static void btConnectionChanged(esp_a2d_connection_state_t state, void *) {
 
 static void btAudioChanged(esp_a2d_audio_state_t state, void *) {
     if (state == ESP_A2D_AUDIO_STATE_STARTED) {
-        txReady        = true;
-        audioStartMs   = millis();
-        a2dpWriteEndUs = 0;   // the first packet of a stream has no gap
-        a2dpPrefill    = true;
+        txReady      = true;
+        audioStartMs = millis();
+        a2dpLastUs   = 0;   // the first packet of a stream has no gap
         meshTxReset();   // a new stream: nothing from the last one carries over
         LOG_INFO("BT audio started → ESP-NOW TX will activate in " + String(TX_WARMUP_MS) + "ms");
     } else {
@@ -1174,26 +1276,16 @@ static void bringUpBtController() {
     if (r != ESP_OK) LOG_ERROR("BT controller enable failed: " + String(esp_err_to_name(r)));
 }
 
-static i2s_pin_config_t serverI2SPins() {
-    i2s_pin_config_t pins = {
-        .mck_io_num   = I2S_PIN_NO_CHANGE,
-        .bck_io_num   = I2S_BCK_PIN,
-        .ws_io_num    = I2S_WS_PIN,
-        .data_out_num = I2S_DATA_PIN,
-        .data_in_num  = I2S_PIN_NO_CHANGE
-    };
-    return pins;
-}
-
 static void startBluetooth() {
     if (btSinkStarted) return;
 
     bringUpBtController();
 
-    a2dpSink.set_pin_config(serverI2SPins());
-    a2dpSink.set_i2s_config(serverI2SConfig(serverDmaLen));
-    a2dpSink.set_stream_reader(a2dpDataCallback, true);  // true = keep local I2S output
-    a2dpSink.set_on_data_received(a2dpWriteDone);
+    // `false`: the library's own I2S output stays off -- it installs no driver
+    // and writes nothing. This node's speaker is played from the ring, like a
+    // client's (loopbackOn); the callback still gets every packet, after the
+    // library's volume.
+    a2dpSink.set_stream_reader(a2dpDataCallback, false);
     a2dpSink.set_on_connection_state_changed(btConnectionChanged);
     a2dpSink.set_on_audio_state_changed(btAudioChanged);
     a2dpSink.set_auto_reconnect(false);
@@ -1206,69 +1298,23 @@ static void startBluetooth() {
 }
 
 /**
- * `q<frames>`: reinstall the A2DP library's I2S driver with a different DMA
- * ring, so one Bluetooth session can compare two depths -- a reflash would
- * drop the link, and getting it back needs a person to click Connect.
+ * Play a connect/disconnect jingle on a server's speaker.
  *
- * Only between streams: during one the BT task could be inside i2s_write().
- * The library installs the driver once in start() and, as configured here
- * (set_output_active_by_state never called), leaves it *running* across a
- * suspend, playing zeros -- on resume it sees I2S still active and does not
- * call i2s_start(). So the new driver must be left running too. The first
- * version stopped it, the library's next i2s_write() blocked forever
- * (portMAX_DELAY), and the BT task with it.
+ * From loop(), into the output driver that loop() also feeds from the ring, so
+ * the two cannot interleave: while the jingle plays the ring is simply not
+ * read, and the stream carries on into it (and to the mesh, which never
+ * notices). Afterwards the ring re-arms from the prefill, as at any start, and
+ * the clients follow the new schedule.
+ *
+ * Before the server played from its own ring, the library wrote each packet
+ * into the same driver from the Bluetooth task, and a jingle during a stream
+ * came out chopped and stretched: "the 3 tones were very laggy" (2026-09-28).
  */
-static void serverSetDmaLen(int len) {
-    if (!btSinkStarted || txReady) {
-        DEBUG_SERIAL.println("[A2DP] error reason=streaming (stop playback first)");
-        return;
-    }
-    if (len < 8 || len > 1024) {
-        DEBUG_SERIAL.println("[A2DP] error reason=range (8..1024 frames)");
-        return;
-    }
-    i2s_config_t cfg = serverI2SConfig(len);
-    cfg.sample_rate = a2dpSink.sample_rate();
-    i2s_driver_uninstall(I2S_NUM_0);
-    esp_err_t err = i2s_driver_install(I2S_NUM_0, &cfg, 0, nullptr);
-    if (err == ESP_OK) {
-        i2s_pin_config_t pins = serverI2SPins();
-        i2s_set_pin(I2S_NUM_0, &pins);
-        i2s_zero_dma_buffer(I2S_NUM_0);
-        i2s_start(I2S_NUM_0);           // running, as the library left it
-        a2dpSink.set_i2s_config(cfg);
-        serverDmaLen = len;
-    }
-    DEBUG_SERIAL.printf("[A2DP] dma=%dx%d ring=%.1fms install=%s heap=%lu\n",
-                        SERVER_DMA_BUF_COUNT, serverDmaLen, serverDmaMs(),
-                        esp_err_to_name(err), (unsigned long)ESP.getFreeHeap());
-}
-
-/**
- * Play a connect/disconnect jingle into the I2S driver the A2DP library owns,
- * without the library writing into it at the same time.
- *
- * The jingles are written from loop(); the library writes each decoded packet
- * from the BT task. If a stream is running -- Windows opens one the moment it
- * connects whenever anything on the PC has audio open -- the two interleave in
- * the ring and the jingle comes out chopped and stretched: "the 3 tones were
- * very laggy" (2026-09-28). With the 46 ms ring the stream start also writes
- * a ring of silence (serverPrefill) into the middle of it.
- *
- * So for the jingle's ~0.6 s the library's local output is muted: packets are
- * still decoded, still passed to a2dpDataCallback and still forwarded to the
- * mesh -- they only skip I2S. A write already in progress finishes first (the
- * driver serialises writers), so at most one packet precedes the jingle.
- * Afterwards a running stream restarts behind a ring of silence, as at any
- * stream start. `J` plays a jingle the old, unguarded way, for comparison.
- */
-static void playJingleOverA2DP(void (*jingle)()) {
-    jingleActive = true;
-    a2dpSink.set_stream_reader(a2dpDataCallback, false);
+static void playJingle(void (*jingle)()) {
+    schedInvalidate();
     jingle();
-    a2dpSink.set_stream_reader(a2dpDataCallback, true);
-    if (txReady) a2dpPrefill = true;
-    jingleActive = false;
+    jReady    = false;
+    outSynced = false;
 }
 
 static void stopBluetooth() {
@@ -1299,12 +1345,17 @@ static void stopBluetooth() {
 #endif  // ENABLE_BLUETOOTH
 
 // ============================================================================
-// I2S Client Output — CLIENT mode
+// I2S output from the ring — every node that plays the stream
 // ============================================================================
+//
+// A client plays what the mesh brings it; a Bluetooth server, since
+// 2026-09-30, plays its own stream the same way (loopbackOn). One output path
+// on every node, so every speaker runs on the same kind of schedule, and the
+// server's can be told to the rest -- see lib/sync and D14.
 
-static bool clientI2SActive = false;
+static bool outI2SActive = false;
 
-static void initI2SForClient() {
+static void initI2SOutput() {
     i2s_config_t cfg = {
         .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate          = CLIENT_SAMPLE_RATE,
@@ -1326,36 +1377,172 @@ static void initI2SForClient() {
     };
     esp_err_t err = i2s_driver_install(I2S_NUM_0, &cfg, 0, nullptr);
     if (err != ESP_OK) {
-        LOG_ERROR("I2S install (client) failed: " + String(esp_err_to_name(err)));
+        LOG_ERROR("I2S install (output) failed: " + String(esp_err_to_name(err)));
         return;
     }
     i2s_set_pin(I2S_NUM_0, &pins);
     i2s_zero_dma_buffer(I2S_NUM_0);
-    clientI2SActive = true;
-    LOG_INFO("I2S initialised for CLIENT mode at " + String(CLIENT_SAMPLE_RATE) + " Hz " +
+    // A fresh driver fills its buffers from the start of the first: the frame
+    // count the output clock relies on starts here.
+    outFrames = 0;
+    outClock.reset();
+    outI2SActive = true;
+    LOG_INFO("I2S output at " + String(CLIENT_SAMPLE_RATE) + " Hz " +
              (clientMonoOut ? "stereo, mixed to mono" : "stereo"));
 }
 
-static void deinitI2SForClient() {
-    if (!clientI2SActive) return;
+static void deinitI2SOutput() {
+    if (!outI2SActive) return;
     i2s_zero_dma_buffer(I2S_NUM_0);
     i2s_driver_uninstall(I2S_NUM_0);
-    clientI2SActive = false;
+    outI2SActive = false;
+    outClock.reset();
+    schedInvalidate();
 }
 
-// Drive I2S from jitter buffer — called every loop() tick in CLIENT mode.
-static void driveClientI2S() {
-    if (!clientI2SActive) return;
+/**
+ * Write to the output driver, counting frames and reading the output clock.
+ *
+ * A write that had to wait for a DMA buffer returns just after one finished
+ * playing, and then the frames queued ahead of the next write are known
+ * exactly (syncDmaAheadFrames). A write that did not wait says nothing, and
+ * OUT_WAIT_MIN_US is what tells the two apart. If the next frame was already
+ * due before this write, the DMA ran dry meanwhile and played zeros the frame
+ * count knows nothing about: the clock is forgotten until the next wait.
+ */
+static size_t outWrite(const void *src, size_t bytes) {
+    const uint32_t t0 = micros();
+    if (outClock.valid() && (int32_t)(t0 - outClock.playUs(outFrames)) > 0) {
+        outClock.reset();
+        outDry++;
+    }
+    size_t bw = 0;
+    i2s_write(I2S_NUM_0, src, bytes, &bw, pdMS_TO_TICKS(20));
+    const uint32_t t1 = micros();
+    outFrames += bw / CLIENT_FRAME_BYTES;
+    if (bw > 0 && (t1 - t0) >= OUT_WAIT_MIN_US) {
+        outClock.observe(t1, outFrames,
+                         syncDmaAheadFrames(outFrames, CLIENT_DMA_BUF_COUNT, CLIENT_DMA_BUF_LEN));
+    }
+    return bw;
+}
 
-    // Wait for prefill before starting output (prevents immediate underrun)
-    if (!jReady) {
-        if (jbuf.fill() >= JITTER_PREFILL) {
-            jReady = true;
-            LOG_INFO("Jitter buffer ready (" + String(jbuf.fill()) + " bytes) — starting I2S");
-        } else {
-            return;
+/** Play `frames` of silence: a client waiting for the server's schedule. */
+static void outWriteSilence(uint32_t frames) {
+    static const int16_t zeros[CLIENT_BATCH * 2] = {0};
+    while (frames > 0) {
+        const uint32_t n  = frames < (uint32_t)CLIENT_BATCH ? frames : (uint32_t)CLIENT_BATCH;
+        const size_t   bw = outWrite(zeros, n * CLIENT_FRAME_BYTES);
+        if (bw == 0) break;   // the DMA is not draining; do not spin
+        frames -= bw / CLIENT_FRAME_BYTES;
+    }
+}
+
+/** Let the oldest `frames` go unplayed. Whole frames, as everything here. */
+static uint32_t ringDiscard(uint32_t frames) {
+    const uint32_t have = (uint32_t)jbuf.fill() / CLIENT_FRAME_BYTES;
+    if (frames > have) frames = have;
+    jbuf.advance((int)(frames * CLIENT_FRAME_BYTES));
+    ringConsumed += frames;
+    return frames;
+}
+
+/** Close a timeline window every SYNC_WINDOW_MS; a flush forgets the lot. */
+static void timelineService(unsigned long nowMs) {
+    static unsigned long lastMs = 0;
+    if ((long)(nowMs - lastMs) < (long)SYNC_WINDOW_MS) return;
+    lastMs = nowMs;
+    portENTER_CRITICAL(&timelineMux);
+    if (timelineFlush) {
+        timeline.clear();
+        timelineFlush = false;
+    } else {
+        timeline.harvest(nowMs);
+    }
+    portEXIT_CRITICAL(&timelineMux);
+}
+
+/**
+ * Start playing the ring, once it holds the prefill. Returns false to wait.
+ *
+ * A server starts at the prefill exactly, whatever piled up meanwhile (a
+ * jingle leaves a full ring), and sets the schedule; everyone else follows it.
+ *
+ * A client of a server that stamps its packets waits for the server's
+ * timeline -- a few hundred ms at the start of a stream, letting the oldest
+ * audio go so the ring cannot overflow -- then primes the DMA with silence
+ * until its own clock is known, and lets go of (or waits out) exactly what
+ * separates its first frame from the server's schedule. Nothing has been
+ * heard yet, so this costs nothing audible: it is where the 44-51 ms echo
+ * measured before this existed is removed.
+ *
+ * A client that has heard no stamp for SYNC_MAX_AGE_MS, or waited SYNC_WAIT_MS
+ * for a timeline that never came, plays as every client did before: from the
+ * prefill, held at depth by the level controller.
+ */
+static bool outArm(unsigned long nowMs) {
+    static unsigned long waitSinceMs = 0;
+    const bool master = (currentMode == MODE_SERVER);
+
+    if (jbuf.fill() < JITTER_PREFILL) {
+        waitSinceMs = 0;
+        return false;
+    }
+
+    const bool stamped  = !master && rxStampedMs &&
+                          (long)(nowMs - rxStampedMs) < (long)SYNC_MAX_AGE_MS;
+    const bool haveLine = stamped && timeline.valid(nowMs);
+    if (stamped && !haveLine) {
+        if (!waitSinceMs) waitSinceMs = nowMs;
+        if ((long)(nowMs - waitSinceMs) < (long)SYNC_WAIT_MS) {
+            ringDiscard((uint32_t)(jbuf.fill() - JITTER_PREFILL) / CLIENT_FRAME_BYTES);
+            return false;
         }
     }
+    waitSinceMs = 0;
+
+    if (master) ringDiscard((uint32_t)(jbuf.fill() - JITTER_PREFILL) / CLIENT_FRAME_BYTES);
+
+    outSynced = false;
+    if (haveLine) {
+        // Silence until the clock has been read a few times: the first waits
+        // after an idle DMA can land on a ring still holding stale buffers.
+        const uint32_t obs0 = outClock.observations;
+        outClock.reset();
+        for (int i = 0; i < 8 * CLIENT_DMA_BUF_COUNT &&
+                        (!outClock.valid() || outClock.observations - obs0 < SYNC_PRIME_OBSERVATIONS); i++) {
+            outWriteSilence(CLIENT_BATCH);
+        }
+        if (outClock.valid()) {
+            const int32_t late = (int32_t)(outClock.playUs(outFrames) -
+                                           timeline.dueUs(ringConsumed, nowMs));
+            const int32_t n = syncUsToFrames(late, CLIENT_SAMPLE_RATE);
+            uint32_t done = 0;
+            if (n > 0)      done = ringDiscard((uint32_t)n);
+            else if (n < 0) outWriteSilence((uint32_t)-n);
+            DEBUG_SERIAL.printf("[SYNC] armed late=%ldus %s=%ld frames%s\n", (long)late,
+                                n >= 0 ? "dropped" : "waited", (long)(n >= 0 ? done : -n),
+                                (n > 0 && done < (uint32_t)n) ? " (ring short: playing late)" : "");
+            outSynced = true;
+            syncCtl.reset(nowMs);
+        }
+    }
+
+    jReady = true;
+    driftCtl.reset(nowMs);
+    LOG_INFO("Ring ready (" + String(jbuf.fill()) + " bytes) — starting I2S" +
+             (master ? ", setting the schedule" : outSynced ? ", on the server's schedule" : ""));
+    return true;
+}
+
+// Feed I2S from the ring — every loop() pass on a node that is playing.
+static void driveRingI2S() {
+    if (!outI2SActive) return;
+
+    const unsigned long nowMs = millis();
+    timelineService(nowMs);
+
+    if (!jReady && !outArm(nowMs)) return;
 
     // Interleaved L, R -- exactly the ring's layout and exactly what I2S takes.
     static int16_t stereo[CLIENT_BATCH * 2];
@@ -1366,11 +1553,49 @@ static void driveClientI2S() {
         // pushing extra silence here would only add a click. Re-arm the prefill
         // gate and let the buffer refill. Counted, not logged — logging every
         // loop tick during an underrun makes the underrun worse.
-        jReady = false;
+        jReady    = false;
+        outSynced = false;
         rxUnderrun++;
+        schedInvalidate();
         // The refill that follows is not drift. Integrating it would provoke a
         // burst of corrections on top of a buffer that is already unhappy.
-        driftCtl.reset(millis());
+        driftCtl.reset(nowMs);
+        return;
+    }
+
+    // Where this node plays, published for whoever stamps packets with it
+    // (the transmit task, on a server), and how far that is from the server's
+    // schedule (on a client). The next frame of the ring is the next written.
+    int32_t syncErr = 0;
+    bool    haveErr = false;
+    if (outClock.valid()) {
+        const uint32_t nextUs = outClock.playUs(outFrames);
+        schedPublish(ringConsumed, nextUs);
+        if (outSynced && timeline.valid(nowMs)) {
+            syncErr   = (int32_t)(nextUs - timeline.dueUs(ringConsumed, nowMs));
+            syncErrUs = syncErr;
+            haveErr   = true;
+        }
+    } else {
+        schedInvalidate();
+    }
+    if (outSynced && !timeline.valid(nowMs) && !(rxStampedMs &&
+            (long)(nowMs - rxStampedMs) < (long)SYNC_MAX_AGE_MS)) {
+        // The stamps stopped: carry on at depth, as a client of an older server.
+        outSynced = false;
+        driftCtl.reset(nowMs);
+    }
+
+    // Too far off to steer: something moved the schedule by more than a
+    // correction per batch could follow in reasonable time -- a server that
+    // re-armed, this node's DMA running dry. Jump: skip what is late, or wait
+    // out what is early. Audible, but so was whatever caused it.
+    if (haveErr && (syncErr > SYNC_JUMP_US || syncErr < -SYNC_JUMP_US)) {
+        const int32_t n = syncUsToFrames(syncErr, CLIENT_SAMPLE_RATE);
+        if (n > 0) ringDiscard((uint32_t)n);
+        else       outWriteSilence((uint32_t)-n);
+        syncJumps++;
+        syncCtl.reset(nowMs);
         return;
     }
 
@@ -1378,8 +1603,18 @@ static void driveClientI2S() {
     // batch is what leaves the partial-write accounting below untouched: one
     // frame either side of a write whose length is already handled correctly,
     // rather than an edit in the middle of a buffer that I2S may only half take.
+    //
+    // On the server's schedule the error is time, not depth: the same
+    // controller, handed that error as if it were a fill above a fixed target.
     DriftController::Correction corr = DriftController::NONE;
-    if (driftEnabled) corr = driftCtl.update(millis(), jbuf.fill());
+    if (driftEnabled) {
+        if (outSynced) {
+            if (haveErr) corr = syncCtl.update(nowMs, SYNC_FILL_BASE + syncUsToBytes(syncErr));
+        } else {
+            corr = driftCtl.update(nowMs, jbuf.fill());
+        }
+    }
+    DriftController &ctl = outSynced ? syncCtl : driftCtl;
 
     // After the peek, so what is consumed is untouched: these change only what
     // this node's speaker hears, never the timing or the drift loop.
@@ -1394,8 +1629,7 @@ static void driveClientI2S() {
     }
 
     // Blocking with a short timeout paces this loop to the I2S sample clock.
-    size_t bw = 0;
-    i2s_write(I2S_NUM_0, stereo, BATCH_BYTES, &bw, pdMS_TO_TICKS(20));
+    const size_t bw = outWrite(stereo, BATCH_BYTES);
 
     // Consume only what the DMA actually took. An earlier version advanced
     // the read pointer unconditionally, discarding every sample I2S refused —
@@ -1407,6 +1641,7 @@ static void driveClientI2S() {
     // the rest of the stream -- the exact failure pushBlock exists to prevent.
     const size_t frames = bw / CLIENT_FRAME_BYTES;
     jbuf.advance((int)(frames * CLIENT_FRAME_BYTES));
+    ringConsumed += frames;
 
     // One frame of correction, at a batch boundary -- an edit every half second
     // or so at the offsets these boards actually have. Inaudible, and it needs
@@ -1422,18 +1657,13 @@ static void driveClientI2S() {
         // Consume a frame without playing it. A whole frame, both channels, so
         // the ring's framing survives -- the one thing this path must never get
         // wrong.
-        if (jbuf.fill() >= CLIENT_FRAME_BYTES) {
-            jbuf.advance(CLIENT_FRAME_BYTES);
-            driftCtl.confirm(corr);
-        }
+        if (ringDiscard(1) == 1) ctl.confirm(corr);
     } else if (corr == DriftController::INSERT && frames > 0) {
         // Play a frame twice without consuming it: hold it one extra sample
         // period. No discontinuity is possible by construction, because it is
         // the frame that was just played.
         int16_t frame[2] = {stereo[2 * (frames - 1)], stereo[2 * (frames - 1) + 1]};
-        size_t  bwExtra  = 0;
-        i2s_write(I2S_NUM_0, frame, sizeof(frame), &bwExtra, pdMS_TO_TICKS(20));
-        if (bwExtra == sizeof(frame)) driftCtl.confirm(corr);
+        if (outWrite(frame, sizeof(frame)) == sizeof(frame)) ctl.confirm(corr);
     }
 }
 
@@ -1444,13 +1674,26 @@ static void driveClientI2S() {
 // Set when entering CLIENT mode failed, so the next attempt is held off.
 static unsigned long clientRetryAfterMs = 0;
 
-static void resetRxState() {
-    jbuf.reset();
+/** The ring and everything that describes it, for a new stream. Producer stopped. */
+static void resetPlayState() {
+    ringReset();
     rxHoles.clear();
     rxStore.clear();
     seqTracker.reset();
     driftCtl.reset(millis());
-    jReady       = false;
+    syncCtl.reset(millis());
+    portENTER_CRITICAL(&timelineMux);
+    timeline.clear();
+    timelineFlush = false;
+    portEXIT_CRITICAL(&timelineMux);
+    rxStampedMs = 0;
+    jReady      = false;
+    outSynced   = false;
+    schedInvalidate();
+}
+
+static void resetRxState() {
+    resetPlayState();
     rxActive     = false;
     senderLocked = false;
     lastRxMs     = 0;
@@ -1468,7 +1711,15 @@ static void enterDiscovery() {
     meshTxReset();
 
     const bool wasClient = (currentMode == MODE_CLIENT);
-    if (wasClient) deinitI2SForClient();
+#ifdef ENABLE_BLUETOOTH
+    // A server's own ring stops taking the stream before anything resets it;
+    // the Bluetooth task may be inside a push, and a push takes microseconds.
+    if (loopbackOn) {
+        loopbackOn = false;
+        delay(5);
+    }
+#endif
+    deinitI2SOutput();   // a client's, or a Bluetooth server's own
 
     // Reset on *every* entry to DISCOVERY, not just when leaving CLIENT.
     // senderLocked used to survive SERVER → DISCOVERY: a node that had once
@@ -1493,9 +1744,21 @@ static void enterDiscovery() {
 
 static void enterServer() {
     LOG_INFO("=== SERVER — local playback + ESP-NOW broadcast ===");
-    // BT is already running (started in setup). Just flip the mode;
-    // the data callback will start forwarding once BT audio state goes STARTED.
+    // BT is already running (started in setup). The data callback will start
+    // forwarding once BT audio state goes STARTED.
     meshTxReset();
+#ifdef ENABLE_BLUETOOTH
+    // Its own speaker plays from its own ring, like a client's, so that the
+    // packets it sends can say when it plays them (loopbackOn, D14). Ring
+    // first, then the driver, then the producer.
+    if (btAllowed()) {
+        resetPlayState();
+        rxOverflow = rxUnderrun = 0;
+        initI2SOutput();
+        loopbackOn = outI2SActive;
+        if (!outI2SActive) LOG_ERROR("SERVER I2S unavailable — mesh only, no local playback");
+    }
+#endif
     currentMode = MODE_SERVER;
 }
 
@@ -1510,16 +1773,11 @@ static void enterClient() {
     }
 #endif
 
-    jbuf.reset();
-    rxHoles.clear();
-    rxStore.clear();
-    seqTracker.reset();
-    driftCtl.reset(millis());
-    jReady   = false;
+    resetPlayState();
     rxActive = false;
 
-    initI2SForClient();
-    if (!clientI2SActive) {
+    initI2SOutput();
+    if (!outI2SActive) {
         LOG_ERROR("CLIENT I2S unavailable — returning to DISCOVERY");
 #ifdef ENABLE_BLUETOOTH
         if (btAllowed()) startBluetooth();
@@ -1569,24 +1827,19 @@ enum MeshFeedback { MESH_FB_OPEN, MESH_FB_PAIRED, MESH_FB_CLOSED };
  * This is the only acknowledgement a user without a serial console ever gets,
  * and pairing without it is a button that appears to do nothing.
  *
- * Only in DISCOVERY. In CLIENT mode the I2S driver is configured for the mesh
- * stream and the jitter buffer is feeding it; on a SERVER the A2DP task owns
- * it, and writing tones into a driver another task is driving is the conflict
- * `TODO.md` already has an open item about. Both are also cases where the user
- * can hear perfectly well that the node is alive.
+ * Only in DISCOVERY. In CLIENT and SERVER modes the output driver is playing
+ * the ring on a schedule other nodes follow, and a tone in the middle of it
+ * would move that schedule. Both are also cases where the user can hear
+ * perfectly well that the node is alive.
  */
 static void meshPlayFeedback(MeshFeedback what) {
     if (currentMode != MODE_DISCOVERY) return;
 
-    // Whoever already owns the driver keeps it. On a BT-capable node sitting in
-    // DISCOVERY that is the A2DP sink, which is exactly what the connect and
-    // disconnect tones are written into; installing a second driver over it
-    // fails, and the tone would be lost.
-#ifdef ENABLE_BLUETOOTH
-    const bool someoneElseOwnsI2S = btSinkStarted || clientI2SActive;
-#else
-    const bool someoneElseOwnsI2S = clientI2SActive;
-#endif
+    // Nobody owns the driver in DISCOVERY: the A2DP library never installs
+    // one (its output is off, see startBluetooth), and the ring's output is
+    // installed only in CLIENT and SERVER. The check stays, because installing
+    // a second driver over a first fails and the tone would be lost.
+    const bool someoneElseOwnsI2S = outI2SActive;
     if (!someoneElseOwnsI2S) initI2SForTones();
 
     switch (what) {
@@ -1651,11 +1904,13 @@ static void meshServiceOffer() {
         (long)(millis() - lastBeaconMs) < (long)MESH_BEACON_INTERVAL_MS) return;
     lastBeaconMs = millis();
 
-    AudioPacket pkt;
-    pkt.group = wireGroup(meshId);
-    pkt.seq   = MESH_BEACON_SEQ;
-    pkt.len   = 0;                 // the mesh id in the header is the whole message
-    if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
+    TxItem item;
+    item.first     = 0;
+    item.pkt.group = wireGroup(meshId);
+    item.pkt.seq   = MESH_BEACON_SEQ;
+    item.pkt.len   = 0;            // the mesh id in the header is the whole message
+    item.pkt.due   = MESH_DUE_NONE;
+    if (xQueueSend(txQueue, &item, 0) != pdTRUE) txQueueFull++;
 }
 
 /**
@@ -1815,6 +2070,14 @@ static void benchServiceSource() {
             (int64_t)benchPktIdx * 1000000LL * (int64_t)MESH_BLOCK_FRAMES / CLIENT_SAMPLE_RATE;
         if (now < due) return;
 
+        // A source with no speaker still has a schedule: every frame plays
+        // BENCH_PLAY_DELAY_US after it was due to be generated, which is what
+        // its packets' `due` say -- so a bench run exercises the clients' sync
+        // exactly as a Bluetooth server would.
+        schedPublish(benchSampleIdx,
+                     (uint32_t)(benchStartUs + BENCH_PLAY_DELAY_US +
+                                (int64_t)benchSampleIdx * 1000000LL / CLIENT_SAMPLE_RATE));
+
         // One packet's worth of frames, through the same encoder a server uses.
         // Table lookup, wrapping by comparison rather than modulo: no division
         // and no float anywhere in the transmit path.
@@ -1822,7 +2085,7 @@ static void benchServiceSource() {
         for (int i = 0; i < MESH_BLOCK_FRAMES; i++) {
             const int16_t s = benchTone[benchTonePhase];
             if (++benchTonePhase >= BENCH_TONE_LEN) benchTonePhase = 0;
-            meshTxFrame(s, s);
+            meshTxFrame(s, s, benchSampleIdx + i);
         }
         benchSampleIdx += MESH_BLOCK_FRAMES;
 
@@ -1843,6 +2106,7 @@ static void benchStartSource() {
     benchSampleIdx = 0;
     benchTonePhase = 0;
     benchTxPackets = 0;
+    schedInvalidate();
     meshTxReset();
     txQueueFull = txSendErr = txRadioFail = 0;
     benchSource    = true;
@@ -1873,7 +2137,8 @@ static void benchReport() {
     DEBUG_SERIAL.printf(
         "[BENCH] ms=%lu role=%s mode=%s heap=%lu jit=%d rx=%lu lost=%lu ovf=%lu "
         "und=%lu dup=%lu rsy=%lu fgn=%lu tx=%lu qfull=%lu senderr=%lu radiofail=%lu "
-        "drift=%d ins=%lu drp=%lu dr=%.3f tgt=%d srx=%ld maxalloc=%lu rec=%lu\n",
+        "drift=%d ins=%lu drp=%lu dr=%.3f tgt=%d srx=%ld maxalloc=%lu rec=%lu "
+        "sync=%d se=%ld sjmp=%lu dry=%lu\n",
         (unsigned long)millis(),
         benchSource ? "SOURCE" : "SINK",
         modeStr,
@@ -1894,12 +2159,14 @@ static void benchReport() {
         (unsigned long)txSendErr,
         (unsigned long)txRadioFail,
         driftEnabled ? 1 : 0,
-        (unsigned long)driftCtl.inserted,
-        (unsigned long)driftCtl.dropped,
+        // Both controllers' edits: a client on the server's schedule corrects
+        // the same drift, steering on time instead of depth.
+        (unsigned long)(driftCtl.inserted + syncCtl.inserted),
+        (unsigned long)(driftCtl.dropped + syncCtl.dropped),
         // Corrections per second the controller is currently asking for. Once
         // the loop is closed this is the only in-band measure of drift left:
         // a corrected buffer no longer has a slope to regress.
-        driftCtl.rate(),
+        outSynced ? syncCtl.rate() : driftCtl.rate(),
         // The level being steered to. It is measured after the settle window
         // rather than computed, so recording it is the only way to tell a
         // correctly calibrated client from one steering at the wrong depth.
@@ -1913,7 +2180,12 @@ static void benchReport() {
         // this one falls, which is exactly what heap fragmentation looks like.
         (unsigned long)ESP.getMaxAllocHeap(),
         // Blocks that played only because their repeat copy arrived.
-        (unsigned long)rxRecovered);
+        (unsigned long)rxRecovered,
+        // On the server's schedule, how far off it (us, + = this node late),
+        // how often it had to jump back onto it, and how often the DMA ran dry
+        // under a playing ring (lib/sync).
+        outSynced ? 1 : 0, (long)syncErrUs, (unsigned long)syncJumps,
+        (unsigned long)outDry);
 }
 
 static void benchIdentify() {
@@ -1978,7 +2250,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   g  print the mesh identity; `g<name>` sets it (persists, no reboot)
  *   p  listen for an offer and join that mesh (the speaker half of pairing)
  *   o  offer this mesh to a node that is listening (the server half)
- *   m  mute this node's speaker until reboot (server: local output; client: I2S)
+ *   m  mute this node's speaker until reboot (the mesh is untouched)
  *   M  toggle mixing a client's stereo to mono, for one speaker (persists)
  *   l  client: print and reset the lost-run histogram and `rec`
  *   t  `t<n>` sends each mesh frame n times, 1..3, until reboot
@@ -1994,10 +2266,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   a  print and reset the A2DP timing window (see a2dpDataCallback)
  *   f  toggle forwarding A2DP audio to the mesh; local playback continues
  *   w  stop WiFi altogether, until the next reboot -- what a WROOM server is
- *   q  `q<frames>` sets the local I2S DMA buffer length, between streams only;
- *      bare `q` prints the current ring
- *   j  play the connect jingle as a connection does; `J` the old way, with
- *      the library still writing -- run either during a stream to compare
+ *   j  play the connect jingle as a connection does -- during a stream too
  */
 /**
  * `D<n>`: each packet carries the block n packets back; `X<n>`: the XOR of
@@ -2141,14 +2410,9 @@ static void benchServiceSerial() {
                 DEBUG_SERIAL.printf("[A2DP] wifi stop -> %s\n", esp_err_to_name(esp_wifi_stop()));
                 break;
             case 'j':
-                if (!btSinkStarted) break;
-                DEBUG_SERIAL.printf("[A2DP] jingle guarded=1 streaming=%d\n", txReady ? 1 : 0);
-                playJingleOverA2DP(playConnectedSound);
-                break;
-            case 'J':
-                if (!btSinkStarted) break;
-                DEBUG_SERIAL.printf("[A2DP] jingle guarded=0 streaming=%d\n", txReady ? 1 : 0);
-                playConnectedSound();
+                if (currentMode != MODE_SERVER || !outI2SActive) break;
+                DEBUG_SERIAL.printf("[A2DP] jingle streaming=%d\n", txReady ? 1 : 0);
+                playJingle(playConnectedSound);
                 break;
             case 'V': {
                 // `V<0..127>`: the A2DP volume, as a phone's slider would set
@@ -2188,14 +2452,6 @@ static void benchServiceSerial() {
                 } else {
                     DEBUG_SERIAL.println("[A2DP] error reason=address (k aa:bb:cc:dd:ee:ff)");
                 }
-                break;
-            }
-            case 'q': {
-                char line[8];
-                benchReadLine(line, sizeof(line));
-                if (line[0] != '\0') serverSetDmaLen(atoi(line));
-                else DEBUG_SERIAL.printf("[A2DP] dma=%dx%d ring=%.1fms\n", SERVER_DMA_BUF_COUNT,
-                                         serverDmaLen, serverDmaMs());
                 break;
             }
 #endif
@@ -2307,6 +2563,20 @@ void setup() {
     // outlive a mode change, or a bench run cannot total them.
     driftCtl.begin(dcfg, millis());
 
+    // The same controller steering on time: the error from the server's
+    // schedule, in bytes, over a fixed target. See SYNC_KP.
+    DriftController::Config scfg;
+    scfg.targetBytes     = SYNC_FILL_BASE;
+    scfg.targetCeilBytes = SYNC_FILL_BASE;   // fixed: nothing to measure
+    scfg.deadbandBytes   = syncUsToBytes(SYNC_DEADBAND_US);
+    scfg.kp              = SYNC_KP;
+    scfg.maxRatePerSec   = DRIFT_MAX_RATE;
+    scfg.emaTauMs        = SYNC_EMA_TAU_MS;
+    scfg.settleMs        = SYNC_SETTLE_MS;
+    syncCtl.begin(scfg, millis());
+    outClock.begin(CLIENT_SAMPLE_RATE);
+    timeline.begin(CLIENT_SAMPLE_RATE, SYNC_MIN_SAMPLES, SYNC_MAX_AGE_MS, SYNC_JUMP_US);
+
     // Must happen before ESP-NOW comes up: the recv callback starts pushing into
     // this buffer as soon as the radio is listening.
     if (psramFound()) jStorage = (uint8_t *)ps_malloc(JITTER_BUF_SIZE);
@@ -2368,21 +2638,23 @@ void loop() {
             if (btAllowed()) {
                 if (doConnectSound) {
                     doConnectSound = false;
-                    playJingleOverA2DP(playConnectedSound);
+                    playJingle(playConnectedSound);
                 }
                 if (!btConnected) {
                     if (doDisconnectSound) {
                         doDisconnectSound = false;
-                        playJingleOverA2DP(playDisconnectedSound);
+                        playJingle(playDisconnectedSound);
                     }
                     enterDiscovery();
+                    break;
                 }
             }
 #endif
+            driveRingI2S();   // a Bluetooth server's own speaker; nothing on a bench source
             break;
 
         case MODE_CLIENT:
-            driveClientI2S();
+            driveRingI2S();
 
             // Read both once, and compare SIGNED.
             //
@@ -2461,12 +2733,18 @@ void loop() {
                      " dup=" + String(seqTracker.dupe) +
                      " rsy=" + String(seqTracker.resync) +
                      " rec=" + String(rxRecovered) +
-                     " fgn=" + String(rxForeign));
+                     " fgn=" + String(rxForeign) +
+                     " sync=" + String(outSynced ? 1 : 0) +
+                     " se=" + String(syncErrUs) + "us" +
+                     " sjmp=" + String(syncJumps));
         } else if (currentMode == MODE_SERVER) {
             LOG_INFO(String("Status: mode=") + modeStr +
                      " heap=" + String(ESP.getFreeHeap()) +
                      " maxalloc=" + String(ESP.getMaxAllocHeap()) +
                      " tx=" + String(txSent) +
+                     " jitter=" + String(jbuf.fill()) + "B" +
+                     " und=" + String(rxUnderrun) +
+                     " dry=" + String(outDry) +
                      " qfull=" + String(txQueueFull) +
                      " senderr=" + String(txSendErr) +
                      " radiofail=" + String(txRadioFail));

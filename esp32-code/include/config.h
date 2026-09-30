@@ -71,22 +71,10 @@
 #define BT_SAMPLE_RATE   44100
 #define VOLUME_DEFAULT   1       // 0–127; keep low, TPA3116 has high gain
 
-// The server's local I2S DMA ring. The A2DP library writes each decoded packet
-// to I2S from the Bluetooth task and blocks until its tail fits, so between
-// packets this ring is all that plays -- whatever the task spends waiting for
-// the next packet, decoding it and forwarding it to the mesh must fit inside
-// it, or the DMA plays zeros. The library's default is 8 x 64 frames, 11.6 ms:
-// half of one 23.2 ms packet from Windows. Measured 2026-09-28 the task spent
-// 5-10 ms between packets in steady play, 10-27 ms around the start of a
-// stream, plus up to 5 ms in the forwarding callback. 8 x 256 is 46 ms, costs
-// 6 KB more internal DRAM, and a zeroed buffer on an underrun is 5.8 ms
-// instead of 1.45. A ring deeper than a packet only helps while it is full,
-// so every stream starts by filling it with silence (serverPrefill); the
-// local output is then the ring's depth late. That latency is not a cost:
-// the server's local output will have to be delayed to meet the clients'
-// ~137 ms anyway.
-#define SERVER_DMA_BUF_COUNT  8
-#define SERVER_DMA_BUF_LEN    256
+// The server's own speaker plays from its own ring, exactly as a client's does
+// (CLIENT_DMA_* and JITTER_PREFILL below), not through the A2DP library's I2S
+// output -- see "Playing in time" and D14. Until 2026-09-30 it went through
+// the library's driver with an 8 x 256 ring, prefilled at every stream start.
 
 // ============================================================================
 // Notification Tones (startup / connect / disconnect)
@@ -329,6 +317,65 @@
 #define CLIENT_BATCH       128
 
 // ============================================================================
+// Playing in time (every node that plays the stream) -- lib/sync, D14
+// ============================================================================
+// Measured with a microphone on 2026-09-30, before any of this: the S3 played
+// 51 ms after the Bluetooth server and WROVER2 44 ms after it -- an echo
+// between any two rooms. Now every packet says when the server plays its
+// block (`due`), and each client plays it then.
+
+// `due` is 16 bits in these units: 262 ms of range, far past any latency here.
+#define MESH_DUE_UNIT_US      4
+
+// The least time from a server's esp_now_send() to a client's receive
+// callback: a 248-byte frame at 12 Mbps is ~0.2 ms of air, plus the channel
+// access and the receive path. A client's estimate of the server's play time
+// assumes exactly this much transit; every slower packet only looks later,
+// and the earliest-of-window estimate ignores it. An error here is a constant
+// offset between server and clients -- the microphone is what would show it.
+#define MESH_TRANSIT_MIN_US   300
+
+// The server's timeline is the earliest point of each window of stamped
+// packets; this long a window (about 97 packets), at least this many points
+// in it, and estimates no older than this.
+#define SYNC_WINDOW_MS        250
+#define SYNC_MIN_SAMPLES      16
+#define SYNC_MAX_AGE_MS       1000
+
+// Packets this far apart are a stream that paused: the server has re-armed
+// its own output meanwhile, and the timeline starts again from nothing.
+#define SYNC_STREAM_GAP_MS    150
+
+// A client with the prefill in hand waits at most this long for a timeline
+// before playing without one, as clients did before stamps existed.
+#define SYNC_WAIT_MS          1500
+
+// Reads of the output clock before a client aligns to the server: the first
+// waits after an idle DMA can land on a ring still holding stale buffers.
+#define SYNC_PRIME_OBSERVATIONS  4
+
+// A write that returned after this long waited for a DMA buffer, and times the
+// output clock (lib/sync). Copying a batch takes tens of microseconds; a wait
+// ends in the buffer-done interrupt, anywhere up to a buffer (5.8 ms) later.
+#define OUT_WAIT_MIN_US       300
+
+// Beyond this error from the server's schedule, a client jumps back onto it --
+// skipping what is late, or waiting out what is early -- instead of steering.
+// Steering moves 227 us a second at DRIFT_MAX_RATE; this is what a server
+// re-arming or a DMA running dry costs, not drift.
+#define SYNC_JUMP_US          4000
+
+// Steering onto the schedule: the drift controller, on the timing error.
+// Proportional control parks at deadband + rate / kp: at the -44 ppm measured
+// between WROVER2 and the S3 (1.9 corrections/s) that is 200 us + 38 bytes,
+// about 0.4 ms. Loop time constant 1 / (kp * 4 bytes a correction) = 5 s,
+// against a 1 s filter on an error that has no packet jitter left in it.
+#define SYNC_DEADBAND_US      200
+#define SYNC_KP               0.05f
+#define SYNC_EMA_TAU_MS       1000.0f
+#define SYNC_SETTLE_MS        1000
+
+// ============================================================================
 // Clock Drift Correction (CLIENT mode)
 // ============================================================================
 // Source and client run off separate crystals with nothing synchronising them.
@@ -440,6 +487,12 @@
 // If the source falls behind (blocked for a while), send at most this many
 // packets back-to-back to catch up rather than spinning out the whole backlog.
 #define BENCH_MAX_CATCHUP_PKTS  14
+
+// A bench source has no speaker, but it has a schedule: each frame is due to
+// play this long after it was generated, and its packets' `due` say so, so a
+// bench run exercises the clients' sync the way a Bluetooth server does.
+// About the prefill -- what a server's own ring holds when it starts.
+#define BENCH_PLAY_DELAY_US   90000
 
 // How often each node emits its machine-parsable [BENCH] telemetry line. This
 // is the sampling interval for the clock-drift regression, so shorter gives a
