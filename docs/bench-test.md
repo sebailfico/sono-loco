@@ -238,6 +238,31 @@ COM20 (server)               12    -96.67    0.09      +0.42
 The absolute column means nothing (it is against a guess at when playback
 started); the last column is the echo. A room with people in it drowns the
 MAX98357A's clicks — the first attempt found 2 of 8 — so run it quiet.
+After D14, same command, `v0.2.0-59-g2fe7791`: COM9 **+0.82**, COM22
+**+1.48**, the reference steady to 0.42 ms. The `und=+1` it reports on each
+client after such a run is the stream ending (Windows closes it as the
+recording stops), not a hole in the run — `soak.py` reads while the stream
+is open.
+
+**What a long stream does to them.** `soak.py` is the silent long run behind
+the Bluetooth server: the PC streams a quiet tone into it for `--secs` with
+every node muted, and every 10 s, *while the stream is still open*, reads each
+client's telemetry and the server's `a` window:
+
+```
+python tools/btlisten/soak.py --server COM20 --node COM9 --node COM22 --secs 600
+```
+
+It reports per client the underruns (`und`, a DMA that ran dry), `dry`, the
+schedule jumps (`sjmp`), the range of the timing error (`se`), the blocks
+lost and rebuilt, the lost-run histogram and `late` (late copies that came
+after their silence played), and for the server its own `und`/`dry`/`ovf`
+and the worst gap between Bluetooth packets. What good looked like on
+2026-09-30 (`logs/soak-20260930-174707.log`): no `und`, `dry` or `sjmp`
+anywhere, `se` within ±0.55 ms, `late=0`, and holes near the square of the
+server's own loss rate (1.3% holes at 11.7% loss that run, 0.46% at 6.3% in
+the one before). `lost` and `rec` swing with how many frames the server
+loses that minute; compare runs by `late`, `und` and `sjmp`, which do not.
 
 Traps, each of which cost a run on 2026-09-28:
 

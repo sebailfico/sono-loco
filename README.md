@@ -74,13 +74,13 @@ Phone ──BT A2DP──► ESP32 ──► ring ──► I2S DMA ──► PC
 **CLIENT mode:**
 ```
 ESP-NOW RX ──► ring ──► I2S DMA ──► PCM5102 ──► TPA3116 ──► Speaker
-            (~47 ms)    (~44 ms)
+            (~90 ms)    (~44 ms)
 ```
 
 **Every node plays each block at the same moment**, the server included
 (D14, `lib/sync`). The server plays its own stream through its own ring and
-DMA, exactly as a client does, about 90 ms after the A2DP packet reached it:
-`JITTER_PREFILL` (16000 bytes of decoded stereo ≈ 91 ms) is what its ring
+DMA, exactly as a client does, about 136 ms after the A2DP packet reached it:
+`JITTER_PREFILL` (24000 bytes of decoded stereo ≈ 136 ms) is what its ring
 starts from. Each packet says when its block plays on the server's speaker,
 and a client starts, then steers, onto that schedule, rather than onto a
 depth of its own. The ring itself is 32768 bytes ≈ 185 ms, which is its
@@ -130,13 +130,15 @@ of it with nobody at the keyboard (`tools/btlisten/`, and `k` to reconnect a
 reflashed server). A phone has not been tried on the new build, and range at
 12 Mbps is untested; see `TODO.md`.
 
-**Every node is meant to play each block at the same moment**, as of
-2026-09-30 (D14) — coded and unit-tested on a board, not yet confirmed with
-the microphone. Before it, clicks through the PC put the S3 51 ms and WROVER2
-44 ms behind the server's own speaker: a clear echo between rooms. Now the
-server plays through the same ring as its clients, every packet says when its
-block plays on the server, and each client starts and steers on that.
-`tools/btlisten/sync.py` measures it.
+**Every node plays each block at the same moment**, as of 2026-09-30 (D14).
+Before, clicks through the PC put the S3 51 ms and WROVER2 44 ms behind the
+server's own speaker: a clear echo between rooms. Now the server plays
+through the same ring as its clients, every packet says when its block plays
+on the server, and each client starts and steers on that. The same
+microphone now puts the S3 **+0.8 ms** and WROVER2 **+1.5 ms** from the
+server (`tools/btlisten/sync.py`); the telemetry holds both within ±0.55 ms
+of the server's schedule over 600 s behind the PC, with no underruns and no
+jumps (`tools/btlisten/soak.py`).
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the

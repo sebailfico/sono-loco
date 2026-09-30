@@ -28,34 +28,19 @@ channel 11 with the house router busy on channel 1. What is *not* proven is a
 building; see "Surviving the wild" below, which is the real list.
 
 The Bluetooth server path works end to end: the PC streaming into WROVER1,
-WROVER2 and the S3 both playing the mesh. Behind a streaming server 0.7% of
-blocks are holes over 600 s (2026-09-30, redundancy 11 packets back, D13) —
-each a 2.6 ms click, about three a second — and each client underran 7 times. What is left, and a phone on the new build,
-are under "Blocking" below.
+WROVER2 and the S3 both playing the mesh, **all three in time** (D14): by
+microphone the clients are within 1.5 ms of the server, where they were
+44–51 ms behind. Behind a streaming server 0.46–1.3% of blocks are holes
+over 600 s, depending on how many frames the server itself loses that
+minute (6–12%) — each a 2.6 ms click — and nothing underruns (2026-09-30,
+`tools/btlisten/soak.py`). What is left, and a phone on the new build, are
+under "Blocking" below.
 
 ---
 
 ## Blocking
 
-- [ ] **Confirm with the microphone that every node plays in time** (D14,
-      `cb355de`). Coded and unit-tested; not yet heard. With WROVER1 serving
-      over Bluetooth from the PC and WROVER2 and the S3 as clients:
-      `python tools/btlisten/sync.py --server COM20 --node COM9 --node COM22:-24
-      --level -6 --volume 120` — about 35 s, mostly silence, the server's
-      volume put back afterwards. The baseline on `v0.2.0-51-g8183ddc` was S3
-      +51 ms and WROVER2 +44 ms. Expect all three within a millisecond or two
-      of each other, plus up to ~3 ms a metre of path difference to the mic.
-      A constant offset shared by both clients means `MESH_TRANSIT_MIN_US`
-      or the DACs; clients that disagree mean the output clock. Then the
-      telemetry: `sync=1`, `se=` inside ±0.5 ms, `sjmp=` not climbing — as
-      it already did in a silent 90 s bench run (`CHANGELOG.md`). If
-      0.7 ms between clients ever matters (a stereo pair would notice), a
-      smaller `SYNC_DEADBAND_US` and a larger `SYNC_KP` with a shorter filter
-      would narrow it; simulate that in `test_drift` before trusting it. Then
-      the bench regression (`bench-mesh.ps1 -Flash -Duration 600 -Mute`,
-      flashing the WROVERs by name afterwards), because the client audio
-      path changed.
-- [ ] **The server still drops 3–9% of its own frames.** Measured behind a
+- [ ] **The server still drops 3–12% of its own frames.** Measured behind a
       streaming server on 2026-09-30 (`CHANGELOG.md`): every client loses the
       same packets, run for run — singles, and runs of 4–5 (10–13 ms) when the
       server's Bluetooth link has the radio — and the send callback reports
@@ -67,9 +52,7 @@ are under "Blocking" below.
       the same bytes, and a lone loss is rebuilt from the next packet while a
       run is rebuilt from 11 later (estimated ~0.2% on the 600 s run);
       **concealment** (below, "Surviving the wild") so the holes left are not
-      clicks; a counter for patches refused because the silence already
-      played, which says whether the client's buffer is too shallow for the
-      distance; a **loss trace** — each client logging the seqs it missed — so
+      clicks; a **loss trace** — each client logging the seqs it missed — so
       every scheme and distance can be scored on one recording instead of on
       alternating minutes whose conditions swung 3× (the singles-only minutes
       favour distance 1, the run minutes 11); `t2` on top of distance 11 at
@@ -323,7 +306,13 @@ proof and polish.
       noise ADPCM adds audible on these speakers? If it is, D5 says what next.
 - [ ] **A stereo pair.** Every client now gets both channels. Two nodes in one
       room could play left and right -- a per-node channel setting beside `M`.
-      Nothing asked for it yet.
+      Nothing asked for it yet. It would also ask more of D14: proportional
+      control parks each client `SYNC_DEADBAND_US` plus rate/kp off the
+      schedule, on the side its drift pushes it, and two clients drifting
+      opposite ways sat 0.7 ms apart on the bench. Between rooms that is
+      nothing; between the two speakers of a pair it moves the image. A
+      smaller deadband and a larger `SYNC_KP` with a shorter filter would
+      narrow it -- simulate that in `test_drift` before trusting it.
 
 ### Housekeeping
 

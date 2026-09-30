@@ -76,9 +76,50 @@ in `TODO.md` false.
   that came from a sample taken before it armed, since under sync the ring's
   level is not what is steered.
 
-  **Not yet measured**: the microphone check behind a real Bluetooth server
-  (the PC's Bluetooth was off) and the 600 s regression, the first item in
-  `TODO.md`.
+  **Behind the PC, three fixes, and the echo gone** (`e2a3b0a`, `24f417c`,
+  `2fe7791`; D14's amendment). The same microphone test on the first sync
+  build put both clients within 1.5 ms of the server. Four 600 s runs behind
+  the real server followed (`tools/btlisten/soak.py`, new: every node muted,
+  telemetry read every 10 s while the stream is open). Each found something:
+
+  - *An empty ring re-armed while the DMA still played* (`e2a3b0a`): 8–10
+    re-arms per client in 35 s, 2 on the server, against Windows' pauses of
+    up to 54 ms. Now zero in every run since, on every node. The old
+    firmware had 7 per client in 600 s.
+  - *The 91 ms prefill left a client too shallow for its late copies*
+    (`24f417c`). The ring held 15–48 ms, and a late copy needs 28 ms plus
+    the straddle: 3,600 late copies per client and 2.2% holes. A loss run
+    longer than the 8-block silence fill also slipped the ring against the
+    schedule: 60 runs of 8+, and 19–22 jumps per client. `JITTER_PREFILL`
+    16000 → 24000 (136 ms, the bench source's delay with it) and
+    `MAX_GAP_FILL_PKTS` 8 → 24: `late=0`, holes
+    **0.46%** (0.7% before sync), one jump each.
+  - *The server's own level controller dragged the schedule* (`2fe7791`).
+    Its packet-at-a-time ring ran under the client floor, the clamp raised
+    its target, and it inserted at the cap for half a minute (~300 inserts):
+    −2 ms on the clients and that one jump. Now it has its own instance with
+    a floor a packet lower (`SERVER_TARGET_BYTES`), and clients may steer at
+    20/s.
+
+  **Final, `v0.2.0-59-g2fe7791` on all three:**
+  - *Microphone* (`logs/sync-20260930-175830-synced-136ms`): S3 **+0.82 ms**,
+    WROVER2 **+1.48 ms** from the server, the reference steady to 0.42 ms.
+    The S3's click-to-click spread fell from ~3 ms to 0.07.
+  - *600 s behind the PC* (`logs/soak-20260930-174707.log`): no `und`,
+    `dry` or `sjmp` anywhere, `late=0`, `se` within −0.53…+0.35 ms on both
+    clients. Holes 1.28% and 1.23%, in a minute when the server itself lost
+    11.7% of its frames — twice the previous run's 6.3%, matched packet for
+    packet on both clients, so the server's radio, not the sync. D13's floor
+    of about loss² predicts that.
+  - *Bench regression, 600 s, `-Mute`, WROVER2 sourcing*
+    (`logs/bench-20260930-175913.log`): 386.8 pkt/s, `qfull=0`; 231,930 and
+    231,528 blocks, **zero lost/ovf/und/dup/rsy**. On the schedule in every
+    sample, `sjmp=0`, `dry=0`, `se` +225…+257 µs on WROVER1 and
+    −490…−441 µs on the S3. WROVER pair −2.2 ppm by the log. Corrections
+    +7.6 ppm (202 drops) and −53.3 ppm (1,408 inserts), as in the first sync
+    run: a client on the schedule corrects its I2S against the source's
+    nominal rate, where the level controller's 4.5 ms deadband had absorbed
+    WROVER1's share. The buffers sit flat at ~16.5 KB, the deeper prefill.
 
 - **Behind a Bluetooth server, measured for real: two client bugs, and the
   redundant block moved 11 packets back** (2026-09-30, `541f717` … `26691a0`).

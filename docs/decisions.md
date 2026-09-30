@@ -622,8 +622,11 @@ the rate stops mattering.
 
 ## D14 — Every node plays on the server's schedule, the server included
 
-**Decided:** 2026-09-30. **Status:** coded (`cb355de`), `lib/sync`'s 11 tests
-pass on a board; not yet measured with the microphone.
+**Decided:** 2026-09-30. **Status:** measured on hardware. By microphone,
+behind the PC streaming into WROVER1, the S3 +0.8 ms and WROVER2 +1.5 ms from
+the server, against +51 and +44 before. By telemetry, both within ±0.55 ms of
+the server's schedule for 600 s, with no underruns and no jumps. See
+`CHANGELOG.md`.
 
 Measured with `tools/btlisten/sync.py` before any of this, clicks through
 the PC into WROVER1: the S3 played **51 ms** after the server and WROVER2
@@ -671,6 +674,35 @@ There is no clock-synchronisation protocol, no shared timebase and no extra
 packets: two bytes per packet and a minimum. A bench source stamps a
 schedule of its own (`BENCH_PLAY_DELAY_US`), so the automated harness
 exercises the same path.
+
+**What the hardware changed about it, the same day.** Four things, each
+from a 600 s run behind the PC (`tools/btlisten/soak.py`):
+
+- *An empty ring is not an underrun while the DMA still plays.* Windows
+  pauses its A2DP stream for up to 54 ms. The ring holds half of the
+  buffered audio and the DMA the other half, and re-arming as soon as the
+  ring was empty threw the DMA's half away: 8–10 re-arms a minute per
+  client, 2 on the server. Now a node waits for the next packet until its
+  DMA has actually run dry.
+- *The mesh's latency is the server's, so it has to suit the clients.* On
+  the server's schedule a client's depth is whatever the server's leaves
+  it. The 91 ms prefill left a client 15–48 ms of ring, often less than the
+  28 ms a lost block's late copy needs (D13): 3,600 late copies per client
+  and 2.2% holes. There is also the straddle: a block that spans two A2DP
+  packets reaches a client up to a packet after the server had its first
+  frames. `JITTER_PREFILL` went to 136 ms, and the same run gave 0.46%
+  holes, lower than the 0.7% before sync.
+- *A loss run longer than its silence fill slips the ring against the
+  schedule*, and the client has to jump. 60 runs of 8+ in 600 s against an
+  8-block fill made 20 jumps per client; the fill is 24 blocks now.
+- *The server's own level controller moves everyone.* Its ring is fed a
+  4 KB packet at a time and runs half a packet below a client's. The
+  client's floor clamped its target up, and it inserted at the cap for half
+  a minute, dragging every client later than they could follow. The server
+  now has its own controller instance with a floor a packet lower
+  (`SERVER_TARGET_BYTES`). Clients may steer at twice the server's rate
+  (`SYNC_MAX_RATE`), since they have to follow its corrections plus their
+  own drift.
 
 **What was considered.** *Delaying the server's own output by a fixed
 amount.* That was the `TODO.md` item as written, and it fixes only the first
