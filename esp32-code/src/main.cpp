@@ -105,9 +105,10 @@ static bool        clientOnly = false;
 // This node's own speaker, and nothing else. Neither setting touches what is
 // received, forwarded, buffered or corrected -- only the samples handed to I2S.
 //
-// `m` mutes, until reboot: on a server the A2DP library's local output (the
-// mesh still gets every packet), on a client its I2S. It is how a microphone
-// next to one node hears that node alone, and how a bench run stays silent.
+// `m` mutes, until reboot: zeroes where this node's samples meet its speaker
+// -- on a Bluetooth node after the mesh has taken its copy, on a client before
+// I2S. Volume 0 for this node alone. It is how a microphone next to one node
+// hears that node alone, and how a bench run stays silent.
 static volatile bool outputMuted   = false;
 // `M` mixes a client's stereo to mono on both channels, kept in NVS: a node
 // with one speaker -- a MAX98357A plays one channel -- would otherwise lose
@@ -1077,6 +1078,12 @@ static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
 
     a2dpForwardPacket(data, length);
 
+    // The library writes this same buffer to I2S once we return, after its
+    // volume and our forward: zeroing it here is volume 0 for this speaker
+    // only. The buffer is the library's own, changed in place as its volume
+    // control changes it; the const is only in the callback's signature.
+    if (outputMuted) memset((void *)data, 0, length);
+
     a2dpCbEndUs = micros();
     if (a2dpCbEndUs - t0 > a2dpCbMaxUs) a2dpCbMaxUs = a2dpCbEndUs - t0;
     if (a2dpWriteEndUs) {
@@ -1185,8 +1192,6 @@ static void startBluetooth() {
 
     a2dpSink.set_pin_config(serverI2SPins());
     a2dpSink.set_i2s_config(serverI2SConfig(serverDmaLen));
-    // Output on through start(), whatever the mute: the library installs its
-    // I2S driver there only if it is. The mute goes on after; see stopBluetooth().
     a2dpSink.set_stream_reader(a2dpDataCallback, true);  // true = keep local I2S output
     a2dpSink.set_on_data_received(a2dpWriteDone);
     a2dpSink.set_on_connection_state_changed(btConnectionChanged);
@@ -1194,7 +1199,6 @@ static void startBluetooth() {
     a2dpSink.set_auto_reconnect(false);
     a2dpSink.set_volume(VOLUME_DEFAULT);
     a2dpSink.start(BT_DEVICE_NAME);
-    if (outputMuted) a2dpSink.set_stream_reader(a2dpDataCallback, false);
     btSinkStarted = true;
     LOG_INFO("BT discoverable as: " BT_DEVICE_NAME);
     LOG_INFO("Heap after BT start: " + String(ESP.getFreeHeap()) + " bytes, maxalloc " +
@@ -1262,7 +1266,7 @@ static void playJingleOverA2DP(void (*jingle)()) {
     jingleActive = true;
     a2dpSink.set_stream_reader(a2dpDataCallback, false);
     jingle();
-    a2dpSink.set_stream_reader(a2dpDataCallback, !outputMuted);
+    a2dpSink.set_stream_reader(a2dpDataCallback, true);
     if (txReady) a2dpPrefill = true;
     jingleActive = false;
 }
@@ -1284,11 +1288,6 @@ static void stopBluetooth() {
     // never does it again, so after a deinit its start() loops forever on
     // "Failed to enable bluedroid". startBluetooth() re-enables both
     // (bringUpBtController, then the library's own enable).
-    //
-    // Output back on first: end() uninstalls the library's I2S driver only if
-    // it is. A muted node (`m`) kept the driver, and its next CLIENT install
-    // failed with ESP_ERR_INVALID_STATE -- every 5 s, stuck in DISCOVERY.
-    a2dpSink.set_stream_reader(a2dpDataCallback, true);
     a2dpSink.end(false);
     const esp_err_t e1 = esp_bluedroid_disable();
     const esp_err_t e2 = esp_bt_controller_disable();
@@ -2117,9 +2116,6 @@ static void benchServiceSerial() {
             }
             case 'm':
                 outputMuted = !outputMuted;
-#ifdef ENABLE_BLUETOOTH
-                if (btSinkStarted) a2dpSink.set_stream_reader(a2dpDataCallback, !outputMuted);
-#endif
                 DEBUG_SERIAL.printf("[OUT] mute=%d\n", outputMuted ? 1 : 0);
                 break;
             case 'M':
