@@ -34,7 +34,7 @@ static const int BATCH_BYTES   = BATCH_FRAMES * FRAME_BYTES;
 // playback is running. The ring buffer only ever contains the remainder, which
 // is what the controller can see -- steering to the full prefill was a real bug,
 // caught on a C3 client, and test_target_is_the_ring_not_the_prefill pins it.
-static const int PREFILL       = 16000;             // JITTER_PREFILL
+static const int PREFILL       = 24000;             // JITTER_PREFILL
 static const int TARGET        = PREFILL - 8192;    // minus CLIENT_DMA_CAPACITY_BYTES
 static const int BUF_SIZE      = 32768;             // JITTER_BUF_SIZE
 // Health margins: how close the ring may come to empty (underrun) or full

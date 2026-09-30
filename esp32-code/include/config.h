@@ -302,7 +302,7 @@
 // Bytes the DMA ring can swallow when completely empty: 8 * 256 * 4 = 8192.
 #define CLIENT_DMA_CAPACITY_BYTES (CLIENT_DMA_BUF_COUNT * CLIENT_DMA_BUF_LEN * CLIENT_FRAME_BYTES)
 
-// Minimum bytes in the jitter buffer before I2S output starts (~91 ms).
+// Minimum bytes in the jitter buffer before I2S output starts (~136 ms).
 //
 // This MUST exceed CLIENT_DMA_CAPACITY_BYTES, and the first hardware run is why:
 // at 2000 bytes it was below the DMA capacity of the then 8-buffer ring, so
@@ -311,7 +311,19 @@
 // jitter buffer that never held more than a fraction of its intended depth. The
 // audio survived on DMA buffering alone. A static_assert in main.cpp enforces
 // the relationship now.
-#define JITTER_PREFILL     16000
+//
+// Since D14 it is also the whole mesh's latency: the server starts its own ring
+// from exactly this, and every client plays on the server's schedule, so the
+// depth a client has is whatever the server's leaves it. 16000 (91 ms) was
+// chosen for clients that each set their own. On the server's schedule it left
+// them 15-48 ms of ring, often under the 28 ms a lost block's late copy needs
+// (MESH_REDUNDANCY_DISTANCE): 600 s behind the server, 3,600 copies arrived
+// too late to patch and 2.2% of blocks were holes, against 0.7% before
+// (2026-09-30). A block's first frames can also reach a client a whole A2DP
+// packet (23 ms) after the server had them, when the block straddles two
+// packets. 24000 gives the copy and the straddle room: 136 ms, every room
+// later together, so the only cost is lip-sync against the phone.
+#define JITTER_PREFILL     24000
 
 // Stereo frames handed to I2S per loop() pass.
 #define CLIENT_BATCH       128
@@ -460,9 +472,15 @@
 #define DRIFT_EMA_TAU_MS      4000.0f
 
 // Lost packets are replaced with an equal amount of silence to keep playback
-// timing. Capped so one long outage can't flood the buffer with silence: 8
-// blocks is 21 ms, about what 4 packets of the old format were.
-#define MAX_GAP_FILL_PKTS  8
+// timing. Capped so one long outage can't flood the buffer with silence.
+//
+// 24 blocks, 62 ms, since D14. A gap longer than its silence leaves the ring
+// shorter than the stream, and a client on the server's schedule then has to
+// jump back onto it -- at 8 blocks (21 ms), 600 s behind a streaming server
+// had 60 runs of 8+ lost blocks and 19-22 jumps per client (2026-09-30). 24
+// covers the server's Bluetooth holding the radio for a burst, and on top of
+// the ring's ~90 ms at depth still fits the 185 ms ring.
+#define MAX_GAP_FILL_PKTS  24
 
 // A sequence number this far from the expected one is treated as a stream
 // restart, not as a gap. Sequence numbers are uint16_t, so a duplicate or
@@ -492,7 +510,7 @@
 // play this long after it was generated, and its packets' `due` say so, so a
 // bench run exercises the clients' sync the way a Bluetooth server does.
 // About the prefill -- what a server's own ring holds when it starts.
-#define BENCH_PLAY_DELAY_US   90000
+#define BENCH_PLAY_DELAY_US   136000
 
 // How often each node emits its machine-parsable [BENCH] telemetry line. This
 // is the sampling interval for the clock-drift regression, so shorter gives a
