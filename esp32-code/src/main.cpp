@@ -43,6 +43,7 @@
 #ifdef ENABLE_BLUETOOTH
 #include "BluetoothA2DPSink.h"
 #include <esp_bt.h>
+#include <esp_bt_main.h>
 #include <esp_coexist.h>
 #endif
 
@@ -1165,13 +1166,25 @@ static void stopBluetooth() {
     // until the node is power-cycled — which breaks the whole "any node can be
     // either role" premise.
     //
+    // But end(false) deinitialises only A2DP and AVRCP. Bluedroid and the
+    // controller stay up, still page- and inquiry-scanning like a speaker
+    // waiting for a phone, and coexistence gives those scans the radio: a
+    // WROVER client lost 4.7% of a streaming server's packets, in runs of 4-5
+    // and 8+, beside an S3 that lost 2.0% (2026-09-30). So the stack goes down
+    // and the controller off too -- everything short of releasing its memory.
+    // The library's start() brings both back (bt_start, bluedroid init).
+    //
     // Output back on first: end() uninstalls the library's I2S driver only if
     // it is. A muted node (`m`) kept the driver, and its next CLIENT install
     // failed with ESP_ERR_INVALID_STATE -- every 5 s, stuck in DISCOVERY.
     a2dpSink.set_stream_reader(a2dpDataCallback, true);
     a2dpSink.end(false);
+    esp_err_t e1 = esp_bluedroid_disable();
+    esp_err_t e2 = esp_bluedroid_deinit();
+    esp_err_t e3 = esp_bt_controller_disable();
     btSinkStarted = false;
-    LOG_INFO("BT stopped (controller retained for restart)");
+    LOG_INFO(String("BT stopped, controller off, memory kept (") + esp_err_to_name(e1) + "/" +
+             esp_err_to_name(e2) + "/" + esp_err_to_name(e3) + ")");
 }
 
 #endif  // ENABLE_BLUETOOTH
