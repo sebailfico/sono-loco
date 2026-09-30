@@ -1170,21 +1170,23 @@ static void stopBluetooth() {
     // controller stay up, still page- and inquiry-scanning like a speaker
     // waiting for a phone, and coexistence gives those scans the radio: a
     // WROVER client lost 4.7% of a streaming server's packets, in runs of 4-5
-    // and 8+, beside an S3 that lost 2.0% (2026-09-30). So the stack goes down
-    // and the controller off too -- everything short of releasing its memory.
-    // The library's start() brings both back (bt_start, bluedroid init).
+    // and 8+, beside an S3 that lost 2.0% (2026-09-30). So Bluedroid is
+    // disabled and the controller switched off too. Disabled, not
+    // deinitialised: the library remembers having initialised Bluedroid and
+    // never does it again, so after a deinit its start() loops forever on
+    // "Failed to enable bluedroid". startBluetooth() re-enables both
+    // (bringUpBtController, then the library's own enable).
     //
     // Output back on first: end() uninstalls the library's I2S driver only if
     // it is. A muted node (`m`) kept the driver, and its next CLIENT install
     // failed with ESP_ERR_INVALID_STATE -- every 5 s, stuck in DISCOVERY.
     a2dpSink.set_stream_reader(a2dpDataCallback, true);
     a2dpSink.end(false);
-    esp_err_t e1 = esp_bluedroid_disable();
-    esp_err_t e2 = esp_bluedroid_deinit();
-    esp_err_t e3 = esp_bt_controller_disable();
+    const esp_err_t e1 = esp_bluedroid_disable();
+    const esp_err_t e2 = esp_bt_controller_disable();
     btSinkStarted = false;
     LOG_INFO(String("BT stopped, controller off, memory kept (") + esp_err_to_name(e1) + "/" +
-             esp_err_to_name(e2) + "/" + esp_err_to_name(e3) + ")");
+             esp_err_to_name(e2) + ")");
 }
 
 #endif  // ENABLE_BLUETOOTH
