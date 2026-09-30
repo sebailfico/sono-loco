@@ -306,7 +306,9 @@
 
 // Client I2S DMA ring. dma_buf_len counts stereo frames: 8 x 256 is 46 ms at
 // 44.1 kHz, as 4 x 256 was at 22.05.
+#ifndef CLIENT_DMA_BUF_COUNT   // a build flag may override it, for an A/B between clients
 #define CLIENT_DMA_BUF_COUNT  8
+#endif
 #define CLIENT_DMA_BUF_LEN    256
 
 // Bytes the DMA ring can swallow when completely empty: 8 * 256 * 4 = 8192.
