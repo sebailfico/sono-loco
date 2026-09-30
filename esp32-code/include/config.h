@@ -451,6 +451,12 @@
 #define DEBUG_SERIAL    Serial
 #define DEBUG_BAUD_RATE 115200
 
+// Native USB serial only (S3, C3; main.cpp setup()): transmit buffer bytes,
+// and the longest a write may wait for a host that has stopped reading. The
+// core's 100 ms default stalled the audio whenever the PC was not reading.
+#define USB_SERIAL_TX_BUFFER      4096
+#define USB_SERIAL_TX_TIMEOUT_MS  5
+
 // 0=Off 1=Error 2=Warn 3=Info 4=Debug
 #define DEBUG_LEVEL 3
 

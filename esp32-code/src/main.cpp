@@ -2165,6 +2165,17 @@ static void benchServiceSerial() {
 // ============================================================================
 
 void setup() {
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+    // Native USB serial (S3, C3). By default write() waits up to 100 ms for a
+    // host that is plugged in but not reading, and loop() -- which also feeds
+    // I2S -- waits with it: an S3 whose port nobody read overflowed its buffer
+    // 9 times in a minute and dropped 472 frames (2026-09-30). The buffer holds
+    // every line while a host reads; the timeout is the longest a write may
+    // then wait before the core stops waiting for that host. Not 0: the core
+    // decrements the timeout before testing it, and 0 wraps to forever.
+    Serial.setTxBufferSize(USB_SERIAL_TX_BUFFER);
+    Serial.setTxTimeoutMs(USB_SERIAL_TX_TIMEOUT_MS);
+#endif
     DEBUG_SERIAL.begin(DEBUG_BAUD_RATE);
     delay(1000);
 
