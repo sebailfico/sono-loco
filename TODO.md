@@ -47,7 +47,11 @@ are under "Blocking" below.
       of each other, plus up to ~3 ms a metre of path difference to the mic.
       A constant offset shared by both clients means `MESH_TRANSIT_MIN_US`
       or the DACs; clients that disagree mean the output clock. Then the
-      telemetry: `sync=1`, `se=` inside ±0.5 ms, `sjmp=` not climbing. Then
+      telemetry: `sync=1`, `se=` inside ±0.5 ms, `sjmp=` not climbing — as
+      it already did in a silent 90 s bench run (`CHANGELOG.md`). If
+      0.7 ms between clients ever matters (a stereo pair would notice), a
+      smaller `SYNC_DEADBAND_US` and a larger `SYNC_KP` with a shorter filter
+      would narrow it; simulate that in `test_drift` before trusting it. Then
       the bench regression (`bench-mesh.ps1 -Flash -Duration 600 -Mute`,
       flashing the WROVERs by name afterwards), because the client audio
       path changed.

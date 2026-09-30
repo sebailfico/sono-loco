@@ -61,9 +61,24 @@ in `TODO.md` false.
   the clients jump to the schedule that follows it. Telemetry gains `sync=`,
   `se=` (µs, + = late), `sjmp=` and `dry=`.
 
-  **Not yet measured**: after flashing, WROVER2 and the S3 were no longer on
-  USB and the PC's Bluetooth was off, so the microphone check and the bench
-  regression are the first item in `TODO.md`.
+  **First on hardware, silent, 90 s, `v0.2.0-55-gcca76e5` on all three**
+  (`bench-mesh.ps1 -Duration 90 -Mute -Source COM22`,
+  `logs/bench-20260930-155847.log`). WROVER2 sourced, WROVER1 and the S3
+  were clients, and nothing was lost, overflowed, underrun, duplicated or
+  resynced, at 386.9 pkt/s. Both clients armed on the source's schedule
+  (`[SYNC] armed late=65153us` and `65430us`, each dropping ~2,880 frames of
+  prefill) and held it with no jumps and no dry DMA. The error settled at
+  `se=` −480 µs on the S3 (2.44 inserts/s) and +245 µs on WROVER1 (0.38
+  drops/s), steady to about ±20 µs. That is where proportional control parks
+  (deadband + rate/kp), on opposite sides for clocks drifting in opposite
+  directions: 0.7 ms between the two clients, against 7 ms before and 44–51
+  ms against the server. The harness flagged WROVER1's buffer as drifting;
+  that came from a sample taken before it armed, since under sync the ring's
+  level is not what is steered.
+
+  **Not yet measured**: the microphone check behind a real Bluetooth server
+  (the PC's Bluetooth was off) and the 600 s regression, the first item in
+  `TODO.md`.
 
 - **Behind a Bluetooth server, measured for real: two client bugs, and the
   redundant block moved 11 packets back** (2026-09-30, `541f717` … `26691a0`).
