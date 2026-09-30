@@ -63,6 +63,25 @@ public:
     /** Consume `len` bytes. Caller is responsible for keeping `len` even. */
     void advance(int len);
 
+    /**
+     * Where the next push will start: a token for patch(), taken just before
+     * pushing something that may be replaced later.
+     */
+    int writePos() const { return wr_; }
+
+    /**
+     * Overwrite `len` bytes at `pos` in place: a lost block's silence, with the
+     * block itself once a later packet brings it (D13). Nothing moves, so
+     * timing and framing are untouched. Only if every byte is still unread and
+     * the first is at least `guard` bytes ahead of the reader -- the consumer
+     * must never be half way through copying what changes. Otherwise false,
+     * and the silence plays.
+     *
+     * Producer side, like the pushes. It writes bytes the consumer has not
+     * reached, never an index, so the contract above still holds.
+     */
+    bool patch(int pos, const uint8_t *data, int len, int guard);
+
 private:
     uint8_t *buf_  = nullptr;
     int      size_ = 0;

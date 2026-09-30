@@ -189,7 +189,7 @@
 // How many times each frame is sent. A broadcast has no acknowledgement and so
 // no retry: a frame lost in the air, or to the node's own Bluetooth radio, is
 // a hole in the audio unless the data went out twice. It now does, inside the
-// packet -- every packet carries the previous block too (MESH_BLOCKS_PER_PACKET)
+// packet -- every packet carries an older block too (MESH_BLOCKS_PER_PACKET)
 // -- so one copy is enough. Two back-to-back copies were the first fix
 // (2026-09-29: 12 Mbps with two copies lost nothing in 15 s, against 12% at
 // 6 Mbps with one) and `t2` still sends them, for comparison; copies carry
@@ -223,13 +223,26 @@
 // decoder state plus one byte per frame, so a block is 120 bytes.
 #define MESH_BLOCK_FRAMES    114
 
-// Blocks per packet: its own, and the one before. A packet lost in the air is
-// rebuilt from the next one, 2.6 ms later -- far enough apart that the burst
-// that took the first rarely takes the second, which is where two copies sent
-// back to back fell short. Two 120-byte blocks and the 6-byte header are a
+// Blocks per packet: its own, and an older one, MESH_REDUNDANCY_DISTANCE
+// packets back. A block lost in the air plays as silence until the packet
+// carrying it again arrives, which writes it over the silence in the client's
+// buffer before it plays. Two 120-byte blocks and the 6-byte header are a
 // 246-byte frame, 387 of them a second: about the airtime of the two-copy
-// stream it replaces.
+// stream it replaced.
 #define MESH_BLOCKS_PER_PACKET  2
+
+// How far back the second block is, in packets (2.6 ms each). It has to reach
+// past whatever took the first: a Bluetooth server loses its frames in runs
+// of 4-5 packets, 10-13 ms, when its own link has the radio (D13), and a
+// block one packet back was lost in the same run. It also has to arrive
+// before the silence plays -- well inside the ~44 ms a client keeps
+// buffered. Sent in every packet, so a server's `D<n>` changes it for the
+// whole mesh at once.
+#define MESH_REDUNDANCY_DISTANCE  1
+
+// Blocks a sender keeps to draw the older one from: the largest distance plus
+// one. A power of two.
+#define MESH_TX_HISTORY  16
 
 #define MESH_BLOCK_BYTES     (6 + MESH_BLOCK_FRAMES)
 #define ESPNOW_PAYLOAD_SIZE  (MESH_BLOCKS_PER_PACKET * MESH_BLOCK_BYTES)

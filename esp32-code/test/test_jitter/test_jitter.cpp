@@ -14,6 +14,7 @@
 
 #include <string.h>
 
+#include "holes.h"
 #include "jitter.h"
 #include "seqtracker.h"
 
@@ -427,6 +428,121 @@ static void test_seq_reset_forgets_the_stream(void) {
 }
 
 // ---------------------------------------------------------------------------
+// JitterBuffer::patch and HoleTable — a lost block written over its silence
+// when a later packet carries it (D13)
+// ---------------------------------------------------------------------------
+
+static void test_patch_replaces_unread_silence_in_place(void) {
+    const uint8_t a[4] = {1, 2, 3, 4}, b[4] = {5, 6, 7, 8}, lost[4] = {9, 10, 11, 12};
+    TEST_ASSERT_TRUE(jb.pushBlock(a, 4));
+    const int pos = jb.writePos();
+    TEST_ASSERT_TRUE(jb.pushSilence(4));
+    TEST_ASSERT_TRUE(jb.pushBlock(b, 4));
+
+    TEST_ASSERT_TRUE(jb.patch(pos, lost, 4, 0));
+    TEST_ASSERT_EQUAL_INT(12, jb.fill());   // nothing moved: timing is the silence's
+    const uint8_t want[12] = {1, 2, 3, 4, 9, 10, 11, 12, 5, 6, 7, 8};
+    uint8_t out[12];
+    TEST_ASSERT_TRUE(jb.peek(out, 12));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(want, out, 12);
+}
+
+static void test_patch_refuses_what_has_played(void) {
+    const uint8_t b[4] = {1, 2, 3, 4}, lost[4] = {9, 9, 9, 9};
+    const int pos = jb.writePos();
+    TEST_ASSERT_TRUE(jb.pushSilence(4));
+    TEST_ASSERT_TRUE(jb.pushBlock(b, 4));
+    jb.advance(4);   // the silence went out
+
+    TEST_ASSERT_FALSE(jb.patch(pos, lost, 4, 0));
+    uint8_t out[4];
+    TEST_ASSERT_TRUE(jb.peek(out, 4));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(b, out, 4);   // and what is next is untouched
+}
+
+static void test_patch_refuses_a_block_the_reader_is_inside(void) {
+    const uint8_t lost[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+    const int pos = jb.writePos();
+    TEST_ASSERT_TRUE(jb.pushSilence(8));
+    jb.advance(4);   // half of it has played: patching now would splice mid-block
+    TEST_ASSERT_FALSE(jb.patch(pos, lost, 8, 0));
+}
+
+static void test_patch_keeps_its_distance_from_the_reader(void) {
+    const uint8_t pad[8] = {0}, lost[4] = {9, 9, 9, 9};
+    TEST_ASSERT_TRUE(jb.pushBlock(pad, 8));
+    const int pos = jb.writePos();
+    TEST_ASSERT_TRUE(jb.pushSilence(4));
+    TEST_ASSERT_FALSE(jb.patch(pos, lost, 4, 12));   // 8 bytes ahead, guard 12
+    TEST_ASSERT_TRUE(jb.patch(pos, lost, 4, 8));     // exactly at the guard is fine
+}
+
+static void test_patch_refuses_what_was_never_written(void) {
+    const uint8_t lost[4] = {9, 9, 9, 9};
+    const int pos = jb.writePos();
+    TEST_ASSERT_FALSE(jb.patch(pos, lost, 4, 0));    // nothing pushed there yet
+    TEST_ASSERT_TRUE(jb.pushSilence(2));
+    TEST_ASSERT_FALSE(jb.patch(pos, lost, 4, 0));    // only half of it
+    TEST_ASSERT_FALSE(jb.patch(-1, lost, 4, 0));
+    TEST_ASSERT_FALSE(jb.patch(BUF_SIZE, lost, 4, 0));
+}
+
+static void test_patch_wraps_around_the_end(void) {
+    uint8_t pad[60] = {0};
+    TEST_ASSERT_TRUE(jb.pushBlock(pad, 60));
+    jb.advance(60);
+    const int pos = jb.writePos();
+    TEST_ASSERT_EQUAL_INT(60, pos);
+    TEST_ASSERT_TRUE(jb.pushSilence(8));   // bytes 60..63, then 0..3
+
+    const uint8_t lost[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    TEST_ASSERT_TRUE(jb.patch(pos, lost, 8, 0));
+    uint8_t out[8];
+    TEST_ASSERT_TRUE(jb.peek(out, 8));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(lost, out, 8);
+}
+
+static void test_holes_give_each_position_once(void) {
+    HoleTable h;
+    int pos = -1;
+    h.add(100, 40);
+    TEST_ASSERT_TRUE(h.take(100, &pos));
+    TEST_ASSERT_EQUAL_INT(40, pos);
+    TEST_ASSERT_FALSE(h.take(100, &pos));   // a second copy must not patch again
+}
+
+static void test_holes_only_know_what_was_added(void) {
+    HoleTable h;
+    int pos;
+    TEST_ASSERT_FALSE(h.take(7, &pos));
+    h.add(7, 12);
+    h.clear();
+    TEST_ASSERT_FALSE(h.take(7, &pos));
+}
+
+static void test_holes_a_lap_later_is_a_different_block(void) {
+    HoleTable h;
+    int pos;
+    h.add(5, 12);
+    TEST_ASSERT_FALSE(h.take(5 + HoleTable::SLOTS, &pos));   // same slot, not the same block
+    h.add(5 + HoleTable::SLOTS, 20);                          // overwrites the slot
+    TEST_ASSERT_FALSE(h.take(5, &pos));
+    TEST_ASSERT_TRUE(h.take(5 + HoleTable::SLOTS, &pos));
+    TEST_ASSERT_EQUAL_INT(20, pos);
+}
+
+static void test_holes_wrap_cleanly_at_65535(void) {
+    HoleTable h;
+    int pos;
+    h.add(65535, 1);
+    h.add(0, 2);
+    TEST_ASSERT_TRUE(h.take((uint16_t)(3 - 4), &pos));   // seq - distance across the wrap
+    TEST_ASSERT_EQUAL_INT(1, pos);
+    TEST_ASSERT_TRUE(h.take(0, &pos));
+    TEST_ASSERT_EQUAL_INT(2, pos);
+}
+
+// ---------------------------------------------------------------------------
 
 static int runAllTests(void) {
     UNITY_BEGIN();
@@ -461,6 +577,17 @@ static int runAllTests(void) {
     RUN_TEST(test_seq_server_restart_resyncs);
     RUN_TEST(test_seq_threshold_boundary);
     RUN_TEST(test_seq_reset_forgets_the_stream);
+
+    RUN_TEST(test_patch_replaces_unread_silence_in_place);
+    RUN_TEST(test_patch_refuses_what_has_played);
+    RUN_TEST(test_patch_refuses_a_block_the_reader_is_inside);
+    RUN_TEST(test_patch_keeps_its_distance_from_the_reader);
+    RUN_TEST(test_patch_refuses_what_was_never_written);
+    RUN_TEST(test_patch_wraps_around_the_end);
+    RUN_TEST(test_holes_give_each_position_once);
+    RUN_TEST(test_holes_only_know_what_was_added);
+    RUN_TEST(test_holes_a_lap_later_is_a_different_block);
+    RUN_TEST(test_holes_wrap_cleanly_at_65535);
 
     return UNITY_END();
 }

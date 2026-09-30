@@ -73,3 +73,20 @@ void JitterBuffer::advance(int len) {
     if (len <= 0) return;
     rd_ = (rd_ + len) & mask_;
 }
+
+bool JitterBuffer::patch(int pos, const uint8_t *data, int len, int guard) {
+    if (buf_ == nullptr || len <= 0 || pos < 0 || pos > mask_) return false;
+
+    const int r      = rd_;
+    int       filled = wr_ - r;
+    if (filled < 0) filled += size_;
+    // Distance from the reader to pos, the way the reader travels. A position
+    // it has already passed comes out near size_, beyond anything buffered.
+    const int ahead = (pos - r) & mask_;
+    if (ahead < guard || ahead + len > filled) return false;
+
+    const int first = minInt(len, size_ - pos);
+    memcpy(buf_ + pos, data, first);
+    if (len > first) memcpy(buf_, data + first, len - first);
+    return true;
+}
