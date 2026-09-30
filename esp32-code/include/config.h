@@ -235,10 +235,13 @@
 // past whatever took the first: a Bluetooth server loses its frames in runs
 // of 4-5 packets, 10-13 ms, when its own link has the radio (D13), and a
 // block one packet back was lost in the same run. It also has to arrive
-// before the silence plays -- well inside the ~44 ms a client keeps
-// buffered. Sent in every packet, so a server's `D<n>` changes it for the
-// whole mesh at once.
-#define MESH_REDUNDANCY_DISTANCE  1
+// before the silence plays -- 11 is 28 ms, inside the ~44 ms a client keeps
+// buffered. The price of any distance above 1 is that a lone lost packet is
+// no longer always saved: its copy can land on another loss. Measured behind
+// a streaming server, alternating 60 s runs (2026-09-30): holes 1.17% at 1,
+// 0.57% at 6, 0.33% at 11. Sent in every packet, so a server's `D<n>`
+// changes it for the whole mesh at once.
+#define MESH_REDUNDANCY_DISTANCE  11
 
 // Blocks a sender keeps to draw the older one from: the largest distance plus
 // one. A power of two.
