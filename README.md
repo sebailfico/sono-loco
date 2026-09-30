@@ -368,6 +368,35 @@ sha does not describe what is on the board. `tools/bench-mesh.ps1` warns about
 that, and about a board running anything other than the tree you are reading —
 which is the usual cause of a bench result that will not reproduce. See D10.
 
+### Updating a node without a cable
+
+A node plugged into a stereo across the house has power and nothing else. It
+can be updated over the home WiFi, with any other node on USB relaying the
+request over the mesh:
+
+```powershell
+./tools/ota-wifi.ps1 -Port COM22     # once per node, over USB: you type the WiFi password
+./tools/ota.ps1 -Env esp32wrover2    # from then on, from anywhere on the LAN
+```
+
+`ota.ps1` builds the image, has the relay broadcast `U<room name>`, finds the
+node on the LAN when it reboots into **update mode** (two beeps), checks it is the
+node the image was built for, uploads it (a rising tone when it is written), and
+then asks again to read the new version back. A falling tone means update mode
+gave up — no WiFi stored, a wrong password, or five minutes with no upload — and
+the node is back on the mesh.
+
+A new image is on probation until it has run a minute with its radio up; any
+reset before that — a crash, a hang, a power cut — boots the previous one. So an
+update that breaks the mesh undoes itself instead of needing the cable.
+
+Two prerequisites, both over USB, once: the node needs the two-slot partition
+table (`min_spiffs.csv`), which any USB flash of a build from D15 onwards writes,
+and it needs the WiFi stored. The request is ignored by a node that is serving a
+phone, and only heard inside its own mesh. The endpoint takes an image from
+anyone on the LAN for as long as update mode lasts — five minutes, and only when
+asked. See D15 in `docs/decisions.md`.
+
 ### Tests
 
 The ring buffer and packet sequence accounting run on the host, no board needed:
@@ -408,6 +437,8 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once — no reboot, because nothing about the id is decided at boot |
 | `p` | listen for 60 s and join the mesh that offers itself — the speaker half of pairing. Same as a three-second BOOT hold on a node that cannot be a server |
 | `o` | offer this mesh for 60 s, so a listening node can join it — the server half. Same as a three-second BOOT hold on a server-capable node |
+| `U` | bare: reboot into update mode. `U<name>` asks the node with that room name or MAC, over the mesh, to do so — what `tools/ota.ps1` sends |
+| `W` | `W<ssid>`, then the password on the next line: the home WiFi update mode joins. Kept in NVS. Bare `W` prints the SSID and whether a password is stored, never the password. `tools/ota-wifi.ps1` asks for both |
 | `a` | BT server: print and reset the A2DP window — packets/s, packet size, a histogram of the gaps between packets from the Bluetooth stack, and the server's own ring (`jit`, `und`, `ovf`, `dry`). A gap longer than the ring holds is a hole in every room |
 | `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
 | `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
@@ -445,7 +476,9 @@ further; the exception below is argued in `docs/decisions.md` (D7).
 - `esp32-code/lib/mesh/` — the mesh name to mesh id derivation. Pure arithmetic
   on a string, and in a library because two nodes disagreeing about what a name
   hashes to produces silence with nothing in the log — the one failure mode
-  worth pinning on the host rather than chasing on a bench. See D12.
+  worth pinning on the host rather than chasing on a bench. See D12. Also which
+  node an update request names (D15): a match too loose reboots the wrong
+  speaker off the mesh.
 - `esp32-code/lib/adpcm/` — the mesh codec: IMA ADPCM, stereo, in blocks that
   each carry their decoder state, so any block decodes alone. Pinned to the
   Python reference in `tools/codec/abtest.py` by golden vectors: two nodes built
@@ -486,6 +519,10 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   puts every node into bench mode by design.
 - `tools/capture-serial.ps1` — timestamped serial capture of a single node, so
   two manual runs can be compared.
+- `tools/ota.ps1` — updates a node over the home WiFi, relayed by any node on
+  USB: build, request, find on the LAN, upload, read the version back. D15.
+- `tools/ota-wifi.ps1` — stores the home WiFi on a node, once, over USB. The
+  password is typed at a masked prompt and never passes through anything else.
 - `tools/codec/abtest.py` — hear what a client plays before it is firmware: a
   WAV in, the original, the old 22.05 kHz mono path and the ADPCM path out, at
   the same rate and level. It decided D5, and its encoder is the reference

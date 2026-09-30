@@ -337,6 +337,8 @@ worth revisiting once there is a second person flashing boards, or an OTA path
 (`TODO.md`) that has to decide whether an image is newer than the running one —
 `git describe` output does not order without parsing, and that would be the
 moment to put a real semver in the tag and compare against it.
+D15's update mode did not bring that moment: it never compares versions --
+the PC decides what to send, and reads `fw=` back afterwards to check it.
 
 ---
 
@@ -720,3 +722,85 @@ assumed, and differences in DAC latency are not modelled at all; either
 would call for a per-node trim. A source whose schedule moves often — each
 move costs every client a jump. And a sample rate other than 44.1 kHz, which
 changes every conversion in `lib/sync` along with everything else (`TODO.md`).
+
+---
+
+## D15 — Updates come over the home WiFi, in a boot of their own
+
+**Decided:** 2026-09-30. **Status:** built and host-tested; not yet run on
+hardware (`TODO.md`).
+
+A node plugged into a stereo across the house has power and no cable to the
+PC, so a new image has to arrive by radio. It arrives over the home network:
+a node on USB broadcasts `U<room name>` over the mesh, the named node reboots
+into **update mode**, joins the home WiFi with credentials it keeps in NVS,
+and takes one image over HTTP. `tools/ota.ps1` drives all of it.
+
+**Why a boot of its own.** A station follows its access point's channel, and
+the router here is on channel 1 while the mesh is on 11 (`ESPNOW_CHANNEL`,
+chosen to get away from it). A node cannot be in both, so update mode never
+starts the mesh — or Bluetooth, the jitter buffer, anything that would claim
+the radio or the heap. It is flagged in RTC memory and entered through a
+restart, exactly like bench mode (D9), and cleared before it runs, so any reset
+out of it lands back in normal mode. It ends in a restart whatever happens:
+into the new image, or after five minutes with nothing uploaded.
+
+**Why the request has a group of its own.** It could have been a beacon-style
+packet in the audio group. But a node from before update mode takes the sender
+lock *before* it checks a packet's length, so it would lock onto the relay and
+ignore its real server until the next reboot. Stamped with `MESH_CONTROL_FORMAT`
+instead of `MESH_WIRE_FORMAT`, the request is just another mesh's traffic to an
+old node, and a mixed mesh during a rollout is exactly when requests are sent.
+
+**Why two app slots, and rollback.** The image is written into the slot not
+running (`min_spiffs.csv`, 1.875 MB each; the classic build is 1.60 MB), so
+the old one is still bootable. The bootloader in this Arduino core is built with
+rollback enabled, but the core marks a new image good before `setup()` runs,
+which only catches an image that dies before main. `verifyRollbackLater()`
+takes that decision back: an image is kept once it has run `OTA_CONFIRM_MS`
+with its radio up, or when it answers the next update request — and until then
+any reset boots the previous one. The radio condition is the point: an image
+whose mesh never comes up can never hear another request, and keeping it would
+make the USB cable the only way back.
+
+**Why ESP-IDF, not the Arduino classes.** The first version used Arduino's
+`WiFi`, `WebServer`, `Update` and `ESPmDNS`. It worked, and it cost **4,000
+bytes of static DRAM on every boot**: mDNS's 1,460-byte packet buffer, lwIP's
+1,184-byte DNS table, smartconfig's timers, the rest small. A Bluetooth server
+has 21–23 KB free while it streams and forwards (`CHANGELOG.md`), and running
+out of DRAM is what last crashed one. The IDF version — `esp_wifi`, `esp_netif`,
+`esp_http_server`, `esp_ota_*`, the APIs the mesh already uses — costs 80 bytes
+static, and its buffers are heap, taken only on the boot that updates. The image
+is the raw POST body rather than a multipart form, which also leaves nothing to
+parse.
+
+**Why no mDNS, then.** It is the 1,460 bytes. The PC finds the node instead by
+asking every address in its /24 for `GET /` and keeping the one that names
+itself as the target — 1.6 s on this LAN, and it needs nothing from the router
+or from Windows' name resolution. `-Ip` covers a wider network. The node also
+sets its DHCP hostname to the lowercased room name, so the router's client list
+shows it.
+
+**Security.** For the five minutes update mode lasts, anyone on the LAN can
+upload an image; the request that opens the window is unauthenticated
+broadcast, honoured only inside the node's own mesh. The WiFi password is in
+NVS in plain text, readable by anyone holding the board and a USB cable. For a
+home LAN that is the same trust the router already extends; it is written down
+so that it is a decision and not an accident.
+
+**What was considered:** relaying the image itself over ESP-NOW, with the node
+on USB as the proxy — no credentials, no channel change, works where the WiFi
+does not reach, but 250-byte frames with acknowledgement and retry, and a
+binary transfer through a serial line the relay also logs on: much more code,
+worth it only if the WiFi does not reach a node. A second ESP32 wired to the
+node's UART as a WiFi serial bridge — two boards at the stereo to do what
+firmware can. A Raspberry Pi next to the node running esptool's RFC 2217
+server — little software, but a Pi 1 has no WiFi. `espota` (ArduinoOTA) — needs
+the board to connect back to the PC, which Windows' firewall blocks by default.
+
+**What would change this:** a node out of reach of the home WiFi — then the
+ESP-NOW relay above. A second person on the LAN who should not be able to flash
+a speaker — then a shared secret with the request and the upload. A second
+household mesh in range whose members matter — the same. Or a build outgrowing
+1.875 MB: the build fails when it does, and the choice is then a smaller
+image or bigger slots on boards with more than 4 MB of flash.
