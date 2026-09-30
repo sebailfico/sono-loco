@@ -35,6 +35,7 @@
 // Hardware-independent parts of the CLIENT receive path, tested on the host
 // with `pio test -e native` — see test/test_jitter.
 #include "adpcm.h"
+#include "blocks.h"
 #include "drift.h"
 #include "holes.h"
 #include "jitter.h"
@@ -366,10 +367,11 @@ void deinitI2SForTones() {
 // two bytes.
 //
 // The payload is MESH_BLOCKS_PER_PACKET ADPCM blocks (lib/adpcm): the block
-// numbered `seq`, then the one numbered `seq - distance`, which is how a client
-// rebuilds a packet it missed from a later one (D13). `len` says how many
-// bytes are there -- the first packets of a stream have no older block to
-// carry -- and, in its upper bits, the distance and whether this is a repeat.
+// numbered `seq`, then redundancy for older ones (D13) -- either the block
+// numbered `seq - distance` itself, or, with ESPNOW_LEN_XOR, the XOR of blocks
+// `seq - 1` and `seq - distance`. `len` says how many bytes are there -- the
+// first packets of a stream have nothing older to carry -- and, in its upper
+// bits, the distance, the mode and whether this is a repeat.
 typedef struct __attribute__((packed)) {
     uint16_t group;
     uint16_t seq;
@@ -387,21 +389,23 @@ static_assert(MESH_BLOCK_FRAMES <= ADPCM_MAX_FRAMES, "block too long for the enc
 // holds the length and the rest is free.
 //   bits 0-7   payload bytes. Mask with ESPNOW_LEN_BYTES before using `len`
 //              as a length anywhere -- unmasked it is tens of kilobytes.
-//   bits 8-14  the distance: the second block's seq is `seq - distance`. On
-//              the wire so a server can change it (`D<n>`) and every client
-//              follows without a reflash.
+//   bits 8-11  the distance: the second block is `seq - distance`, or its
+//              parity with `seq - 1`. On the wire so a server can change it
+//              (`D<n>`, `X<n>`) and every client follows without a reflash.
+//   bit 12     ESPNOW_LEN_XOR: the second block is that parity.
 //   bit 15     set on the second and later copies of a frame (ESPNOW_TX_COPIES).
 //              The receiver needs it only for its counters: a copy whose
 //              original arrived is dropped either way, but it was meant, and
 //              must not read as a duplicate nobody sent.
 #define ESPNOW_LEN_BYTES       0x00FF
 #define ESPNOW_LEN_DIST_SHIFT  8
-#define ESPNOW_LEN_DIST_MAX    0x7F
+#define ESPNOW_LEN_DIST_MAX    0x0F
+#define ESPNOW_LEN_XOR         0x1000
 #define ESPNOW_LEN_REPEAT      0x8000
 static_assert(ESPNOW_PAYLOAD_SIZE <= ESPNOW_LEN_BYTES, "payload length must fit len's low byte");
-static_assert(MESH_TX_HISTORY <= ESPNOW_LEN_DIST_MAX + 1, "distance must fit len's bits 8-14");
-static_assert(MESH_TX_HISTORY <= HoleTable::SLOTS,
-              "clients must remember holes as far back as servers reach");
+static_assert(MESH_TX_HISTORY <= ESPNOW_LEN_DIST_MAX + 1, "distance must fit len's bits 8-11");
+static_assert(MESH_TX_HISTORY <= HoleTable::SLOTS && MESH_TX_HISTORY <= BlockStore::SLOTS,
+              "clients must remember as far back as servers reach");
 static_assert((MESH_TX_HISTORY & (MESH_TX_HISTORY - 1)) == 0, "MESH_TX_HISTORY must be a power of two");
 static_assert(MESH_REDUNDANCY_DISTANCE < MESH_TX_HISTORY, "the distance must be inside the history");
 
@@ -412,9 +416,10 @@ static_assert(MESH_REDUNDANCY_DISTANCE < MESH_TX_HISTORY, "the distance must be 
 // through whatever amp it has. `fgn=` climbing on a node that should be
 // playing is the sign of a node left on the old firmware. Change it whenever
 // the payload changes meaning. XOR is its own inverse, so one helper both
-// stamps and reads. 0xAD01 was ADPCM with the previous block; 0xAD02 carries
-// the distance in `len`.
-#define MESH_WIRE_FORMAT   0xAD02
+// stamps and reads. 0xAD01 was ADPCM with the previous block; 0xAD02 carried
+// the distance in `len`; 0xAD03 adds the parity mode, which a 0xAD02 client
+// would play as audio.
+#define MESH_WIRE_FORMAT   0xAD03
 static inline uint16_t wireGroup(uint16_t id) { return id ^ MESH_WIRE_FORMAT; }
 
 static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -458,12 +463,15 @@ static SemaphoreHandle_t  txPaceTick  = nullptr;
 
 // The one place audio becomes packets, whoever the source is -- A2DP on a
 // server, the synthetic tone on a bench source. Frames go into the encoder;
-// each completed block goes out with an older one behind it, `txDistance`
-// blocks back (MESH_REDUNDANCY_DISTANCE; `D<n>` changes it until reboot).
+// each completed block goes out with redundancy for older ones behind it:
+// the block `txDistance` back, or with `txParity` the XOR of that one and the
+// one just before (MESH_REDUNDANCY_*; `D<n>` and `X<n>` change them until
+// reboot).
 static AdpcmStereoEncoder txEncoder;
 static uint8_t            txHistory[MESH_TX_HISTORY][MESH_BLOCK_BYTES];   // by seq
 static uint16_t           txHistoryBlocks = 0;   // blocks since meshTxReset, saturating
 static volatile uint8_t   txDistance      = MESH_REDUNDANCY_DISTANCE;
+static volatile bool      txParity        = MESH_REDUNDANCY_PARITY;
 
 /** Start a new stream: no state carried over, and no older block to send. */
 static void meshTxReset() {
@@ -483,13 +491,20 @@ static bool meshTxFrame(int16_t left, int16_t right) {
     pkt.seq   = txSeq++;
     memcpy(pkt.data, txEncoder.block(), MESH_BLOCK_BYTES);
     uint16_t len = MESH_BLOCK_BYTES;
-    const uint8_t d = txDistance;
+    const uint8_t d      = txDistance;
+    const bool    parity = txParity && d >= 2;   // at 1 the parity would be zeroes
     if (d > 0 && txHistoryBlocks >= d) {
-        memcpy(pkt.data + MESH_BLOCK_BYTES,
-               txHistory[(uint16_t)(pkt.seq - d) & (MESH_TX_HISTORY - 1)], MESH_BLOCK_BYTES);
+        const uint8_t *far = txHistory[(uint16_t)(pkt.seq - d) & (MESH_TX_HISTORY - 1)];
+        if (parity) {
+            xorBlocks(pkt.data + MESH_BLOCK_BYTES,
+                      txHistory[(uint16_t)(pkt.seq - 1) & (MESH_TX_HISTORY - 1)], far,
+                      MESH_BLOCK_BYTES);
+        } else {
+            memcpy(pkt.data + MESH_BLOCK_BYTES, far, MESH_BLOCK_BYTES);
+        }
         len += MESH_BLOCK_BYTES;
     }
-    pkt.len = len | (uint16_t)(d << ESPNOW_LEN_DIST_SHIFT);
+    pkt.len = len | (uint16_t)(d << ESPNOW_LEN_DIST_SHIFT) | (parity ? ESPNOW_LEN_XOR : 0);
     memcpy(txHistory[pkt.seq & (MESH_TX_HISTORY - 1)], txEncoder.block(), MESH_BLOCK_BYTES);
     if (txHistoryBlocks < 0xFFFF) txHistoryBlocks++;
 
@@ -527,9 +542,12 @@ static_assert(MESH_BLOCK_FRAMES * CLIENT_FRAME_BYTES < JITTER_BUF_SIZE / 4,
 static uint8_t     *jStorage = nullptr;
 static JitterBuffer jbuf;
 static SeqTracker   seqTracker(SEQ_RESYNC_THRESHOLD, MAX_GAP_FILL_PKTS);
-// Where each lost block's silence went, for the later packet that carries it.
-// Positions in jbuf: cleared with it, and on a resync, which renumbers.
+// Where each lost block's silence went, for the later packet that carries it,
+// and the encoded blocks held, for undoing a parity. Both keyed by seq:
+// cleared with jbuf, and on a resync, which renumbers.
 static HoleTable    rxHoles;
+static uint8_t      rxStoreBuf[BlockStore::SLOTS * MESH_BLOCK_BYTES];
+static BlockStore   rxStore;
 
 // Clock-drift correction. The controller only decides; driveClientI2S applies.
 // Runtime-switchable rather than compile-time so a bench run can measure the
@@ -549,9 +567,14 @@ static volatile uint32_t rxUnderrun = 0;   // times playback outran the buffer
 // in single packets is what redundancy or a repeat can recover; loss in long
 // bursts is not. Printed and reset by `l`.
 static volatile uint32_t rxLossRuns[8];
-// Blocks whose original frame was lost and whose repeat copy arrived instead:
-// each one is a hole ESPNOW_TX_COPIES filled. `rec` on the status lines.
+// Blocks whose original frame was lost and that played anyway: rebuilt from a
+// later packet's redundancy, or a repeat copy standing in. `rec` on the
+// status lines.
 static volatile uint32_t rxRecovered = 0;
+// Blocks rebuilt too late: their silence had already played, or was about to.
+// A count that grows with the distance says the buffer is too shallow for it.
+// `late=` in `l`, which resets it.
+static volatile uint32_t rxLate = 0;
 
 // Lock onto the first node we hear so two simultaneous servers can never
 // interleave their streams into one jitter buffer.
@@ -626,6 +649,7 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     memcpy(&seq,   data + 2, 2);
     memcpy(&plen,  data + 4, 2);
     const bool     repeat = (plen & ESPNOW_LEN_REPEAT) != 0;
+    const bool     parity = (plen & ESPNOW_LEN_XOR) != 0;
     const uint16_t dist   = (plen >> ESPNOW_LEN_DIST_SHIFT) & ESPNOW_LEN_DIST_MAX;
     plen &= ESPNOW_LEN_BYTES;
 
@@ -689,7 +713,10 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     const uint32_t resyncBefore = seqTracker.resync;
     const SeqResult sr = seqTracker.update(seq, repeat);
     if (!sr.accept) return;   // exact retransmit — replaying it is an audible stutter
-    if (seqTracker.resync != resyncBefore) rxHoles.clear();   // numbering restarted
+    if (seqTracker.resync != resyncBefore) {   // numbering restarted
+        rxHoles.clear();
+        rxStore.clear();
+    }
     // Blocks, not frames: with every frame sent twice, counting frames would
     // make rx twice the source's tx and halve every loss percentage.
     rxCount++;
@@ -715,16 +742,37 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
         rxOverflow++;
     }
 
-    // The older block this packet carries, over its silence if it was lost and
-    // has not played. The guard keeps the write clear of the batch the I2S
-    // side may be copying out right now.
+    rxStore.put(seq, payload);
+
+    // The redundancy: an older block itself, or the parity of two, of which
+    // the one still missing falls out if the other is held. It goes over the
+    // silence played in its place, if that has not played yet; the guard
+    // keeps the write clear of the batch the I2S side may be copying out.
+    if (blocks < 2 || dist == 0) return;
+    static uint8_t rebuilt[MESH_BLOCK_BYTES];
+    const uint8_t *second = payload + MESH_BLOCK_BYTES;
+    const uint8_t *block  = nullptr;
+    uint16_t       target = 0;
+    if (!parity) {
+        target = (uint16_t)(seq - dist);
+        block  = second;
+    } else {
+        const uint8_t *known;
+        if (parityRebuildable(rxStore, seq, dist, &target, &known)) {
+            xorBlocks(rebuilt, second, known, MESH_BLOCK_BYTES);
+            block = rebuilt;
+        }
+    }
     int pos;
-    if (blocks >= 2 && dist > 0 && rxHoles.take((uint16_t)(seq - dist), &pos) &&
-        adpcmDecodeStereoBlock(payload + MESH_BLOCK_BYTES, MESH_BLOCK_FRAMES, pcm) &&
+    if (block == nullptr || !rxHoles.take(target, &pos)) return;
+    rxStore.put(target, block);   // it may complete another parity later
+    if (adpcmDecodeStereoBlock(block, MESH_BLOCK_FRAMES, pcm) &&
         jbuf.patch(pos, (const uint8_t *)pcm, BLOCK_PCM, CLIENT_BATCH * CLIENT_FRAME_BYTES)) {
         seqTracker.recovered(1);   // played, so not a hole
         rxRecovered++;
         rxCount++;                 // rx + lost still adds up to the source's tx
+    } else {
+        rxLate++;
     }
 }
 
@@ -982,8 +1030,9 @@ static void a2dpStatsPrint() {
     DEBUG_SERIAL.printf(" tx=%lu txlat=", (unsigned long)txSent);
     for (int i = 0; i < 8; i++)
         DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)txLatHist[i]);
-    DEBUG_SERIAL.printf(" txlatmax=%.1fms rep=%u dist=%u pace=%lu mute=%d qfull=%lu\n",
-                        txLatMaxUs / 1000.0f, txRepeat, txDistance, (unsigned long)txPaceUs,
+    DEBUG_SERIAL.printf(" txlatmax=%.1fms rep=%u dist=%u par=%d pace=%lu mute=%d qfull=%lu\n",
+                        txLatMaxUs / 1000.0f, txRepeat, txDistance, txParity ? 1 : 0,
+                        (unsigned long)txPaceUs,
                         outputMuted ? 1 : 0, (unsigned long)txQueueFull);
 }
 
@@ -1399,6 +1448,7 @@ static unsigned long clientRetryAfterMs = 0;
 static void resetRxState() {
     jbuf.reset();
     rxHoles.clear();
+    rxStore.clear();
     seqTracker.reset();
     driftCtl.reset(millis());
     jReady       = false;
@@ -1463,6 +1513,7 @@ static void enterClient() {
 
     jbuf.reset();
     rxHoles.clear();
+    rxStore.clear();
     seqTracker.reset();
     driftCtl.reset(millis());
     jReady   = false;
@@ -1934,6 +1985,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   t  `t<n>` sends each mesh frame n times, 1..3, until reboot
  *   P  `P<us>` minimum spacing between audio packets, 0 = none, until reboot
  *   D  `D<n>` each packet also carries the block n packets back, until reboot
+ *   X  `X<n>` each packet carries the XOR of blocks 1 and n back instead
  *   R  `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot
  *
  * Bluetooth server diagnostics, for telling the A2DP side from the mesh side:
@@ -1948,6 +2000,22 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   j  play the connect jingle as a connection does; `J` the old way, with
  *      the library still writing -- run either during a stream to compare
  */
+/**
+ * `D<n>`: each packet carries the block n packets back; `X<n>`: the XOR of
+ * blocks 1 and n back (n >= 2). Until reboot; 0 = none. Clients read both
+ * off the wire, so this moves the whole mesh.
+ */
+static void benchSetRedundancy(bool parity) {
+    char line[8];
+    benchReadLine(line, sizeof(line));
+    const int n = atoi(line);
+    if (n >= 0 && n < MESH_TX_HISTORY && !(parity && n == 1)) {
+        txDistance = (uint8_t)n;
+        txParity   = parity;
+    }
+    DEBUG_SERIAL.printf("[MESH] distance=%u parity=%d\n", txDistance, txParity ? 1 : 0);
+}
+
 static void benchServiceSerial() {
     while (DEBUG_SERIAL.available()) {
         switch (DEBUG_SERIAL.read()) {
@@ -2000,8 +2068,10 @@ static void benchServiceSerial() {
                 break;
             }
             case 'l':
-                DEBUG_SERIAL.printf("[LOSS] rx=%lu lost=%lu rec=%lu runs=", (unsigned long)rxCount,
-                                    (unsigned long)seqTracker.lost, (unsigned long)rxRecovered);
+                DEBUG_SERIAL.printf("[LOSS] rx=%lu lost=%lu rec=%lu late=%lu runs=",
+                                    (unsigned long)rxCount, (unsigned long)seqTracker.lost,
+                                    (unsigned long)rxRecovered, (unsigned long)rxLate);
+                rxLate = 0;
                 for (int i = 0; i < 8; i++) {
                     DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)rxLossRuns[i]);
                     rxLossRuns[i] = 0;
@@ -2016,16 +2086,8 @@ static void benchServiceSerial() {
                 DEBUG_SERIAL.printf("[MESH] repeat=%u\n", txRepeat);
                 break;
             }
-            case 'D': {
-                // `D<n>`: which older block each packet carries, n packets
-                // back, until reboot; 0 = none. Clients read it off the wire.
-                char line[8];
-                benchReadLine(line, sizeof(line));
-                const int n = atoi(line);
-                if (n >= 0 && n < MESH_TX_HISTORY) txDistance = (uint8_t)n;
-                DEBUG_SERIAL.printf("[MESH] distance=%u\n", txDistance);
-                break;
-            }
+            case 'D': benchSetRedundancy(false); break;
+            case 'X': benchSetRedundancy(true);  break;
             case 'P': {
                 // `P<us>`: minimum spacing between audio packets from this
                 // node, until reboot; 0 = unpaced. See ESPNOW_TX_PACE_US.
@@ -2260,6 +2322,7 @@ void setup() {
                   " bytes, or not a power of two");
     }
     txEncoder.begin(MESH_BLOCK_FRAMES);
+    rxStore.init(rxStoreBuf, MESH_BLOCK_BYTES);
 
     // ESP-NOW must be up before BT to ensure coexistence layer is ready
     setupESPNow();

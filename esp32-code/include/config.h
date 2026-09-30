@@ -243,6 +243,14 @@
 // every packet, so a server's `D<n>` changes it for the whole mesh at once.
 #define MESH_REDUNDANCY_DISTANCE  11
 
+// Parity instead of a plain older block: the second block is the XOR of the
+// blocks 1 and MESH_REDUNDANCY_DISTANCE back, and a client that holds either
+// rebuilds the other. The same bytes buy both distances -- a lone loss comes
+// back from the next packet, a run from the one DISTANCE later -- where a
+// plain block buys one. `X<n>` on a server turns it on with distance n,
+// `D<n>` off.
+#define MESH_REDUNDANCY_PARITY  0
+
 // Blocks a sender keeps to draw the older one from: the largest distance plus
 // one. A power of two.
 #define MESH_TX_HISTORY  16

@@ -14,6 +14,7 @@
 
 #include <string.h>
 
+#include "blocks.h"
 #include "holes.h"
 #include "jitter.h"
 #include "seqtracker.h"
@@ -543,6 +544,122 @@ static void test_holes_wrap_cleanly_at_65535(void) {
 }
 
 // ---------------------------------------------------------------------------
+// BlockStore and parity — rebuilding a block from the XOR of two (D13)
+// ---------------------------------------------------------------------------
+
+static const int BLK = 4;
+static uint8_t   blockStorage[BlockStore::SLOTS * BLK];
+
+static void blk(uint8_t *out, uint8_t v) {
+    for (int i = 0; i < BLK; i++) out[i] = (uint8_t)(v + i);
+}
+
+static void test_blocks_hold_what_was_put(void) {
+    BlockStore bs;
+    TEST_ASSERT_TRUE(bs.init(blockStorage, BLK));
+    uint8_t a[BLK];
+    blk(a, 10);
+    TEST_ASSERT_NULL(bs.get(7));
+    bs.put(7, a);
+    TEST_ASSERT_NOT_NULL(bs.get(7));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(a, bs.get(7), BLK);
+    bs.clear();
+    TEST_ASSERT_NULL(bs.get(7));
+    TEST_ASSERT_FALSE(bs.init(nullptr, BLK));
+}
+
+static void test_blocks_a_lap_later_is_a_different_block(void) {
+    BlockStore bs;
+    bs.init(blockStorage, BLK);
+    uint8_t a[BLK], b[BLK];
+    blk(a, 1);
+    blk(b, 2);
+    bs.put(3, a);
+    TEST_ASSERT_NULL(bs.get(3 + BlockStore::SLOTS));   // same slot, not that block
+    bs.put(3 + BlockStore::SLOTS, b);
+    TEST_ASSERT_NULL(bs.get(3));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(b, bs.get(3 + BlockStore::SLOTS), BLK);
+}
+
+static void test_xor_rebuilds_either_half(void) {
+    uint8_t a[BLK], b[BLK], p[BLK], out[BLK];
+    blk(a, 0x31);
+    blk(b, 0xC7);
+    xorBlocks(p, a, b, BLK);
+    xorBlocks(out, p, b, BLK);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(a, out, BLK);
+    xorBlocks(out, p, a, BLK);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(b, out, BLK);
+}
+
+static void test_parity_rebuilds_the_near_block(void) {
+    // Packet 100 carries 99 ^ 89. 99 was lost -- a lone loss, the common
+    // case -- and 89 arrived: 99 comes back from the very next packet.
+    BlockStore bs;
+    bs.init(blockStorage, BLK);
+    uint8_t b89[BLK];
+    blk(b89, 89);
+    bs.put(89, b89);
+    uint16_t missing = 0;
+    const uint8_t *known = nullptr;
+    TEST_ASSERT_TRUE(parityRebuildable(bs, 100, 11, &missing, &known));
+    TEST_ASSERT_EQUAL_UINT16(99, missing);
+    TEST_ASSERT_EQUAL_PTR(bs.get(89), known);
+}
+
+static void test_parity_rebuilds_the_far_block(void) {
+    // A run took 89..93; packet 100 brings 99 ^ 89, and 99 arrived.
+    BlockStore bs;
+    bs.init(blockStorage, BLK);
+    uint8_t b99[BLK];
+    blk(b99, 99);
+    bs.put(99, b99);
+    uint16_t missing = 0;
+    const uint8_t *known = nullptr;
+    TEST_ASSERT_TRUE(parityRebuildable(bs, 100, 11, &missing, &known));
+    TEST_ASSERT_EQUAL_UINT16(89, missing);
+    TEST_ASSERT_EQUAL_PTR(bs.get(99), known);
+}
+
+static void test_parity_needs_exactly_one_missing(void) {
+    BlockStore bs;
+    bs.init(blockStorage, BLK);
+    uint16_t missing;
+    const uint8_t *known;
+    TEST_ASSERT_FALSE(parityRebuildable(bs, 100, 11, &missing, &known));   // both missing
+    uint8_t x[BLK];
+    blk(x, 5);
+    bs.put(99, x);
+    bs.put(89, x);
+    TEST_ASSERT_FALSE(parityRebuildable(bs, 100, 11, &missing, &known));   // nothing to do
+}
+
+static void test_parity_at_distance_one_is_nothing(void) {
+    BlockStore bs;
+    bs.init(blockStorage, BLK);
+    uint8_t x[BLK];
+    blk(x, 5);
+    bs.put(98, x);
+    uint16_t missing;
+    const uint8_t *known;
+    TEST_ASSERT_FALSE(parityRebuildable(bs, 100, 1, &missing, &known));
+    TEST_ASSERT_FALSE(parityRebuildable(bs, 100, 0, &missing, &known));
+}
+
+static void test_parity_across_65535(void) {
+    BlockStore bs;
+    bs.init(blockStorage, BLK);
+    uint8_t x[BLK];
+    blk(x, 5);
+    bs.put(65528, x);   // seq 3 - 11 + 65536
+    uint16_t missing = 0;
+    const uint8_t *known = nullptr;
+    TEST_ASSERT_TRUE(parityRebuildable(bs, 3, 11, &missing, &known));
+    TEST_ASSERT_EQUAL_UINT16(2, missing);
+    TEST_ASSERT_EQUAL_PTR(bs.get(65528), known);
+}
+
+// ---------------------------------------------------------------------------
 
 static int runAllTests(void) {
     UNITY_BEGIN();
@@ -588,6 +705,15 @@ static int runAllTests(void) {
     RUN_TEST(test_holes_only_know_what_was_added);
     RUN_TEST(test_holes_a_lap_later_is_a_different_block);
     RUN_TEST(test_holes_wrap_cleanly_at_65535);
+
+    RUN_TEST(test_blocks_hold_what_was_put);
+    RUN_TEST(test_blocks_a_lap_later_is_a_different_block);
+    RUN_TEST(test_xor_rebuilds_either_half);
+    RUN_TEST(test_parity_rebuilds_the_near_block);
+    RUN_TEST(test_parity_rebuilds_the_far_block);
+    RUN_TEST(test_parity_needs_exactly_one_missing);
+    RUN_TEST(test_parity_at_distance_one_is_nothing);
+    RUN_TEST(test_parity_across_65535);
 
     return UNITY_END();
 }
