@@ -430,6 +430,13 @@ static uint32_t          txStartUs    = 0;
 // `t<n>` changes it until reboot, so one Bluetooth session can compare.
 static volatile uint8_t  txRepeat     = ESPNOW_TX_COPIES;
 
+// Minimum spacing of audio packets (ESPNOW_TX_PACE_US); `P<us>` changes it.
+// The wait is an esp_timer, not vTaskDelay: a 1 ms tick would round 2.3 ms up
+// to 3 and fall behind the stream.
+static volatile uint32_t txPaceUs     = ESPNOW_TX_PACE_US;
+static esp_timer_handle_t txPaceTimer = nullptr;
+static SemaphoreHandle_t  txPaceTick  = nullptr;
+
 // The one place audio becomes packets, whoever the source is -- A2DP on a
 // server, the synthetic tone on a bench source. Frames go into the encoder;
 // each completed block goes out with the previous one behind it.
@@ -527,8 +534,19 @@ static volatile bool    senderLocked    = false;
 
 static void espnowTxTask(void *) {
     AudioPacket pkt;
+    uint32_t lastAudioUs = 0;
     while (true) {
         if (xQueueReceive(txQueue, &pkt, portMAX_DELAY) != pdTRUE) continue;
+
+        if (pkt.len && txPaceUs && txPaceTimer &&
+            uxQueueMessagesWaiting(txQueue) < ESPNOW_TX_PACE_BACKLOG) {
+            const uint32_t since = micros() - lastAudioUs;
+            if (since < txPaceUs) {
+                esp_timer_start_once(txPaceTimer, txPaceUs - since);
+                xSemaphoreTake(txPaceTick, pdMS_TO_TICKS(50));
+            }
+        }
+        if (pkt.len) lastAudioUs = micros();
 
         const uint8_t copies = pkt.len ? txRepeat : 1;   // beacons go once
         for (uint8_t c = 0; c < copies; c++) {
@@ -791,6 +809,14 @@ static void setupESPNow() {
     }
     xSemaphoreGive(txDone);   // radio starts idle
 
+    txPaceTick = xSemaphoreCreateBinary();
+    if (txPaceTick) {
+        esp_timer_create_args_t pa = {};
+        pa.callback = [](void *) { xSemaphoreGive(txPaceTick); };
+        pa.name     = "tx_pace";
+        if (esp_timer_create(&pa, &txPaceTimer) != ESP_OK) txPaceTimer = nullptr;
+    }
+
     txQueue = xQueueCreate(ESPNOW_TX_QUEUE_DEPTH, sizeof(AudioPacket));
     if (!txQueue) {
         LOG_ERROR("TX queue alloc failed");
@@ -924,8 +950,9 @@ static void a2dpStatsPrint() {
     DEBUG_SERIAL.printf(" tx=%lu txlat=", (unsigned long)txSent);
     for (int i = 0; i < 8; i++)
         DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)txLatHist[i]);
-    DEBUG_SERIAL.printf(" txlatmax=%.1fms rep=%u mute=%d qfull=%lu\n", txLatMaxUs / 1000.0f,
-                        txRepeat, outputMuted ? 1 : 0, (unsigned long)txQueueFull);
+    DEBUG_SERIAL.printf(" txlatmax=%.1fms rep=%u pace=%lu mute=%d qfull=%lu\n",
+                        txLatMaxUs / 1000.0f, txRepeat, (unsigned long)txPaceUs,
+                        outputMuted ? 1 : 0, (unsigned long)txQueueFull);
 }
 
 static void a2dpWriteDone() {
@@ -1871,6 +1898,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   M  toggle mixing a client's stereo to mono, for one speaker (persists)
  *   l  client: print and reset the lost-run histogram and `rec`
  *   t  `t<n>` sends each mesh frame n times, 1..3, until reboot
+ *   P  `P<us>` minimum spacing between audio packets, 0 = none, until reboot
  *   R  `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot
  *
  * Bluetooth server diagnostics, for telling the A2DP side from the mesh side:
@@ -1951,6 +1979,16 @@ static void benchServiceSerial() {
                 const int n = atoi(line);
                 if (n >= 1 && n <= 3) txRepeat = (uint8_t)n;
                 DEBUG_SERIAL.printf("[MESH] repeat=%u\n", txRepeat);
+                break;
+            }
+            case 'P': {
+                // `P<us>`: minimum spacing between audio packets from this
+                // node, until reboot; 0 = unpaced. See ESPNOW_TX_PACE_US.
+                char line[8];
+                benchReadLine(line, sizeof(line));
+                const long us = atol(line);
+                if (us >= 0 && us <= 10000) txPaceUs = (uint32_t)us;
+                DEBUG_SERIAL.printf("[MESH] pace=%luus\n", (unsigned long)txPaceUs);
                 break;
             }
             case 'R': {

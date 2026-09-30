@@ -196,6 +196,16 @@
 // ESPNOW_LEN_REPEAT in main.cpp and the receiver plays the first that arrives.
 #define ESPNOW_TX_COPIES     1
 
+// Minimum spacing between two audio packets leaving the TX task, in µs; 0
+// sends each the moment the radio is free. A Bluetooth server gets its audio
+// an A2DP packet at a time -- 1024 frames from Windows, every ~23 ms -- and
+// each becomes nine mesh packets at once, which unpaced leave in one 5-9 ms
+// burst. `P<us>` changes it until reboot. A backlog deeper than
+// ESPNOW_TX_PACE_BACKLOG goes out unpaced: pacing may delay the stream, never
+// overflow the queue.
+#define ESPNOW_TX_PACE_US       0
+#define ESPNOW_TX_PACE_BACKLOG  12
+
 // ============================================================================
 // Mesh audio format
 // ============================================================================
