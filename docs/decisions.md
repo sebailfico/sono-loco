@@ -522,7 +522,8 @@ id stays but stops being the only thing keeping the two apart.
 
 ## D13 — ESP-NOW frames go out at 12 Mbps, twice, not once at the 1 Mbps default
 
-**Decided:** 2026-09-14 (6 Mbps), amended 2026-09-29 (12 Mbps, two copies).
+**Decided:** 2026-09-14 (6 Mbps), amended 2026-09-29 (12 Mbps, two copies),
+2026-09-30 (the second copy 11 packets later).
 **Status:** holding, range untested.
 
 ESP-NOW sends broadcast frames at 1 Mbps DSSS unless `esp_wifi_config_espnow_rate`
@@ -582,9 +583,37 @@ and ADPCM with the previous block in every packet, which recovers a lost
 packet from its successor 4.5 ms later instead of 0.3 ms, and is the next step
 if the bursts that take both copies turn out to matter (`TODO.md`).
 
+**Amended 2026-09-30 — the second copy goes 11 packets later, not 1.**
+Measured behind a streaming server for the first time, the previous-block
+scheme left 1–3% holes. Both clients — a WROVER and an S3 — lost the *same*
+packets, run for run, so the frames never left the server. The server loses
+them in runs of 4–5 packets (10–13 ms) when its Bluetooth link has the
+radio, besides isolated singles; a block one packet back died in the same
+run. So a packet now carries its block and the one `MESH_REDUNDANCY_DISTANCE`
+packets back, and a client writes the late block over the silence it played
+in its place, if that has not played yet (`JitterBuffer::patch`). The
+distance is on the wire (`len` bits 8–14), so a server's `D<n>` moves the
+whole mesh and the three settings could be alternated in one session: holes
+1.17% at 1, 0.57% at 6, 0.33% at 11 (`CHANGELOG.md`); over the next 600 s,
+0.7%. Any distance above 1
+has a price the numbers show: a lone lost packet is no longer always saved,
+because its copy can land on another loss — in the minutes when the server
+dropped only singles, distance 1 did best. The floor for any one-copy scheme
+is the server's own loss rate squared, and that rate was 3–9%.
+
+**What was considered, 2026-09-30:** pacing the server's sends
+(`ESPNOW_TX_PACE_US`, `P<us>`): an A2DP packet from Windows becomes nine mesh
+packets queued at once, and spacing them 2 ms apart doubled the single
+losses and thinned the runs without changing the holes, so it stays off. Two
+back-to-back copies (`t2`) plus the distance would lower the floor again, at
+twice the airtime. Three blocks a packet would need shorter blocks, and more
+packets. And the fix at the source: a server that loses fewer frames — see
+the next paragraph.
+
 **What would change this:** a range measurement showing 6 Mbps reaching a room
 that 12 does not — then 9 Mbps, or the copies alone at 6, before anything
 slower. A server with no Bluetooth of its own (the two-chip server in
 `TODO.md`) would make the copies a hedge against interference only, and worth
-re-measuring against their airtime. Or ADPCM shrinking the frames so far that
+re-measuring against their airtime — and would remove the 4–5-packet runs
+the distance exists for, so distance 1 might win again. Or ADPCM shrinking the frames so far that
 the rate stops mattering.

@@ -53,7 +53,7 @@
 // (0/2/3/8/9/45/46), the native USB pair (18/19 on a C3, 19/20 on an S3),
 // UART0, and the flash and octal-PSRAM banks (26-37 on an S3).
 // Confirmed 2026-08-26: wired and working on a C3 -- bench mode's tone was
-// audible on its DAC. Still provisional on the S3, which has no DAC yet.
+// audible on its DAC -- and 2026-09-30 on the S3, into a MAX98357A.
 #define I2S_BCK_PIN  4
 #define I2S_WS_PIN   5
 #define I2S_DATA_PIN 6
@@ -239,8 +239,8 @@
 // buffered. The price of any distance above 1 is that a lone lost packet is
 // no longer always saved: its copy can land on another loss. Measured behind
 // a streaming server, alternating 60 s runs (2026-09-30): holes 1.17% at 1,
-// 0.57% at 6, 0.33% at 11. Sent in every packet, so a server's `D<n>`
-// changes it for the whole mesh at once.
+// 0.57% at 6, 0.33% at 11 -- and 0.7% at 11 over the 600 s after. Sent in
+// every packet, so a server's `D<n>` changes it for the whole mesh at once.
 #define MESH_REDUNDANCY_DISTANCE  11
 
 // Blocks a sender keeps to draw the older one from: the largest distance plus

@@ -4,7 +4,7 @@ What is **open**. Completed work is in `CHANGELOG.md`, standing design choices
 and their reasoning are in `docs/decisions.md`. Keep those three separate — this
 file previously carried all of it and the open list got lost inside the done one.
 
-## Current state (2026-09-14)
+## Current state (2026-09-30)
 
 **The ESP-NOW mesh path is proven on hardware, and so is clock-drift
 correction**: WROOM sourcing to four clients, 600 s, zero lost on the S3 and
@@ -16,59 +16,63 @@ The 41 host tests also pass on-device (`pio test -e esp32dev`): 23 for the
 jitter buffer and sequence accounting, 18 for the clock-drift controller.
 
 Boards on the bench: a WROOM (COM8), an ESP32-C3 (COM10), an ESP32-S3
-(COM9) and, since 2026-09-14, two WROVER-Es (COM12, and WROVER2 with a DAC
-— COM13 then, COM19 since 2026-09-28). DACs are wired on the WROOM, the C3
-and WROVER2; the S3 and the
-COM12 WROVER have none. The WROOM's auto-reset into download mode has become
-unreliable (see "Bench" below); run the harness without `-Flash` and flash it
-by hand with retries.
+(COM9, native USB; MAX98357A since 2026-09-30) and two WROVER-Es — WROVER1
+with a MAX98357A on COM20, WROVER2 with PCM5102 + TPA3116 on COM22 (they
+move with every replug: check the MAC). DACs are wired on all of them but
+the WROOM's is untested lately. The WROOM's auto-reset into download mode has
+become unreliable (see "Bench" below); run the harness without `-Flash` and
+flash it by hand with retries.
 
 **Four clients at once is proven** — zero loss on the S3 and C3 over 600 s on
 channel 11 with the house router busy on channel 1. What is *not* proven is a
 building; see "Surviving the wild" below, which is the real list.
 
-The Bluetooth server path works end to end, as of 2026-09-29: the PC
-streaming into WROVER1, WROVER2 playing the mesh stream, 0.094% lost over
-600 s where it had lost 12–24% (`CHANGELOG.md`). What is left of the loss, and
-a phone on the new build, are under "Blocking" below. Both WROVERs moved USB
-sockets again that day: WROVER1 (MAX98357A) on COM23, WROVER2 (TPA3116) on
-COM11.
+The Bluetooth server path works end to end: the PC streaming into WROVER1,
+WROVER2 and the S3 both playing the mesh. Behind a streaming server 0.7% of
+blocks are holes over 600 s (2026-09-30, redundancy 11 packets back, D13) —
+each a 2.6 ms click, about three a second — and each client underran 7 times. What is left, and a phone on the new build,
+are under "Blocking" below.
 
 ---
 
 ## Blocking
 
-- [ ] **Measure the ADPCM stream behind a Bluetooth server.** The 12–24%
-      loss was fixed with 12 Mbps and two copies of every frame: 600 s behind
-      a streaming server lost 0.094% (`CHANGELOG.md`, 2026-09-29). The same
-      day the mesh moved to ADPCM (D5), and the second copy moved inside the
-      packet: each carries the previous block, so a lost packet is rebuilt
-      from the next one 2.6 ms later instead of 0.3 ms — which should catch the
-      bursts that took both back-to-back copies, the whole of what was left.
-      Not yet measured behind a server: the PC's Bluetooth was off. Run
-      `listen.py --serial <server> --client <client>` short, then 600 s
-      quiet, and read `lost` (holes), `rec` (rebuilt) and `l` (run lengths).
-      If holes remain: **concealment** ("Surviving the wild") for what any
-      scheme misses, then XOR parity for bursts longer than one packet. A
-      **two-chip server** (an A2DP chip handing PCM to a €2 C3 that only does
-      ESP-NOW) stays the answer only if the coexistence cost grows again —
-      with a phone, say, which has not been measured since the fix.
+- [ ] **The server still drops 3–9% of its own frames.** Measured behind a
+      streaming server on 2026-09-30 (`CHANGELOG.md`): every client loses the
+      same packets, run for run — singles, and runs of 4–5 (10–13 ms) when the
+      server's Bluetooth link has the radio — and the send callback reports
+      them sent. Redundancy 11 packets back (D13) left 0.33% as holes in the
+      60 s A/B and 0.7% over 600 s, when 6% of packets were lost singly — the
+      floor for one copy per block is about the loss rate squared, and in those
+      minutes distance 1 would have left ~0.5%. What would move it, cheapest
+      first: **XOR of blocks n-1 and n-11** in place of the one old block —
+      the same bytes, and a lone loss is rebuilt from the next packet while a
+      run is rebuilt from 11 later (estimated ~0.2% on the 600 s run);
+      **concealment** (below, "Surviving the wild") so the holes left are not
+      clicks; a counter for patches refused because the silence already
+      played, which says whether the client's buffer is too shallow for the
+      distance; a **loss trace** — each client logging the seqs it missed — so
+      every scheme and distance can be scored on one recording instead of on
+      alternating minutes whose conditions swung 3× (the singles-only minutes
+      favour distance 1, the run minutes 11); `t2` on top of distance 11 at
+      twice the airtime; and a **two-chip server** (an A2DP chip handing PCM
+      to a €2 C3 that only does ESP-NOW), which removes the cause. A phone as
+      the source has not been measured since any of this.
       Also unexplained: the server's own output crackled once on 2026-09-28
       (27 holes/s, one per A2DP packet) and never again after a reboot. If
       it comes back, run `listen.py --serial` at once and compare the `a`
       window with the clean ones in `CHANGELOG.md`.
-- [ ] **Finish the bench regression for 12 Mbps with two copies.** CLAUDE.md
-      asks for a 600 s `bench-mesh.ps1` after any client-path change; the one
-      run on 2026-09-29 was stopped at ~290 s (log flushed to 183 s). What it
-      showed, WROVER2 sourcing to WROVER1: 220.5 pkt/s, `qfull=0`, 5 lost of
-      40,286 with 93 blocks rescued by the copy, zero ovf/und/dup/rsy — no
-      drift figure yet. **The bench tone is loud on any amp: ask before
-      running it, and run it where nobody has to listen.
-- [ ] **The S3's MAX98357A has never made a sound.** WROVER1's does, since
-      2026-09-28 (`CHANGELOG.md`); its silence was a wiring mistake, not
-      the board. The S3's I2S pins 4/5/6 have never driven a DAC. SD: WROVER1's clone
-      plays with SD tied to 3.3 V (left channel); whether it has the pull-up
-      that makes a floating SD work was not checked.
+- [ ] **Does the S3 stall when nobody reads its USB serial?** Suspected, not
+      measured. When the harness was killed mid-run on 2026-09-30, the S3's
+      buffer jumped from ~8 KB to ~18 KB — 57 ms the output stopped consuming
+      — and the drift controller spent minutes dropping it back. `Serial` on
+      the S3/C3 is the native USB CDC, whose `write()` waits up to 100 ms for
+      a host that is plugged in but not reading, and the S3 prints a status
+      line every second from `loop()`, which also feeds I2S. A classic ESP32's
+      UART never waits. Test: stream with COM9 closed, compare `und`/`jit` with
+      the port read. Fix if so: `Serial.setTxTimeoutMs(0)` on those targets —
+      a lost log line instead of a stall. A board on a phone charger is not
+      affected (no host, the core drops the bytes).
 - [ ] **Tones on every board, and loud enough for the amp they are on.** The
       user wants the startup tone on every node, DAC or not, BT or not — a
       client-only build plays nothing at boot today because the startup tone
@@ -105,8 +109,12 @@ COM11.
 - [ ] **A node playing as a client cannot be connected to.** Its Bluetooth
       is stopped in CLIENT, so a phone trying to take it over fails ("Couldn't
       connect", 2026-09-28) until the current server stops and the node has
-      sat 5 s in silence. Either keep a connectable (page-scan) BT on clients,
-      at whatever that costs the radio, or document the two-step. Separately,
+      sat 5 s in silence. Keeping it connectable is now measured, and costly:
+      a WROVER client whose Bluetooth kept page- and inquiry-scanning lost
+      4.7% of a streaming server's packets beside an S3 losing 2.0%
+      (2026-09-30), which is why CLIENT now switches the controller off. A
+      slower scan (`esp_bt_gap_set_scan_mode` plus a long page-scan interval)
+      might be affordable; otherwise document the two-step. Separately,
       Windows then also failed on the freshly rebooted node with nothing at
       all reaching it, and later connected fine; not understood.
 - [ ] **Measure the jingle fix** (`563833a`). `listen.py --serial COM21
@@ -122,10 +130,6 @@ COM11.
       volume ceiling in firmware: the server forwards to the mesh *after*
       the A2DP volume is applied, so a ceiling on one node would turn every
       room down.
-- [ ] **Solder a DAC to the S3** and pick its I2S pins — `config.h` hardcodes the
-      WROOM/WROVER pins (26/25/22) for every board. Until then the S3 is verified
-      only as far as "packets arrive and the buffer stays healthy", with no audio
-      out.
 - [ ] **Install a host compiler** so `pio test -e native` can run — there is no
       gcc/clang/MSVC on this machine, only the PlatformIO cross-toolchains.
       `winget install -e --id MSYS2.MSYS2` then `pacman -S
@@ -195,9 +199,9 @@ here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
       coexistence arbiter. Hopping is for a band you cannot survey; this one
       can be surveyed.
 - [ ] **Redundancy against somebody else's traffic.** The cheapest form is in
-      (2026-09-29, D13): every packet carries its own block and the previous
-      one, so any single lost packet is rebuilt from its successor. It was
-      made for a Bluetooth server's own radio; how far it carries under a
+      (D13): every packet carries its own block and the one 11 packets back,
+      and a client patches the late block over its silence. It was tuned
+      against a Bluetooth server's own radio; how far it carries under a
       loaded router is unmeasured. Next form up: XOR parity every N packets,
       recovering one loss per group for 1/N overhead, or the previous *two*
       blocks. Measure on the bench with the monitor watching and the router
@@ -205,9 +209,11 @@ here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
       counters that matter are `lost` (holes left) and `rec` (rebuilt).
 - [ ] **Concealment instead of silence.** Bursts longer than the redundancy
       window will still happen — 214 consecutive-ish packets in one second
-      were seen at 1 Mbps. Repeat-and-fade the last block on a gap rather
-      than zero-fill; the drift controller already knows how to insert.
-      This is what stops a 20 ms hole being a click.
+      were seen at 1 Mbps — and behind a Bluetooth server 0.7% of blocks are
+      holes today, about three a second, each a 2.6 ms drop to zero. Repeat-and-
+      fade the last block on a gap rather than zero-fill; the drift controller
+      already knows how to insert. A hole that is later patched (D13) must not
+      be faded twice. This is what stops a hole being a click.
 - [ ] **Buffer for bursts, and decide who waits.** A deeper jitter buffer
       rides out longer bursts at the cost of latency, and latency is only a
       problem relative to the server's own local playback (every client is
@@ -302,8 +308,9 @@ proof and polish.
 ### Audio quality
 
 - [ ] **Listen to real music through the mesh on the ADPCM build.** The format
-      was chosen by ear on the PC (`tools/codec/abtest.py`, D5); the board
-      has only played test tones so far. Music from the PC or a phone into a
+      was chosen by ear on the PC (`tools/codec/abtest.py`, D5). On 2026-09-30
+      20 s of music played through the S3's MAX98357A — "works even if
+      cracky", which was the 2–3% of holes then, not the codec. Music from the PC or a phone into a
       server, a client beside it, and the question the A/B left open: is the
       noise ADPCM adds audible on these speakers? If it is, D5 says what next.
 - [ ] **A stereo pair.** Every client now gets both channels. Two nodes in one

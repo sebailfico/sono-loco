@@ -62,7 +62,7 @@ Phone ──BT A2DP──► ESP32 ──I2S──► PCM5102 ──► TPA3116 
                      └── IMA ADPCM, 44.1kHz stereo, 4 bits a sample
                                 │
                            ESP-NOW broadcast at 12 Mbps (246-byte packets,
-                           ~387/sec: each a 2.6 ms block plus the one before)
+                           ~387/sec: each a 2.6 ms block plus the one 11 back)
                            stamped with this household's 16-bit mesh id
                                 │
                      ┌──────────┴──────────┐
@@ -109,10 +109,17 @@ short runs. Getting there took a boot loop (`WIFI_PS_NONE` gotcha), a crash on
 connect (15 KB of internal DRAM was not enough for one L2CAP link; it is 43 KB
 now), a 46 ms I2S ring for the server's own speaker, and one finding: a server
 streaming Bluetooth loses 12–24% of its mesh frames to its own BT radio, one
-frame at a time. Every frame now goes out twice, at 12 Mbps instead of 6 (D13).
-The PC can drive all of it with nobody at the keyboard (`tools/btlisten/`, and
-`k` to reconnect a reflashed server). A phone has not been tried on the new
-build, and range at 12 Mbps is untested; see `TODO.md`.
+frame at a time. Every frame then went out twice, at 12 Mbps instead of 6 (D13).
+Since ADPCM each packet carries its own block and the one 11 packets back
+instead: the server drops its frames in runs of 4–5 when its link has the
+radio, and behind a streaming server, with a WROVER and an S3 both playing,
+0.7% of blocks were still holes over 600 s (2026-09-30). That 0.094% was a client with
+Bluetooth off; a Bluetooth-capable client kept scanning for a phone and lost
+4.7% until it learned to switch its controller off. What is left — the
+server's own ~3–9% — is the open problem in `TODO.md`. The PC can drive all
+of it with nobody at the keyboard (`tools/btlisten/`, and `k` to reconnect a
+reflashed server). A phone has not been tried on the new build, and range at
+12 Mbps is untested; see `TODO.md`.
 
 **Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
 measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the
@@ -392,9 +399,10 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS |
 | `e` | BT server: `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
 | `t` | `t<n>` sends each mesh frame n times (1–3) until reboot; `ESPNOW_TX_COPIES` is the default |
+| `D` | `D<n>` each packet carries the block n packets back as well (0–15, 0 = none) until reboot; on the wire, so clients follow. `MESH_REDUNDANCY_DISTANCE` is the default |
 | `P` | `P<us>` spaces audio packets at least that far apart (0 = send each as soon as the radio is free) until reboot; `ESPNOW_TX_PACE_US` is the default |
 | `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
-| `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks rebuilt from the next packet or a repeat copy |
+| `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks rebuilt from a later packet or a repeat copy |
 | `q` | BT server: `q<frames>` reinstalls the local I2S DMA ring with that buffer length (8 buffers; 256 = 46 ms is the default, 64 = the library's 11.6 ms), between streams only. Bare `q` prints it |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
@@ -411,9 +419,10 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   callbacks and I2S setup. Everything that needs real hardware.
 - `esp32-code/include/config.h` — every tuneable number. New constants go here,
   never inline in `main.cpp`. Per-node values go in `platformio.ini` instead.
-- `esp32-code/lib/jitter/` — the client's ring buffer (`jitter.h`) and packet
-  sequence accounting (`seqtracker.h`). Pure logic, no Arduino or ESP-IDF, so it
-  can be tested on a PC. This is where both of the worst bugs in this project
+- `esp32-code/lib/jitter/` — the client's ring buffer (`jitter.h`), packet
+  sequence accounting (`seqtracker.h`), and where each lost block's silence
+  went so a later packet can patch it (`holes.h`). Pure logic, no Arduino or
+  ESP-IDF, so it can be tested on a PC. This is where both of the worst bugs in this project
   lived.
 - `esp32-code/lib/mesh/` — the mesh name to mesh id derivation. Pure arithmetic
   on a string, and in a library because two nodes disagreeing about what a name
@@ -478,6 +487,22 @@ Each of these was a real bug. Don't re-introduce them.
   `static_assert` enforces it).
 - **`a2dpSink.end(true)` frees the BT controller permanently.** The node can then never
   be a SERVER again until it is power-cycled. Use `end(false)`.
+- **…but `end(false)` alone leaves Bluetooth running.** It deinitialises A2DP and
+  AVRCP only: Bluedroid and the controller stay up, still page- and
+  inquiry-scanning like a speaker waiting for a phone, and coexistence hands
+  those scans the radio. A WROVER client lost 4.7% of the mesh, in runs of 8+,
+  next to an S3 losing 2.0%. `stopBluetooth()` disables Bluedroid and the
+  controller after it, keeping the controller's memory.
+- **Disable Bluedroid, never deinit it, behind the A2DP library's back.** The
+  library remembers having initialised it and skips `esp_bluedroid_init()` on
+  the next `start()`, which then loops forever on "Failed to enable bluedroid"
+  — the node is wedged and never becomes a speaker again.
+- **The A2DP library's output must be on at `start()` and at `end()`.** It
+  installs its I2S driver in `start()` and uninstalls it in `end()` only while
+  `set_stream_reader(cb, true)`. `m` turns that off, so a muted node kept the
+  driver, and its next CLIENT install failed with `ESP_ERR_INVALID_STATE`
+  every 5 s: stuck in DISCOVERY, counting the server's packets and playing
+  none. The mute is applied after `start()` and lifted before `end()`.
 - **Never `Serial.print` from the ESP-NOW send/recv callbacks.** They fire ~390×/s and a
   blocking UART write there causes the very dropouts it would be reporting. Bump a
   counter, print from `loop()`.
@@ -545,12 +570,16 @@ Each of these was a real bug. Don't re-introduce them.
 - **A node streaming Bluetooth loses mesh frames to its own radio, and the
   send callback calls every one a success.** 12–24% of broadcasts, one frame at
   a time, with `senderr=0 radiofail=0` on the server and nothing else on the
-  channel. Only a receiver's `lost` shows it. That is why every frame goes out
-  twice (D13) — and why "the server reports it sent them" proves nothing.
-- **The top bit of `len` marks a repeat copy (`ESPNOW_LEN_REPEAT`). Mask it
-  before using `len` as a length.** The first build that set it also sent it:
-  `ESPNOW_HEADER_SIZE + pkt.len` asked the radio for a 33 KB frame. The
-  receiver masks it as it reads the header, before anything else looks.
+  channel. Only a receiver's `lost` shows it, and every client loses the same
+  packets. That is why every block goes out twice, the second time 11 packets
+  later (D13), past the 4–5-packet runs the server drops — and why "the server
+  reports it sent them" proves nothing.
+- **`len` is three fields: mask it with `ESPNOW_LEN_BYTES` before using it as
+  a length.** The low byte is the payload length, bits 8–14 the redundancy
+  distance, bit 15 the repeat flag. The first build that set the repeat bit
+  also sent it: `ESPNOW_HEADER_SIZE + pkt.len` asked the radio for a 33 KB
+  frame. The receiver splits it as it reads the header, before anything else
+  looks.
 - **A node that runs Bluetooth cannot turn WiFi power save off.** The IDF
   coexistence layer requires modem sleep while the BT controller is enabled and
   enforces it with `abort()`: `esp_wifi_set_ps(WIFI_PS_NONE)` before BT starts

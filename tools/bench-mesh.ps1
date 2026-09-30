@@ -92,7 +92,7 @@ $BytesPerSec = $SampleRate * 4          # 16-bit stereo, decoded
 $BlockFrames = 114
 $PktPerSec   = $SampleRate / $BlockFrames
 $JitterBufSize = 32768
-$RearmStepBytes = [int]($BytesPerSec * 0.0113)   # a step up bigger than this is a re-arm
+$RearmStepBytes = [int]($BytesPerSec * 0.045)    # a step up bigger than this is a re-arm
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -649,7 +649,11 @@ foreach ($n in $nodes) {
         # 'More than a packet' is in bytes of the ring, so it moved with the format:
         # 500 was 2.5 packets of 22.05 kHz mono and is one packet of decoded
         # ADPCM stereo, which two back-to-back arrivals exceed in normal play --
-        # the first ADPCM run reported two re-arms with und=0. 11 ms, as before.
+        # the first ADPCM run reported two re-arms with und=0. 11 ms was still
+        # too tight: one I2S DMA buffer (512 frames, 11.7 ms) taken late steps
+        # the level by 2,056 bytes, and 2026-09-30's regression split each
+        # client's drift at one of those. A re-arm refills to the whole prefill,
+        # 91 ms; half of that separates the two.
         $rearmed = ($null -ne $prevUnd -and ($und -gt $prevUnd -or ($jit - $prevJit) -gt $RearmStepBytes))
         if ($rearmed) {
             $segments += ,$cur

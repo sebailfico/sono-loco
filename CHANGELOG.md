@@ -30,6 +30,75 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **Behind a Bluetooth server, measured for real: two client bugs, and the
+  redundant block moved 11 packets back** (2026-09-30, `541f717` … `26691a0`).
+  The ADPCM stream had not yet been measured behind a streaming server; the
+  PC streaming into WROVER1, with WROVER2 and the S3 (now with a MAX98357A)
+  as clients, found three things.
+
+  *WROVER2 had never been a client at all.* It counted the server's packets
+  in DISCOVERY and tried CLIENT every 5 s, and every attempt failed: `I2S
+  install (client) failed: ESP_ERR_INVALID_STATE`. `m` turns the A2DP
+  library's output off, and the library uninstalls its I2S driver in `end()`
+  only while its output is on, so a muted node kept the driver (`541f717`).
+  The earlier WROVER2 measurements ran in client-only mode, where Bluetooth
+  never starts.
+
+  *A Bluetooth-capable client kept scanning.* `end(false)` leaves Bluedroid
+  and the controller up, page- and inquiry-scanning, and coexistence gives
+  those scans the radio: in the same 60 s WROVER2 lost 4.7% (1,076 blocks, 70
+  runs of 8+) and the S3 2.0%. CLIENT now disables Bluedroid and the
+  controller, keeping its memory (`b800b3e`); the two clients then lost 2.9%
+  and 3.2%, and a WROVER client has 111 KB of heap instead of 44 KB. The
+  first version also deinitialised Bluedroid, and the library, which
+  remembers having initialised it, looped forever on "Failed to enable
+  bluedroid" when the stream ended (`88a05b0` disables only). Two full
+  client ⇄ speaker cycles checked.
+
+  *The rest is the server's.* The two clients' loss-run histograms matched
+  packet for packet (`1015,11,4,11,8,1,4,12` against `1009,11,4,10,8,1,4,12`),
+  so the frames never left WROVER1 — the "reported as success" gotcha: singles
+  at 3–9% of packets, and runs of 4–5 (10–13 ms) when its Bluetooth link has
+  the radio. A block one packet back died in the same run. So each packet now
+  carries the block `MESH_REDUNDANCY_DISTANCE` packets back, a client pushes
+  silence for a missed block and remembers where (`lib/jitter/holes.h`), and
+  a late block is written over its silence if that has not played yet
+  (`JitterBuffer::patch`, 10 new tests; 37 pass on a board). The distance
+  travels in bits 8–14 of `len`, so `D<n>` on the server moves every client;
+  wire format `0xAD02`. Alternating 60 s runs, holes per client: distance 1
+  735 and 70, distance 6 372 and 19, distance 11 61 and 164 — pooled 1.17%,
+  0.57%, 0.33%. Conditions swung 3× between minutes (singles-only minutes
+  favour 1, run minutes favour 11); 11 is the default (`26691a0`).
+
+  Tried and left off: pacing the server's sends (`P<us>`, `ESPNOW_TX_PACE_US`
+  0). An A2DP packet from Windows becomes nine mesh packets at once, sent in a
+  5–9 ms burst; 2 ms spacing doubled the single losses and thinned the runs,
+  holes 379/376 and 214/211 against 410/340 and 336/338 unpaced — noise.
+
+  **600 s behind the streaming server, `v0.2.0-45-g26691a0`, silent** (every
+  node muted, 30 loops of a 20 s music clip): 231,962 packets; S3 **1,699
+  holes (0.73%)**, 14,100 rebuilt, 7 underruns; WROVER2 **1,571 (0.68%)**,
+  14,248 rebuilt, 7 underruns. Runs: 14,188 singles, 219 of 2, 95 of 4, 25
+  of 8+ — a singles-heavy stretch (6% of packets), where one copy per block
+  has a floor and distance 1 would have left ~0.5%. The A2DP side: 43 pkt/s,
+  gaps up to 53 ms, `qfull=0`. Next is in `TODO.md`: XOR of blocks n−1 and
+  n−11 in the same bytes, and underruns — the client aims for 44 ms of
+  buffer behind a server whose own input pauses for 53.
+
+  **Bench regression, same build, 600 s, `-Mute`, WROVER2 sourcing to WROVER1
+  and the S3: 386.8 pkt/s, `qfull=0`; 231,931 and 231,528 blocks, zero
+  lost/ovf/und/dup/rsy.** WROVER pair −3.4 ppm (log), no corrections; S3
+  −44.4 ppm against WROVER2, held by 1,171 inserts. The harness flagged one
+  "re-arm" per client with no underrun: a single 2,056-byte step — one I2S
+  DMA buffer taken late — over its 11 ms threshold. A re-arm refills the
+  whole 91 ms prefill; the threshold is now 45 ms.
+
+  Also: the S3's MAX98357A on pins 4/5/6 plays — the PC microphone heard the
+  bench tone at −35 dBFS unmuted against −82 muted, toggling with `m`, and
+  20 s of music ("works even if cracky"). Plug the S3's native USB port: on
+  its CH343 port it flashes but prints nothing. `listen.py --client` takes
+  several ports. The WROVERs moved to COM20 (WROVER1) and COM22 (WROVER2).
+
 - **The mesh carries 44.1 kHz stereo, as IMA ADPCM** (`04751ea`, D5). Until
   now a client played 22.05 kHz mono: nothing above ~11 kHz, the anti-alias
   FIR 8–10 dB down above 8 kHz, and no stereo. Chosen by ear first:
