@@ -497,12 +497,15 @@ Each of these was a real bug. Don't re-introduce them.
   library remembers having initialised it and skips `esp_bluedroid_init()` on
   the next `start()`, which then loops forever on "Failed to enable bluedroid"
   — the node is wedged and never becomes a speaker again.
-- **The A2DP library's output must be on at `start()` and at `end()`.** It
-  installs its I2S driver in `start()` and uninstalls it in `end()` only while
-  `set_stream_reader(cb, true)`. `m` turns that off, so a muted node kept the
-  driver, and its next CLIENT install failed with `ESP_ERR_INVALID_STATE`
-  every 5 s: stuck in DISCOVERY, counting the server's packets and playing
-  none. The mute is applied after `start()` and lifted before `end()`.
+- **Mute by zeroing samples, not by turning the A2DP library's output off.**
+  The library installs its I2S driver in `start()` and uninstalls it in `end()`
+  only while `set_stream_reader(cb, true)`. `m` once turned that off, so a
+  muted node kept the driver, and its next CLIENT install failed with
+  `ESP_ERR_INVALID_STATE` every 5 s: stuck in DISCOVERY, counting the server's
+  packets and playing none. Now `m` zeroes the library's buffer at the end of
+  our callback — after the mesh has taken its copy, before the library writes
+  it to I2S — and the output flag is left alone. (The jingle still turns it
+  off, for 0.6 s inside `loop()`, where Bluetooth cannot be stopped meanwhile.)
 - **Never `Serial.print` from the ESP-NOW send/recv callbacks.** They fire ~390×/s and a
   blocking UART write there causes the very dropouts it would be reporting. Bump a
   counter, print from `loop()`.

@@ -40,7 +40,10 @@ in `TODO.md` false.
   in DISCOVERY and tried CLIENT every 5 s, and every attempt failed: `I2S
   install (client) failed: ESP_ERR_INVALID_STATE`. `m` turns the A2DP
   library's output off, and the library uninstalls its I2S driver in `end()`
-  only while its output is on, so a muted node kept the driver (`541f717`).
+  only while its output is on, so a muted node kept the driver (`541f717`
+  worked around it; `8183ddc` replaced that with a mute that zeroes this
+  node's samples after the mesh has them — volume 0 for one speaker — and
+  never touches the library's output).
   The earlier WROVER2 measurements ran in client-only mode, where Bluetooth
   never starts.
 
