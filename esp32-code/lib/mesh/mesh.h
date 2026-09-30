@@ -94,4 +94,39 @@ static const uint16_t MESH_BEACON_SEQ = 0xBEAC;
  */
 bool meshIsBeacon(uint16_t seq, uint16_t len);
 
+/**
+ * The sequence number that marks an update request: "the node named in the
+ * payload, reboot into update mode" (see the update mode section of main.cpp).
+ *
+ * Unlike a beacon it does not travel in the audio group. It is stamped with a
+ * group of its own, so a node from before update mode reads it as another
+ * mesh's traffic and drops it -- rather than as audio from a new sender, which
+ * it would lock onto before ever looking at the length, and then ignore its
+ * real server. The sequence number still says which command this is.
+ */
+static const uint16_t MESH_UPDATE_SEQ = 0x0DA7;
+
+/**
+ * Longest update target, excluding the terminator. A target is a ROOM_NAME or
+ * a MAC address written AA:BB:CC:DD:EE:FF, and it is the whole payload.
+ */
+#define MESH_TARGET_MAX 31
+
+/** Is this an update request? The magic, and a target of 1..MESH_TARGET_MAX bytes. */
+bool meshIsUpdateRequest(uint16_t seq, uint16_t len);
+
+/**
+ * Does an update request naming `target` mean this node?
+ *
+ * True when the target is this node's room name or its MAC, ignoring case --
+ * "sonoloco-c3" is what a hostname looks like and "SonoLoco-C3" what the build
+ * says, and they are the same node. Whole strings only: "SonoLoco-WROVER" must
+ * not reboot "SonoLoco-WROVER2", which a prefix match would.
+ *
+ * `target` comes off the air, so it is `len` bytes with no terminator. There is
+ * deliberately no wildcard: rebooting every speaker in the house off the mesh
+ * at once is not something to be one character away from.
+ */
+bool meshTargetMatches(const char *target, size_t len, const char *roomName, const char *mac);
+
 #endif  // MESH_H

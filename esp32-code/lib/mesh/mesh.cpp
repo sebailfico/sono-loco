@@ -68,3 +68,25 @@ uint16_t meshIdFromName(const char *name) {
 bool meshIsBeacon(uint16_t seq, uint16_t len) {
     return len == 0 && seq == MESH_BEACON_SEQ;
 }
+
+bool meshIsUpdateRequest(uint16_t seq, uint16_t len) {
+    return seq == MESH_UPDATE_SEQ && len >= 1 && len <= MESH_TARGET_MAX;
+}
+
+namespace {
+
+/** `len` bytes of `a` against the whole of the terminated `b`, ignoring ASCII case. */
+bool equalsIgnoreCase(const char *a, size_t len, const char *b) {
+    if (a == nullptr || b == nullptr) return false;
+    for (size_t i = 0; i < len; i++) {
+        if (b[i] == '\0' || lower(a[i]) != lower(b[i])) return false;
+    }
+    return b[len] == '\0';
+}
+
+}  // namespace
+
+bool meshTargetMatches(const char *target, size_t len, const char *roomName, const char *mac) {
+    if (len == 0 || len > MESH_TARGET_MAX) return false;
+    return equalsIgnoreCase(target, len, roomName) || equalsIgnoreCase(target, len, mac);
+}

@@ -31,6 +31,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <Preferences.h>
+// Update mode only, on a boot that never starts the mesh. See D15.
+#include <esp_http_server.h>
+#include <esp_ota_ops.h>
 
 // Hardware-independent parts of the CLIENT receive path, tested on the host
 // with `pio test -e native` — see test/test_jitter.
@@ -121,6 +124,8 @@ static const char *PREF_CLIENT_ONLY = "clientonly";
 static const char *PREF_MONO_OUT = "monoout";
 static const char *PREF_MESH_ID = "meshid";
 static const char *PREF_MESH_NAME = "meshname";
+static const char *PREF_WIFI_SSID = "wifissid";   // update mode's home network
+static const char *PREF_WIFI_PASS = "wifipass";
 
 /**
  * Whether this boot may run the Bluetooth stack at all.
@@ -178,6 +183,12 @@ static unsigned long lastBeaconMs    = 0;
 // audible but correctly ignored" and "nothing is arriving at all", which look
 // identical from every other number this firmware reports.
 static volatile uint32_t rxForeign = 0;
+
+// An update request named this node. Set by the receive callback and acted on
+// in loop(), which reboots -- for the same reason pairing is committed there.
+static volatile bool otaRequested = false;
+// This node's MAC as AA:BB:CC:DD:EE:FF, the other name a request may use.
+static char          ownMac[18]   = {0};
 
 /** Read the configured mesh identity out of NVS. Called once, before the radio. */
 static void meshLoadIdentity() {
@@ -441,6 +452,13 @@ static_assert(MESH_REDUNDANCY_DISTANCE < MESH_TX_HISTORY, "the distance must be 
 // would play as audio; 0xAD04 adds `due`, which moves the payload two bytes.
 #define MESH_WIRE_FORMAT   0xAD04
 static inline uint16_t wireGroup(uint16_t id) { return id ^ MESH_WIRE_FORMAT; }
+
+// The group control packets travel in -- today only the update request, see
+// MESH_UPDATE_SEQ. Not the audio group, on purpose: a node from before update
+// mode drops this as another mesh's traffic, where in the audio group it would
+// lock onto the sender before checking the length and then ignore its server.
+#define MESH_CONTROL_FORMAT 0xC7D1
+static_assert(MESH_CONTROL_FORMAT != MESH_WIRE_FORMAT, "control must not look like audio");
 
 static const uint8_t BROADCAST_ADDR[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -804,6 +822,17 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     const uint16_t dist   = (plen >> ESPNOW_LEN_DIST_SHIFT) & ESPNOW_LEN_DIST_MAX;
     plen &= ESPNOW_LEN_BYTES;
 
+    // An update request for this mesh. Before the foreign test, which would
+    // count it, and before the sender lock, which it must never take; loop()
+    // does the rebooting.
+    if ((uint16_t)(group ^ MESH_CONTROL_FORMAT) == meshId) {
+        if (meshIsUpdateRequest(seq, plen) && (int)plen <= len - ESPNOW_HEADER_SIZE &&
+            meshTargetMatches((const char *)data + ESPNOW_HEADER_SIZE, plen, ROOM_NAME, ownMac)) {
+            otaRequested = true;
+        }
+        return;
+    }
+
     const bool beacon = meshIsBeacon(seq, plen);
     const uint16_t id = wireGroup(group);   // a node on another format lands elsewhere
 
@@ -956,6 +985,10 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
 }
 
 static bool espnowActive = false;
+// Whether this boot meant to run the mesh. False only on a node that skipped it
+// on purpose (a WROOM with Bluetooth); with it true and espnowActive false the
+// radio failed, which is what keeps a fresh update from being kept (otaServiceConfirm).
+static bool espnowWanted = false;
 
 static void setupESPNow() {
     // BT Classic + WiFi simultaneously requires PSRAM on ESP32.
@@ -986,6 +1019,7 @@ static void setupESPNow() {
 #else
     const bool btWillStart = false;   // no BT Classic on this chip
 #endif
+    espnowWanted = true;
 
     // esp_wifi_init() needs the netif layer and a default event loop in place.
     // Both are no-ops (ESP_ERR_INVALID_STATE) if Arduino already set them up.
@@ -2009,6 +2043,369 @@ static void meshServiceButton() {
 }
 
 // ============================================================================
+// Update mode — new firmware over the home WiFi (OTA)
+// ============================================================================
+//
+// A node plugged into a stereo across the house has power and nothing else, so
+// a new image has to arrive by radio. It comes over the home network, not the
+// mesh: the router is on channel 1 and the mesh on ESPNOW_CHANNEL, and a
+// station follows its access point's channel, so a node cannot be on both.
+// Update mode is therefore a boot of its own, like bench mode -- flagged in RTC
+// memory, entered through a restart, the mesh never started. See D15.
+//
+// The sequence, driven end to end by tools/ota.ps1:
+//
+//   1. `U<name>` on any node that is on USB broadcasts an update request for
+//      the node with that ROOM_NAME or MAC, in this mesh only.
+//   2. The named node reboots into update mode: joins the network stored by
+//      `W`, answers GET / with its room name, and plays the two pairing beeps.
+//   3. The PC posts the image to /update. The rising tone means it was
+//      written and verified; the node then boots it.
+//   4. The new image is on probation until it has run OTA_CONFIRM_MS with its
+//      radio up. Until then any reset boots the previous image instead.
+//
+// Nothing here runs unless asked: the endpoint exists for OTA_WINDOW_MS after
+// a request and not otherwise, and any reset in the middle lands in normal mode.
+
+#define OTA_MAGIC 0x0DA7E501
+RTC_NOINIT_ATTR static uint32_t otaMagic;   // RTC_NOINIT for bench mode's reason
+
+// The request this node is broadcasting on somebody else's behalf.
+static char          otaReqTarget[MESH_TARGET_MAX + 1] = {0};
+static uint8_t       otaReqLeft   = 0;
+static unsigned long otaReqLastMs = 0;
+
+/**
+ * Keep the rollback decision for ourselves.
+ *
+ * The Arduino core would otherwise mark a new image good in initArduino(),
+ * before setup() -- which leaves the bootloader's rollback catching only an
+ * image that dies before main. With this the image stays on probation until
+ * otaConfirm(), and a crash loop, a hang the watchdog ends, or a power cut in
+ * the meantime boots the previous one. The bootloader in this core is built
+ * with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE, which is what makes that happen.
+ */
+extern "C" bool verifyRollbackLater() { return true; }
+
+static bool otaPendingVerify() {
+    esp_ota_img_states_t state;
+    return esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
+           state == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+/** Keep the running image. A no-op on anything that was flashed over USB. */
+static void otaConfirm(const char *why) {
+    if (!otaPendingVerify()) return;
+    const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    DEBUG_SERIAL.printf("[OTA] image kept (%s) -> %s\n", why, esp_err_to_name(err));
+}
+
+/**
+ * The probation. Called from loop() in every mode.
+ *
+ * "Ran for a minute" alone would keep an image whose radio never came up, and
+ * that is the one image that must not be kept: it can never hear another
+ * update request, so the only way back would be a USB cable.
+ */
+static void otaServiceConfirm() {
+    static bool done = false;
+    if (done || millis() < OTA_CONFIRM_MS) return;
+    if (espnowWanted && !espnowActive) return;
+    done = true;
+    otaConfirm("ran");
+}
+
+/** Which slot is running, whether it is on probation, and whether one was rolled back. */
+static void otaDescribe(char *out, size_t outSize) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *failed  = esp_ota_get_last_invalid_partition();
+    snprintf(out, outSize, "fw=%s chip=%s mac=%s name=%s mesh=%04X app=%s pending=%d rolledback=%s",
+             FW_VERSION, ESP.getChipModel(), ownMac, ROOM_NAME, meshId,
+             running ? running->label : "?", otaPendingVerify() ? 1 : 0,
+             failed ? failed->label : "-");
+}
+
+/** ROOM_NAME as a DHCP hostname: SonoLoco-WROVER2 is sonoloco-wrover2 on the router. */
+static void otaHostname(char *out, size_t outSize) {
+    size_t n = 0;
+    for (const char *p = ROOM_NAME; *p && n + 1 < outSize; p++) {
+        const char c = (char)tolower((unsigned char)*p);
+        out[n++] = ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) ? c : '-';
+    }
+    out[n] = '\0';
+}
+
+/** Leave for update mode. The request was heard, so the image works: keep it first. */
+static void otaRebootIntoUpdate() {
+    // Otherwise the restart below would count as the failed boot that
+    // rolls a perfectly good image back.
+    otaConfirm("update requested");
+    otaMagic = OTA_MAGIC;
+    DEBUG_SERIAL.println("[OTA] rebooting into update mode");
+    DEBUG_SERIAL.flush();
+    delay(50);
+    ESP.restart();
+}
+
+/** `U<name>`: ask the node with that ROOM_NAME or MAC to reboot into update mode. */
+static void otaStartRequest(const char *target) {
+    const size_t n = strlen(target);
+    if (!espnowActive || txQueue == nullptr) {
+        DEBUG_SERIAL.println("[OTA] error reason=no_mesh");
+        return;
+    }
+    if (n == 0 || n > MESH_TARGET_MAX) {
+        DEBUG_SERIAL.println("[OTA] error reason=target_length");
+        return;
+    }
+    memcpy(otaReqTarget, target, n + 1);
+    otaReqLeft   = OTA_REQUEST_COPIES;
+    otaReqLastMs = 0;
+    DEBUG_SERIAL.printf("[OTA] request target=%s mesh=%04X copies=%d\n",
+                        otaReqTarget, meshId, OTA_REQUEST_COPIES);
+}
+
+/**
+ * Both ends of a request. Called from loop() in every mode.
+ *
+ * Sending goes through the same queue as audio and beacons, one copy per
+ * OTA_REQUEST_INTERVAL_MS, so a server can send while it plays. Receiving only
+ * ever sets a flag in the callback; the reboot happens here.
+ */
+static void otaServiceRequest() {
+    if (otaRequested) {
+        otaRequested = false;
+        DEBUG_SERIAL.println("[OTA] update requested over the mesh");
+        otaRebootIntoUpdate();
+    }
+
+    if (otaReqLeft == 0) return;
+    if (otaReqLastMs != 0 &&
+        (long)(millis() - otaReqLastMs) < (long)OTA_REQUEST_INTERVAL_MS) return;
+    otaReqLastMs = millis();
+
+    AudioPacket pkt;
+    const size_t n = strlen(otaReqTarget);
+    pkt.group = (uint16_t)(meshId ^ MESH_CONTROL_FORMAT);
+    pkt.seq   = MESH_UPDATE_SEQ;
+    pkt.len   = (uint16_t)n;
+    memcpy(pkt.data, otaReqTarget, n);
+    if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
+
+    if (--otaReqLeft == 0) DEBUG_SERIAL.println("[OTA] request sent");
+}
+
+enum OtaOutcome { OTA_UPDATED, OTA_FAILED, OTA_DISMISSED };
+
+/** Leave update mode, saying how it went on the speaker, and boot whatever is due. */
+[[noreturn]] static void otaLeave(OtaOutcome how) {
+    DEBUG_SERIAL.printf("[OTA] leaving update mode updated=%d\n", how == OTA_UPDATED ? 1 : 0);
+    DEBUG_SERIAL.flush();
+    // The pairing sounds, which a user without a console already knows:
+    // rising for done, falling for nothing happened. A PC that only came to
+    // read the version and sent /exit gets no sound: nothing went wrong.
+    if (how == OTA_UPDATED) meshPlayFeedback(MESH_FB_PAIRED);
+    if (how == OTA_FAILED)  meshPlayFeedback(MESH_FB_CLOSED);
+    ESP.restart();
+    while (true) {}
+}
+
+// What the HTTP handlers, on the server's own task, tell otaRun()'s loop.
+static volatile bool otaReceiving = false;   // an upload is in progress
+static volatile int  otaResult    = 0;       // 1 written, -1 failed, 0 nothing yet
+static volatile bool otaExitAsked = false;
+
+// Set by the WiFi and IP event handler while update mode joins the network.
+static volatile bool     otaGotIp = false;
+static esp_ip4_addr_t    otaIp    = {};
+
+static void otaOnNetEvent(void *, esp_event_base_t base, int32_t id, void *data) {
+    if (base == WIFI_EVENT && (id == WIFI_EVENT_STA_START || id == WIFI_EVENT_STA_DISCONNECTED)) {
+        esp_wifi_connect();   // and again after every failure, until the timeout
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        otaIp    = ((ip_event_got_ip_t *)data)->ip_info.ip;
+        otaGotIp = true;
+    }
+}
+
+/** GET / -- who is this and what is it running. The PC reads it before uploading. */
+static esp_err_t otaHttpIdentify(httpd_req_t *req) {
+    char info[256];
+    otaDescribe(info, sizeof(info));
+    strlcat(info, "\n", sizeof(info));
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, info);
+}
+
+/**
+ * POST /update -- the image itself, as the raw request body.
+ *
+ * Written into the slot not running, erased as it goes. esp_ota_end() then
+ * checks the whole image -- its checksum, its hash, and the chip it was built
+ * for -- before anything is allowed to boot it, so a C3 image sent to an S3 is
+ * refused here rather than discovered at the next boot.
+ */
+static esp_err_t otaHttpUpdate(httpd_req_t *req) {
+    otaReceiving = true;
+    const esp_partition_t *slot = esp_ota_get_next_update_partition(nullptr);
+    esp_ota_handle_t ota = 0;
+    const char *failure = nullptr;
+    esp_err_t err = ESP_OK;
+
+    // Heap, and only for the length of the upload: static, it would cost a
+    // Bluetooth server this much DRAM on every boot that never updates.
+    const size_t chunk = 4096;
+    char *buf = (char *)malloc(chunk);
+
+    if (buf == nullptr) {
+        failure = "no memory";
+    } else if (slot == nullptr) {
+        failure = "no update slot (partition table without OTA -- reflash over USB)";
+    } else if (req->content_len == 0 || req->content_len > slot->size) {
+        failure = "bad length";
+    } else if ((err = esp_ota_begin(slot, OTA_WITH_SEQUENTIAL_WRITES, &ota)) != ESP_OK) {
+        failure = "begin";
+    } else {
+        DEBUG_SERIAL.printf("[OTA] receiving bytes=%u into %s\n",
+                            (unsigned)req->content_len, slot->label);
+        size_t left = req->content_len;
+        int    timeouts = 0;
+        while (left > 0 && failure == nullptr) {
+            const int n = httpd_req_recv(req, buf, left < chunk ? left : chunk);
+            if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 5) continue;
+            if (n <= 0) { failure = "receive"; break; }
+            timeouts = 0;
+            if ((err = esp_ota_write(ota, buf, n)) != ESP_OK) failure = "write";
+            left -= n;
+        }
+        if (failure != nullptr) {
+            esp_ota_abort(ota);
+        } else if ((err = esp_ota_end(ota)) != ESP_OK) {
+            failure = "image rejected";
+        } else if ((err = esp_ota_set_boot_partition(slot)) != ESP_OK) {
+            failure = "set boot";
+        }
+    }
+    free(buf);
+
+    char reply[96];
+    if (failure == nullptr) {
+        snprintf(reply, sizeof(reply), "OK %s\n", slot->label);
+        DEBUG_SERIAL.printf("[OTA] written slot=%s\n", slot->label);
+    } else {
+        snprintf(reply, sizeof(reply), "FAIL %s %s\n", failure, esp_err_to_name(err));
+        DEBUG_SERIAL.printf("[OTA] error reason=%s err=%s\n", failure, esp_err_to_name(err));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_sendstr(req, reply);
+
+    otaResult    = failure == nullptr ? 1 : -1;
+    otaReceiving = false;
+    return ESP_OK;
+}
+
+/** POST /exit -- back to the mesh without an update, once the PC has read the version. */
+static esp_err_t otaHttpExit(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_sendstr(req, "bye\n");
+    otaExitAsked = true;
+    return ESP_OK;
+}
+
+/**
+ * The update-mode boot. Called from setup() instead of everything after the
+ * banner, and never returns: it ends in a restart whatever happens.
+ *
+ * ESP-IDF directly, not the Arduino WiFi, WebServer, Update and mDNS classes.
+ * Those worked, and cost 4 KB of static DRAM on every boot -- mDNS's packet
+ * buffer, a DNS table, smartconfig's timers -- which is a fifth of what a
+ * Bluetooth server has left while it streams (CHANGELOG). This way the cost is
+ * heap, and only on the boot that updates. Without mDNS the PC finds the node
+ * by asking the LAN who answers GET / with this ROOM_NAME (tools/ota.ps1).
+ */
+[[noreturn]] static void otaRun() {
+    char info[256];
+    otaDescribe(info, sizeof(info));
+    DEBUG_SERIAL.printf("[OTA] update mode %s\n", info);
+    meshPlayFeedback(MESH_FB_OPEN);   // two beeps: listening
+
+    wifi_config_t wc = {};
+    prefs.begin(PREF_NAMESPACE, true);
+    prefs.getString(PREF_WIFI_SSID, (char *)wc.sta.ssid, sizeof(wc.sta.ssid));
+    prefs.getString(PREF_WIFI_PASS, (char *)wc.sta.password, sizeof(wc.sta.password));
+    prefs.end();
+    if (wc.sta.ssid[0] == '\0') {
+        DEBUG_SERIAL.println("[OTA] error reason=no_wifi (set it with W, or tools/ota-wifi.ps1)");
+        otaLeave(OTA_FAILED);
+    }
+
+    char host[33];
+    otaHostname(host, sizeof(host));
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_t *sta = esp_netif_create_default_wifi_sta();
+    esp_netif_set_hostname(sta, host);   // the name the router's client list shows
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, otaOnNetEvent, nullptr);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, otaOnNetEvent, nullptr);
+
+    wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&wcfg);
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);   // the credentials live in our namespace
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    memset(&wc, 0, sizeof(wc));
+    esp_wifi_start();
+    esp_wifi_set_ps(WIFI_PS_NONE);            // modem sleep halves upload throughput
+
+    const unsigned long t0 = millis();
+    while (!otaGotIp) {
+        if ((long)(millis() - t0) > (long)OTA_CONNECT_TIMEOUT_MS) {
+            DEBUG_SERIAL.println("[OTA] error reason=wifi (wrong password, or out of range)");
+            otaLeave(OTA_FAILED);
+        }
+        delay(100);
+    }
+    wifi_ap_record_t ap = {};
+    esp_wifi_sta_get_ap_info(&ap);
+    DEBUG_SERIAL.printf("[OTA] ready ip=" IPSTR " host=%s ch=%d rssi=%d\n",
+                        IP2STR(&otaIp), host, (int)ap.primary, (int)ap.rssi);
+
+    httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
+    hc.stack_size = 6144;   // esp_ota_end() verifies the image on this stack
+    httpd_handle_t http = nullptr;
+    if (httpd_start(&http, &hc) != ESP_OK) {
+        DEBUG_SERIAL.println("[OTA] error reason=http");
+        otaLeave(OTA_FAILED);
+    }
+    const httpd_uri_t routes[] = {
+        {"/",       HTTP_GET,  otaHttpIdentify, nullptr},
+        {"/update", HTTP_POST, otaHttpUpdate,   nullptr},
+        {"/exit",   HTTP_POST, otaHttpExit,     nullptr},
+    };
+    for (const httpd_uri_t &r : routes) httpd_register_uri_handler(http, &r);
+
+    unsigned long windowStart = millis();
+    while (true) {
+        if (otaResult != 0 || otaExitAsked) {
+            delay(300);   // let the reply leave before the radio does
+            if (otaResult == 1) otaLeave(OTA_UPDATED);
+            if (otaExitAsked)   otaLeave(OTA_DISMISSED);
+            // A failed upload keeps the window open for another attempt.
+            otaResult   = 0;
+            windowStart = millis();
+        }
+        if (otaReceiving) windowStart = millis();
+        if ((long)(millis() - windowStart) > (long)OTA_WINDOW_MS) {
+            DEBUG_SERIAL.println("[OTA] window closed, nothing uploaded");
+            otaLeave(OTA_FAILED);
+        }
+        delay(20);
+    }
+}
+
+// ============================================================================
 // Bench mode — synthetic source, telemetry, serial control
 // ============================================================================
 
@@ -2276,6 +2673,10 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   D  `D<n>` each packet also carries the block n packets back, until reboot
  *   X  `X<n>` each packet carries the XOR of blocks 1 and n back instead
  *   R  `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot
+ *   U  bare: reboot into update mode. `U<name>`: ask the node with that
+ *      ROOM_NAME or MAC to, over the mesh (see tools/ota.ps1)
+ *   W  `W<ssid>` then the password on the next line: the home network update
+ *      mode joins (persists). Bare `W` prints the SSID, never the password
  *
  * Bluetooth server diagnostics, for telling the A2DP side from the mesh side:
  *   k  `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, as a headset would
@@ -2415,6 +2816,34 @@ static void benchServiceSerial() {
                 break;
             case 'p': meshStartPairing();  break;
             case 'o': meshStartOffering(); break;
+            case 'U': {
+                char line[MESH_TARGET_MAX + 2];
+                benchReadLine(line, sizeof(line));
+                if (line[0] == '\0') otaRebootIntoUpdate();
+                else                 otaStartRequest(line);
+                break;
+            }
+            case 'W': {
+                // Two lines, so an SSID may contain spaces. The password is
+                // never printed back, only whether there is one.
+                char ssid[33];
+                benchReadLine(ssid, sizeof(ssid));
+                prefs.begin(PREF_NAMESPACE, ssid[0] == '\0');
+                if (ssid[0] != '\0') {
+                    char pass[65];
+                    benchReadLine(pass, sizeof(pass));
+                    prefs.putString(PREF_WIFI_SSID, ssid);
+                    prefs.putString(PREF_WIFI_PASS, pass);
+                    memset(pass, 0, sizeof(pass));
+                }
+                const String storedSsid = prefs.getString(PREF_WIFI_SSID, "");
+                const bool   hasPass    = prefs.getString(PREF_WIFI_PASS, "").length() > 0;
+                prefs.end();
+                DEBUG_SERIAL.printf("[OTA] wifi ssid=%s pass=%s\n",
+                                    storedSsid.length() ? storedSsid.c_str() : "-",
+                                    hasPass ? "set" : "none");
+                break;
+            }
 #ifdef ENABLE_BLUETOOTH
             case 'a': a2dpStatsPrint(); a2dpStatsReset(); break;
             case 'f':
@@ -2548,6 +2977,24 @@ void setup() {
     DEBUG_SERIAL.println("================================");
     DEBUG_SERIAL.println();
 
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(ownMac, sizeof(ownMac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    // Update mode is a boot of its own and is decided here, before anything
+    // claims the radio or the heap. Cleared before it runs, so any reset out of
+    // it -- a crash included -- lands back in normal mode.
+    if (otaMagic == OTA_MAGIC) {
+        otaMagic = 0;
+        otaRun();
+    }
+    {
+        char info[256];
+        otaDescribe(info, sizeof(info));
+        DEBUG_SERIAL.printf("[OTA] boot %s\n", info);
+    }
+
     benchMode = (benchMagic == BENCH_MAGIC);
     if (benchMode) {
         DEBUG_SERIAL.println("[BENCH] boot bench=1 (Bluetooth disabled this boot)");
@@ -2634,6 +3081,8 @@ void loop() {
     meshServiceButton();
     meshServicePairing();
     meshServiceOffer();
+    otaServiceRequest();
+    otaServiceConfirm();
 
     switch (currentMode) {
 

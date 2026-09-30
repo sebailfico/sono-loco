@@ -152,6 +152,67 @@ void test_an_empty_packet_alone_is_not_a_beacon(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Update requests
+// ---------------------------------------------------------------------------
+
+void test_an_update_request_is_the_magic_and_a_target(void) {
+    TEST_ASSERT_TRUE(meshIsUpdateRequest(MESH_UPDATE_SEQ, 1));
+    TEST_ASSERT_TRUE(meshIsUpdateRequest(MESH_UPDATE_SEQ, MESH_TARGET_MAX));
+    TEST_ASSERT_FALSE(meshIsUpdateRequest(MESH_UPDATE_SEQ, 0));
+    TEST_ASSERT_FALSE(meshIsUpdateRequest(MESH_UPDATE_SEQ, MESH_TARGET_MAX + 1));
+    TEST_ASSERT_FALSE(meshIsUpdateRequest(MESH_BEACON_SEQ, 12));
+}
+
+static bool targets(const char *target, const char *room, const char *mac) {
+    return meshTargetMatches(target, strlen(target), room, mac);
+}
+
+static const char *MAC = "0A:1B:2C:3D:4E:5F";
+
+/** The build says SonoLoco-C3 and the hostname sonoloco-c3: the same node. */
+void test_a_target_is_the_room_name_in_any_case(void) {
+    TEST_ASSERT_TRUE(targets("SonoLoco-C3", "SonoLoco-C3", MAC));
+    TEST_ASSERT_TRUE(targets("sonoloco-c3", "SonoLoco-C3", MAC));
+    TEST_ASSERT_FALSE(targets("SonoLoco-S3", "SonoLoco-C3", MAC));
+}
+
+void test_a_target_is_the_mac_in_any_case(void) {
+    TEST_ASSERT_TRUE(targets("0A:1B:2C:3D:4E:5F", "SonoLoco-WROVER2", MAC));
+    TEST_ASSERT_TRUE(targets("0a:1b:2c:3d:4e:5f", "SonoLoco-WROVER2", MAC));
+    TEST_ASSERT_FALSE(targets("0A:1B:2C:3D:4E:60", "SonoLoco-WROVER2", MAC));
+}
+
+/**
+ * Whole names only. With a prefix match, updating SonoLoco-WROVER would also
+ * take SonoLoco-WROVER2 off the mesh, and the other way round with a suffix.
+ */
+void test_a_target_never_matches_part_of_a_name(void) {
+    TEST_ASSERT_FALSE(targets("SonoLoco-WROVER", "SonoLoco-WROVER2", MAC));
+    TEST_ASSERT_FALSE(targets("SonoLoco-WROVER2", "SonoLoco-WROVER", MAC));
+    TEST_ASSERT_FALSE(targets("0A:1B:2C", "SonoLoco-WROVER2", MAC));
+}
+
+/** Nothing on the air may reboot a node without naming it. */
+void test_an_empty_or_oversized_target_matches_nothing(void) {
+    TEST_ASSERT_FALSE(meshTargetMatches("", 0, "", ""));
+    TEST_ASSERT_FALSE(meshTargetMatches("SonoLoco-C3", 0, "SonoLoco-C3", MAC));
+    TEST_ASSERT_FALSE(targets("*", "SonoLoco-C3", MAC));
+    TEST_ASSERT_FALSE(meshTargetMatches("SonoLoco-C3", 11, nullptr, nullptr));
+
+    char longName[MESH_TARGET_MAX + 2];
+    memset(longName, 'a', sizeof(longName) - 1);
+    longName[sizeof(longName) - 1] = '\0';
+    TEST_ASSERT_FALSE(targets(longName, longName, MAC));
+}
+
+/** The payload has no terminator; only `len` bytes of it may be read. */
+void test_a_target_is_read_to_its_length_only(void) {
+    const char wire[] = {'S', 'o', 'n', 'o', 'L', 'o', 'c', 'o', '-', 'C', '3', 'X', 'Y'};
+    TEST_ASSERT_TRUE(meshTargetMatches(wire, 11, "SonoLoco-C3", MAC));
+    TEST_ASSERT_FALSE(meshTargetMatches(wire, 12, "SonoLoco-C3", MAC));
+}
+
+// ---------------------------------------------------------------------------
 
 int runAllTests(void) {
     UNITY_BEGIN();
@@ -170,6 +231,13 @@ int runAllTests(void) {
     RUN_TEST(test_a_beacon_is_the_magic_and_no_payload);
     RUN_TEST(test_a_full_packet_is_never_a_beacon);
     RUN_TEST(test_an_empty_packet_alone_is_not_a_beacon);
+
+    RUN_TEST(test_an_update_request_is_the_magic_and_a_target);
+    RUN_TEST(test_a_target_is_the_room_name_in_any_case);
+    RUN_TEST(test_a_target_is_the_mac_in_any_case);
+    RUN_TEST(test_a_target_never_matches_part_of_a_name);
+    RUN_TEST(test_an_empty_or_oversized_target_matches_nothing);
+    RUN_TEST(test_a_target_is_read_to_its_length_only);
 
     return UNITY_END();
 }

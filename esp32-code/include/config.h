@@ -142,6 +142,35 @@
 #define MESH_BEACON_INTERVAL_MS  200
 
 // ============================================================================
+// Update mode — new firmware over the home WiFi
+// ============================================================================
+// A node in a room has no cable to the PC. Asked over the mesh (`U<name>` on
+// any node that is on USB), it reboots into update mode: off the mesh, onto the
+// home network with the credentials stored by `W`, and an HTTP endpoint that
+// takes one image -- tools/ota.ps1 drives all of it. See D15.
+
+// How long to wait for the home network before giving up and going back to
+// the mesh. A wrong password or an out-of-range router ends here.
+#define OTA_CONNECT_TIMEOUT_MS  30000
+
+// How long update mode waits for an upload to begin. A node must never be
+// left off the mesh because a PC went away: when this runs out it reboots
+// into normal mode, and so does any reset in between.
+#define OTA_WINDOW_MS           300000
+
+// How long a freshly updated image must run before it is kept. Until then the
+// bootloader holds the previous one, and any reset -- a crash, the watchdog, a
+// power cut -- boots that instead. Also cut short by the next update request,
+// which is the most direct evidence there is that the new image works.
+#define OTA_CONFIRM_MS          60000
+
+// The request goes out as broadcast, which nothing acknowledges, so it is sent
+// this many times this far apart. The target acts on the first it hears; the
+// rest arrive at a node that has already left the channel.
+#define OTA_REQUEST_COPIES       25
+#define OTA_REQUEST_INTERVAL_MS  200
+
+// ============================================================================
 // ESP-NOW Mesh
 // ============================================================================
 // Fixed channel — must be the same on every node.
