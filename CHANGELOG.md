@@ -99,6 +99,17 @@ in `TODO.md` false.
   its CH343 port it flashes but prints nothing. `listen.py --client` takes
   several ports. The WROVERs moved to COM20 (WROVER1) and COM22 (WROVER2).
 
+- **An S3 or C3 client no longer stalls its audio for a PC that is not
+  reading its serial port** (`69cbdb7`). Native USB serial waited up to
+  100 ms per write for a host that was plugged in but not reading, and
+  `loop()`, which also feeds I2S, waited with it. Found when the harness was
+  killed mid-run and the S3's buffer jumped by 57 ms. Measured, 60 s behind
+  the Bluetooth server with the S3's port closed: **9 overflows and 472
+  dropped frames before, none after**, WROVER2 beside it clean both times.
+  4 KB transmit buffer, 5 ms timeout (not 0: the core decrements it before
+  testing it, and 0 wraps to forever). A board on a charger was never
+  affected — with no host the core drops the bytes.
+
 - **The mesh carries 44.1 kHz stereo, as IMA ADPCM** (`04751ea`, D5). Until
   now a client played 22.05 kHz mono: nothing above ~11 kHz, the anti-alias
   FIR 8–10 dB down above 8 kHz, and no stereo. Chosen by ear first:

@@ -556,6 +556,11 @@ Each of these was a real bug. Don't re-introduce them.
   `ARDUINO_USB_MODE=1` but leaves CDC off, so `Serial` goes to GPIO43/44 while
   the board enumerates on native USB — completely silent over the cable you are
   plugged into.
+- **…and then `Serial` can stall the audio.** Native USB serial waits up to
+  100 ms per write for a host that is plugged in but not reading, and `loop()`
+  feeds I2S: an S3 on a PC with its port closed overflowed 9 times a minute.
+  `setup()` gives it a 4 KB buffer and a 5 ms timeout — never 0, which the core
+  turns into forever.
 - **Bench mode's flag must be `RTC_NOINIT_ATTR`, not `RTC_DATA_ATTR`.**
   `.rtc.data` is re-initialised from the image on every boot that runs the
   bootloader, so the flag reads back as zero and the node reboots into normal

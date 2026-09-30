@@ -62,17 +62,6 @@ are under "Blocking" below.
       (27 holes/s, one per A2DP packet) and never again after a reboot. If
       it comes back, run `listen.py --serial` at once and compare the `a`
       window with the clean ones in `CHANGELOG.md`.
-- [ ] **Does the S3 stall when nobody reads its USB serial?** Suspected, not
-      measured. When the harness was killed mid-run on 2026-09-30, the S3's
-      buffer jumped from ~8 KB to ~18 KB — 57 ms the output stopped consuming
-      — and the drift controller spent minutes dropping it back. `Serial` on
-      the S3/C3 is the native USB CDC, whose `write()` waits up to 100 ms for
-      a host that is plugged in but not reading, and the S3 prints a status
-      line every second from `loop()`, which also feeds I2S. A classic ESP32's
-      UART never waits. Test: stream with COM9 closed, compare `und`/`jit` with
-      the port read. Fix if so: `Serial.setTxTimeoutMs(0)` on those targets —
-      a lost log line instead of a stall. A board on a phone charger is not
-      affected (no host, the core drops the bytes).
 - [ ] **Tones on every board, and loud enough for the amp they are on.** The
       user wants the startup tone on every node, DAC or not, BT or not — a
       client-only build plays nothing at boot today because the startup tone
