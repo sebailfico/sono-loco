@@ -138,12 +138,6 @@ under "Blocking" below.
 
 ### Updates without a cable (D15)
 
-- [ ] **Update the stereo node where it lives.** Update mode, rollback and
-      both failure paths are proven on the bench (`CHANGELOG.md`). Not yet:
-      the WROOM at the stereo, across the house — whether the home WiFi
-      reaches it (−66 dBm on the bench), and whether the relay's request does.
-      If the request does not arrive, a relay nearer the stereo will; if the
-      WiFi does not, D15 says what comes next.
 - [ ] **Free heap on a streaming Bluetooth server, with update mode in the
       build.** 80 bytes more static DRAM predicts no visible change; worth one
       `a`/status reading during the next Bluetooth session rather than a

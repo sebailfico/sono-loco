@@ -268,9 +268,9 @@ if (-not $Target) { $Target = $room }
 $version = (& git -C $projectDir describe --tags --always --dirty=* 2>$null)
 Write-Host ''
 Write-Host '=== update over WiFi ===' -ForegroundColor Cyan
-Write-Host "image   : $Env ($room) $version"
+if (-not $Status) { Write-Host "image   : $Env ($room) $version" }
 Write-Host "target  : $Target"
-if ($version -like '*`*') {
+if (-not $Status -and $version -like '*`*') {
     Write-Host '  note: dirty tree -- the version on the board will not name a commit' -ForegroundColor Yellow
 }
 

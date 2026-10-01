@@ -378,6 +378,7 @@ request over the mesh:
 ```powershell
 ./tools/ota-wifi.ps1 -Port COM22     # once per node, over USB: you type the WiFi password
 ./tools/ota.ps1 -Env esp32wrover2    # from then on, from anywhere on the LAN
+./tools/ota.ps1 -Env esp32stereo -Status   # no upload: how is it receiving, over there?
 ```
 
 `ota.ps1` builds the image, has the relay broadcast `U<room name>`, finds the
@@ -388,6 +389,12 @@ script's output is the report. If update mode gives up (no WiFi stored, a wrong
 password, five minutes with no upload) the node goes back on the mesh by itself.
 The startup sound, likewise, plays only on a power-on, not on the restarts an
 update makes.
+
+`-Status` uploads nothing. The node reports the home WiFi's signal where it
+stands and the stream counters it had when the request arrived — `rx`, `lost`,
+`und`, the loss-run histogram — and goes back to the mesh. A client never
+transmits, so this is the only way to see how one with no cable is hearing the
+mesh. Ask while a stream is playing: the counters restart with every stream.
 
 A new image is on probation until it has run a minute with its radio up; any
 reset before that — a crash, a hang, a power cut — boots the previous one. So an
@@ -524,6 +531,7 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   two manual runs can be compared.
 - `tools/ota.ps1` — updates a node over the home WiFi, relayed by any node on
   USB: build, request, find on the LAN, upload, read the version back. D15.
+  `-Status` reads a node's WiFi signal and reception without uploading.
 - `tools/ota-wifi.ps1` — stores the home WiFi on a node, once, over USB. The
   password is typed at a masked prompt and never passes through anything else.
 - `tools/codec/abtest.py` — hear what a client plays before it is firmware: a

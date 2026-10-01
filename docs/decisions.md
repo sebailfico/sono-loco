@@ -727,9 +727,10 @@ changes every conversion in `lib/sync` along with everything else (`TODO.md`).
 
 ## D15 — Updates come over the home WiFi, in a boot of their own
 
-**Decided:** 2026-09-30. **Status:** proven on the bench 2026-10-01
-(`v0.2.0-64-ga6816cd`): an update, a rollback and both ways of giving up
-(`CHANGELOG.md`). Not yet from across the house (`TODO.md`).
+**Decided:** 2026-09-30. **Status:** proven 2026-10-01 — on the bench
+(`v0.2.0-64-ga6816cd`: an update, a rollback, both ways of giving up) and on
+the stereo node across the room (`v0.2.0-68-g66327e2`: updated in 60 s at
+−52 dBm, 240,425 packets received with none lost). `CHANGELOG.md`.
 
 A node plugged into a stereo across the house has power and no cable to the
 PC, so a new image has to arrive by radio. It arrives over the home network:

@@ -30,6 +30,35 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **The stereo node, across the room: updated, and measured, in silence**
+  (2026-10-01, `3418110`, `66327e2`, D15 amended). The WROOM
+  `SonoLoco-Stereo` sits across the room on a phone charger with its PCM5102A
+  into the stereo, and the stereo was off for all of this.
+  - *Silent from now on.* One update and its read-back had played six or
+    seven tones into whatever the node is plugged into: pairing beeps into
+    update mode, a rising tone when written, the startup sound on every
+    restart. Update mode makes no sound now, and the startup sound plays only
+    on a power-on (`ESP_RST_POWERON` — the EN button and a USB flash too).
+    Pairing keeps its tones.
+  - *Measurable from the PC.* In update mode `GET /` adds the home WiFi's
+    signal where the node stands and the stream counters it had when the
+    request arrived, carried across the restart in RTC memory.
+    `ota.ps1 -Status` asks, prints and sends it back, uploading nothing. A
+    client never transmits; this is the only way to read one with no cable.
+  - *Updated across the room* to `v0.2.0-68-g66327e2` through WROVER1 as the
+    relay: 60 s end to end, 1,608,080 bytes in 16.1 s, `app1` → `app0`,
+    PASS. The home WiFi there: **−52 dBm** (−66 on the bench), and the router
+    had moved itself to channel 2 since yesterday — still far from the
+    mesh's 11.
+  - *Received across the room*, with the bench tone streamed from WROVER2 for
+    720 s (`bench-mesh.ps1 -Duration 720 -Mute -Source COM22 -Ports
+    COM20,COM22`, `logs/bench-20261001-142107.log`) and `-Status` asked
+    through the S3 at 620 s: **240,425 packets, 0 lost**, 0 ovf, und, dup,
+    rsy, sjmp or dry. One packet in ten minutes went missing and its block
+    was rebuilt from the redundancy (`rec=1`, `runs=1,0,…`). WROVER1, next to
+    the PC, on the same stream: 278,162 in 720 s, 0 lost, 242 dropped = 7.6
+    ppm as this morning.
+
 - **Update mode: new firmware over the home WiFi, no cable** (2026-10-01,
   `cc63de0`, `c69ee4e`, `a6816cd`, D15). Asked for a WROOM that lives at a
   stereo's aux input with a phone charger and nothing else. `U<name>` on any

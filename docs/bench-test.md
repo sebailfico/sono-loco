@@ -318,6 +318,16 @@ does not exist (`W<name>` and an empty password line), in ~35 s with
 `reason=wifi`. Either way the node is back on the mesh by itself — and the
 dummy SSID stays stored until `ota-wifi.ps1` replaces it.
 
+**A node across the house.** It has no serial port, and a client never
+transmits, so its reception is read with `-Status` while a stream plays at
+it: run `bench-mesh.ps1` on the nodes at the PC, keep one node out of the
+harness (`-Ports`) to relay, and ask before the harness stops the source —
+a node back in DISCOVERY has already zeroed its counters.
+`./tools/ota.ps1 -Env esp32stereo -Relay COM9 -Status` prints `rssi=` (the
+home WiFi) and `before=CLIENT up= rx= lost= und= ... runs=` (the mesh, up to
+the request), to compare with the harness's own client in the same minutes.
+Mute the relay first if it has a speaker: it is a client of that stream too.
+
 ---
 
 ## Manual walkthrough
