@@ -263,6 +263,10 @@ def main():
     save_wav(base + '.wav', x, fs)
     print(f'saved {os.path.relpath(base, ROOT)}.wav, mic peak {np.abs(x).max():.2f}'
           + ('  (clipped: lower the level)' if np.abs(x).max() >= 0.99 else ''))
+    if not np.any(x):
+        # A real room is never exactly zero: this is the input muted in Windows
+        # (2026-10-01), not a speaker too quiet or too far away.
+        sys.exit('the microphone recorded exact zeros -- it is muted in Windows; unmute it and rerun')
     analyze(x, fs, a.freq, plot=base)
 
 

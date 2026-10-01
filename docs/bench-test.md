@@ -293,6 +293,9 @@ Traps, each of which cost a run on 2026-09-28:
   is silent. `listen.py` opens the mic in WASAPI RAW mode for that reason.
   Exclusive mode is no better on this laptop: the Realtek driver delivers
   65–82 k frames/s for a 48 k stream, i.e. repeated audio — clicks of its own.
+- **A muted microphone records exact zeros**, which reads like a speaker that
+  is not playing. A real room is never digital silence, so `listen.py` now
+  stops and says so (2026-10-01: `mic peak 0.00`, the mic muted in Windows).
 - **The volume resets on every reconnect**, and a tone 40 dB quieter looks like
   90 dips/s of noise. The script warns below −55 dBFS at the mic; above
   `peak 0.99` it clipped. Lower `--level` rather than the volume.
