@@ -39,6 +39,8 @@
 // with `pio test -e native` — see test/test_jitter.
 #include "adpcm.h"
 #include "blocks.h"
+#include "conceal.h"
+#include "gain.h"
 #include "drift.h"
 #include "holes.h"
 #include "jitter.h"
@@ -119,10 +121,17 @@ static volatile bool outputMuted   = false;
 // with one speaker -- a MAX98357A plays one channel -- would otherwise lose
 // whatever was panned to the other.
 static bool          clientMonoOut = false;
+// `v<dB>`: this node's own volume trim, kept in NVS, applied where mute is --
+// after the mesh has its copy -- so the phone's slider still moves every room
+// together and the trim sets where this room sits among them. For a loud amp
+// on one node (WROVER2's TPA3116) and a small one on another.
+static int8_t        outTrimDb     = 0;
+static volatile int32_t outTrimQ12 = GAIN_UNITY_Q12;
 
 static const char *PREF_NAMESPACE = "sonoloco";
 static const char *PREF_CLIENT_ONLY = "clientonly";
 static const char *PREF_MONO_OUT = "monoout";
+static const char *PREF_TRIM_DB = "trimdb";
 static const char *PREF_MESH_ID = "meshid";
 static const char *PREF_MESH_NAME = "meshname";
 static const char *PREF_WIFI_SSID = "wifissid";   // update mode's home network
@@ -669,6 +678,11 @@ static SeqTracker   seqTracker(SEQ_RESYNC_THRESHOLD, MAX_GAP_FILL_PKTS);
 static HoleTable    rxHoles;
 static uint8_t      rxStoreBuf[BlockStore::SLOTS * MESH_BLOCK_BYTES];
 static BlockStore   rxStore;
+// Concealment (MESH_CONCEAL, `z`): the last block pushed, decoded, which the
+// next gap fades out of. Invalid at a stream's start and after a resync.
+static volatile bool rxConceal   = MESH_CONCEAL;
+static int16_t       rxPrev[2 * MESH_BLOCK_FRAMES];
+static bool          rxPrevValid = false;
 
 // Clock-drift correction. The controller only decides; driveRingI2S applies.
 // Runtime-switchable rather than compile-time so a bench run can measure the
@@ -910,6 +924,7 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     if (seqTracker.resync != resyncBefore) {   // numbering restarted
         rxHoles.clear();
         rxStore.clear();
+        rxPrevValid   = false;
         timelineFlush = true;
     }
     // Blocks, not frames: with every frame sent twice, counting frames would
@@ -924,14 +939,30 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
         portEXIT_CRITICAL(&traceMux);
     }
 
-    // What was missed goes in as silence, in playing order, so playback keeps
-    // its timing instead of splicing the stream shorter on every loss -- and
-    // each block's place is remembered, for the packet that carries it later.
+    // Decoded before the gap is filled: the block after a gap is half of what
+    // fills it. Static: this is the WiFi task's stack, and it is not ours to
+    // spend.
+    static int16_t pcm[2 * MESH_BLOCK_FRAMES];
+    static int16_t fill[2 * MESH_BLOCK_FRAMES];
+    const bool decoded = adpcmDecodeStereoBlock(payload, MESH_BLOCK_FRAMES, pcm);
+
+    // What was missed goes in, in playing order, so playback keeps its timing
+    // instead of splicing the stream shorter on every loss -- as silence, or
+    // concealed (lib/jitter/conceal.h) -- and each block's place is
+    // remembered, for the packet that carries it later.
     static const int BLOCK_PCM = MESH_BLOCK_FRAMES * CLIENT_FRAME_BYTES;
     const uint32_t ovfBefore = rxOverflow;
     for (int i = sr.fillPackets; i > 0; i--) {
         const int pos = jbuf.writePos();
-        if (jbuf.pushSilence(BLOCK_PCM)) {
+        bool ok;
+        if (rxConceal) {
+            concealBlock(rxPrevValid ? rxPrev : nullptr, decoded ? pcm : nullptr,
+                         MESH_BLOCK_FRAMES, sr.fillPackets, sr.fillPackets - i, fill);
+            ok = jbuf.pushBlock((const uint8_t *)fill, BLOCK_PCM);
+        } else {
+            ok = jbuf.pushSilence(BLOCK_PCM);
+        }
+        if (ok) {
             rxHoles.add((uint16_t)(seq - i), pos);
             ringPushed += MESH_BLOCK_FRAMES;
         } else {
@@ -942,18 +973,15 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     // the stream, and the server's timeline in ring frames has moved.
     if (run > (uint32_t)sr.fillPackets) timelineFlush = true;
 
-    // Static: this is the WiFi task's stack, and it is not ours to spend.
-    static int16_t pcm[2 * MESH_BLOCK_FRAMES];
     const uint32_t first = ringPushed;
-    bool pushed;
-    if (adpcmDecodeStereoBlock(payload, MESH_BLOCK_FRAMES, pcm)) {
-        pushed = jbuf.pushBlock((const uint8_t *)pcm, BLOCK_PCM);
-    } else {
-        pushed = jbuf.pushSilence(BLOCK_PCM);
-    }
+    const bool pushed = decoded ? jbuf.pushBlock((const uint8_t *)pcm, BLOCK_PCM)
+                                : jbuf.pushSilence(BLOCK_PCM);
     if (pushed) ringPushed += MESH_BLOCK_FRAMES;
     else        rxOverflow++;
     if (rxOverflow != ovfBefore) timelineFlush = true;   // frames missing from the ring
+    // What the next gap fades out of.
+    if (decoded) memcpy(rxPrev, pcm, sizeof(rxPrev));
+    rxPrevValid = decoded;
 
     // When the server plays this block, on this node's clock -- late by this
     // frame's transit beyond the fastest, which the timeline's minimum removes.
@@ -1693,6 +1721,7 @@ static void driveRingI2S() {
             stereo[2 * i] = stereo[2 * i + 1] = m;
         }
     }
+    if (!outputMuted) applyGainQ12(stereo, CLIENT_BATCH * 2, outTrimQ12);
 
     // Blocking with a short timeout paces this loop to the I2S sample clock.
     const size_t bw = outWrite(stereo, BATCH_BYTES);
@@ -1745,6 +1774,7 @@ static void resetPlayState() {
     ringReset();
     rxHoles.clear();
     rxStore.clear();
+    rxPrevValid = false;
     seqTracker.reset();
     portENTER_CRITICAL(&traceMux);
     rxTrace.reset();
@@ -2681,7 +2711,7 @@ static void benchIdentify() {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     DEBUG_SERIAL.printf(
         "[BENCH] id fw=%s chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
-        "bench=%d bt=%d espnow=%d drift=%d conly=%d mono=%d mute=%d mesh=%04X meshname=%s "
+        "bench=%d bt=%d espnow=%d drift=%d conly=%d mono=%d mute=%d trim=%d mesh=%04X meshname=%s "
         "name=%s\n",
         FW_VERSION,
         ESP.getChipModel(),
@@ -2698,6 +2728,7 @@ static void benchIdentify() {
         clientOnly ? 1 : 0,
         clientMonoOut ? 1 : 0,
         outputMuted ? 1 : 0,
+        outTrimDb,
         meshId,
         meshNameForLog(),
         ROOM_NAME);
@@ -2777,8 +2808,10 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   o  offer this mesh to a node that is listening (the server half)
  *   m  mute this node's speaker until reboot (the mesh is untouched)
  *   M  toggle mixing a client's stereo to mono, for one speaker (persists)
+ *   v  `v<dB>` this node's volume trim, applied at its own output (persists)
  *   l  client: print and reset the lost-run histogram and `rec`
  *   L  client: `L1` prints which packets were lost, once a second, `L0` stops
+ *   z  client: `z1` fills a lost block from its neighbours, `z0` with silence
  *   t  `t<n>` sends each mesh frame n times, 1..3, until reboot
  *   P  `P<us>` minimum spacing between audio packets, 0 = none, until reboot
  *   D  `D<n>` each packet also carries the block n packets back, until reboot
@@ -2877,6 +2910,15 @@ static void benchServiceSerial() {
                 }
                 DEBUG_SERIAL.println();
                 break;
+            case 'z': {
+                // Explicit, like L: `z1` conceals, `z0` plays silence, bare
+                // reports. Takes effect at the next lost block.
+                char line[4];
+                benchReadLine(line, sizeof(line));
+                if (line[0] == '0' || line[0] == '1') rxConceal = line[0] == '1';
+                DEBUG_SERIAL.printf("[RX] conceal=%d\n", rxConceal ? 1 : 0);
+                break;
+            }
             case 'L': {
                 // Explicit on and off, not a toggle: a script that cannot
                 // see the state must not be able to flip it the wrong way.
@@ -2940,6 +2982,25 @@ static void benchServiceSerial() {
                 prefs.end();
                 DEBUG_SERIAL.printf("[OUT] mono=%d\n", clientMonoOut ? 1 : 0);
                 break;
+            case 'v': {
+                // `v<dB>`, e.g. v-6: this node's trim, kept in NVS. Bare `v`
+                // reports. Out-of-range values are clamped, not refused, so
+                // the reply always says what is in effect.
+                char line[8];
+                benchReadLine(line, sizeof(line));
+                if (line[0] != '\0') {
+                    int db = atoi(line);
+                    if (db < OUT_TRIM_MIN_DB) db = OUT_TRIM_MIN_DB;
+                    if (db > OUT_TRIM_MAX_DB) db = OUT_TRIM_MAX_DB;
+                    outTrimDb  = (int8_t)db;
+                    outTrimQ12 = gainQ12FromDb(db);
+                    prefs.begin(PREF_NAMESPACE, false);
+                    prefs.putChar(PREF_TRIM_DB, outTrimDb);
+                    prefs.end();
+                }
+                DEBUG_SERIAL.printf("[OUT] trim=%ddB\n", outTrimDb);
+                break;
+            }
             case 'p': meshStartPairing();  break;
             case 'o': meshStartOffering(); break;
             case 'U': {
@@ -3073,6 +3134,9 @@ void setup() {
     prefs.begin(PREF_NAMESPACE, true);
     clientOnly = prefs.getBool(PREF_CLIENT_ONLY, false);
     clientMonoOut = prefs.getBool(PREF_MONO_OUT, false);
+    outTrimDb     = prefs.getChar(PREF_TRIM_DB, 0);
+    if (outTrimDb < OUT_TRIM_MIN_DB || outTrimDb > OUT_TRIM_MAX_DB) outTrimDb = 0;
+    outTrimQ12    = gainQ12FromDb(outTrimDb);
     prefs.end();
 
     // Before the radio, because the receive callback compares every packet

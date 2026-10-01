@@ -92,6 +92,11 @@
 #endif
 #define TONE_FADE_MS     5       // ramp in/out, kills the click at tone edges
 
+// The range of a node's own volume trim (`v<dB>`, lib/jitter/gain.h). Above
+// 0 a loud passage clips; the ceiling is there so a typo cannot ask for +40.
+#define OUT_TRIM_MIN_DB  -40
+#define OUT_TRIM_MAX_DB   12
+
 // ============================================================================
 // Mesh Identity — which nodes belong to whose household
 // ============================================================================
@@ -274,6 +279,13 @@
 // plain block buys one. `X<n>` on a server turns it on with distance n,
 // `D<n>` off.
 #define MESH_REDUNDANCY_PARITY  0
+
+// What a client plays for a block that never arrived and was not rebuilt: 1
+// fills it from its two neighbours, each played backwards away from the edge
+// it shares, so the waveform has no step at either edge (lib/jitter/conceal.h);
+// 0 plays zeroes, a 2.6 ms drop and a click. A client setting, not on the
+// wire: `z1` / `z0` until reboot.
+#define MESH_CONCEAL  0
 
 // Blocks a sender keeps to draw the older one from: the largest distance plus
 // one. A power of two.

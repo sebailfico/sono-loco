@@ -12,9 +12,12 @@
 
 #include <unity.h>
 
+#include <math.h>
 #include <string.h>
 
 #include "blocks.h"
+#include "conceal.h"
+#include "gain.h"
 #include "holes.h"
 #include "jitter.h"
 #include "losstrace.h"
@@ -781,6 +784,147 @@ static void test_trace_reset_forgets_without_counting(void) {
 }
 
 // ---------------------------------------------------------------------------
+// concealBlock — what a lost block plays instead of silence
+// ---------------------------------------------------------------------------
+
+static const int CF = 114;   // MESH_BLOCK_FRAMES: the real size, so the real arithmetic
+static int16_t cPrev[2 * CF], cNext[2 * CF], cOut[2 * CF], cLost[2 * CF];
+
+/** A 997 Hz tone, left; a 440 Hz one, right; frame `first` onwards. */
+static void tone(int16_t *out, int first) {
+    for (int i = 0; i < CF; i++) {
+        const double t = (double)(first + i) / 44100.0;
+        out[2 * i]     = (int16_t)(10000.0 * sin(2 * M_PI * 997.0 * t));
+        out[2 * i + 1] = (int16_t)(-8000.0 * sin(2 * M_PI * 440.0 * t));
+    }
+}
+
+/** Largest jump between consecutive frames of one channel across a, b, c. */
+static int largestStep(const int16_t *a, const int16_t *b, const int16_t *c, int ch) {
+    const int16_t *parts[3] = {a, b, c};
+    int worst = 0, last = a[ch];
+    for (int p = 0; p < 3; p++) {
+        for (int i = 0; i < CF; i++) {
+            const int s = parts[p][2 * i + ch];
+            const int d = s > last ? s - last : last - s;
+            if (d > worst) worst = d;
+            last = s;
+        }
+    }
+    return worst;
+}
+
+static void test_conceal_meets_both_neighbours_exactly(void) {
+    tone(cPrev, 0);
+    tone(cNext, 2 * CF);
+    concealBlock(cPrev, cNext, CF, 1, 0, cOut);
+    for (int ch = 0; ch < 2; ch++) {
+        TEST_ASSERT_EQUAL_INT16(cPrev[2 * (CF - 1) + ch], cOut[ch]);           // where prev ended
+        TEST_ASSERT_EQUAL_INT16(cNext[ch], cOut[2 * (CF - 1) + ch]);           // where next starts
+    }
+}
+
+static void test_conceal_leaves_no_step_where_silence_did(void) {
+    // The click this replaces: zero-fill puts a step as big as the signal at
+    // each edge. A fill no steeper than the tone itself has no click.
+    tone(cPrev, 0);
+    tone(cLost, CF);
+    tone(cNext, 2 * CF);
+    for (int ch = 0; ch < 2; ch++) {
+        const int own = largestStep(cPrev, cLost, cNext, ch);
+        concealBlock(cPrev, cNext, CF, 1, 0, cOut);
+        const int filled = largestStep(cPrev, cOut, cNext, ch);
+        memset(cOut, 0, sizeof(cOut));
+        const int zeroed = largestStep(cPrev, cOut, cNext, ch);
+        TEST_ASSERT_LESS_OR_EQUAL_INT_MESSAGE(own * 3 / 2, filled, "the fill is steeper than the tone");
+        TEST_ASSERT_GREATER_THAN_INT_MESSAGE(own * 3, zeroed, "zero-fill was not the step it should be");
+    }
+}
+
+static void test_conceal_keeps_left_and_right_apart(void) {
+    // Only the left channel carries anything: the right of the fill must be
+    // silent, or a frame was read at an odd offset.
+    for (int i = 0; i < CF; i++) {
+        cPrev[2 * i] = 1000; cPrev[2 * i + 1] = 0;
+        cNext[2 * i] = -1000; cNext[2 * i + 1] = 0;
+    }
+    concealBlock(cPrev, cNext, CF, 1, 0, cOut);
+    for (int i = 0; i < CF; i++) TEST_ASSERT_EQUAL_INT16(0, cOut[2 * i + 1]);
+    TEST_ASSERT_EQUAL_INT16(1000, cOut[0]);
+    TEST_ASSERT_EQUAL_INT16(-1000, cOut[2 * (CF - 1)]);
+}
+
+static void test_conceal_a_run_fades_out_rests_and_fades_in(void) {
+    tone(cPrev, 0);
+    tone(cNext, 4 * CF);
+    concealBlock(cPrev, cNext, CF, 3, 0, cOut);
+    TEST_ASSERT_EQUAL_INT16(cPrev[2 * (CF - 1)], cOut[0]);
+    TEST_ASSERT_EQUAL_INT16(0, cOut[2 * (CF - 1)]);
+    TEST_ASSERT_EQUAL_INT16(0, cOut[2 * (CF - 1) + 1]);
+    concealBlock(cPrev, cNext, CF, 3, 1, cOut);
+    for (int i = 0; i < 2 * CF; i++) TEST_ASSERT_EQUAL_INT16(0, cOut[i]);
+    concealBlock(cPrev, cNext, CF, 3, 2, cOut);
+    TEST_ASSERT_EQUAL_INT16(0, cOut[0]);
+    TEST_ASSERT_EQUAL_INT16(cNext[0], cOut[2 * (CF - 1)]);
+    TEST_ASSERT_EQUAL_INT16(cNext[1], cOut[2 * (CF - 1) + 1]);
+}
+
+static void test_conceal_an_unknown_neighbour_is_silence(void) {
+    tone(cNext, 0);
+    concealBlock(nullptr, cNext, CF, 1, 0, cOut);
+    TEST_ASSERT_EQUAL_INT16(0, cOut[0]);
+    TEST_ASSERT_EQUAL_INT16(cNext[0], cOut[2 * (CF - 1)]);
+    concealBlock(nullptr, nullptr, CF, 1, 0, cOut);
+    for (int i = 0; i < 2 * CF; i++) TEST_ASSERT_EQUAL_INT16(0, cOut[i]);
+}
+
+static void test_conceal_full_scale_does_not_wrap(void) {
+    for (int i = 0; i < 2 * CF; i++) { cPrev[i] = 32767; cNext[i] = -32768; }
+    concealBlock(cPrev, cNext, CF, 1, 0, cOut);
+    for (int i = 1; i < CF; i++) {
+        TEST_ASSERT_TRUE_MESSAGE(cOut[2 * i] <= cOut[2 * (i - 1)], "a full-scale crossfade wrapped");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gain — a node's own volume trim
+// ---------------------------------------------------------------------------
+
+static void test_gain_factors_are_the_decibels_asked_for(void) {
+    TEST_ASSERT_EQUAL_INT32(4096, gainQ12FromDb(0));
+    TEST_ASSERT_EQUAL_INT32(2053, gainQ12FromDb(-6));     // 0.5012
+    TEST_ASSERT_EQUAL_INT32(410, gainQ12FromDb(-20));     // 0.1
+    TEST_ASSERT_EQUAL_INT32(16306, gainQ12FromDb(12));    // 3.981
+}
+
+static void test_gain_unity_leaves_samples_alone(void) {
+    int16_t s[4] = {32767, -32768, 1, -1};
+    applyGainQ12(s, 4, GAIN_UNITY_Q12);
+    TEST_ASSERT_EQUAL_INT16(32767, s[0]);
+    TEST_ASSERT_EQUAL_INT16(-32768, s[1]);
+    TEST_ASSERT_EQUAL_INT16(1, s[2]);
+    TEST_ASSERT_EQUAL_INT16(-1, s[3]);
+}
+
+static void test_gain_cuts_both_signs_alike(void) {
+    int16_t s[4] = {20000, -20000, 1000, -1000};
+    applyGainQ12(s, 4, gainQ12FromDb(-6));
+    TEST_ASSERT_INT16_WITHIN(1, 10024, s[0]);
+    TEST_ASSERT_INT16_WITHIN(1, -10024, s[1]);
+    TEST_ASSERT_INT16_WITHIN(1, 501, s[2]);
+    TEST_ASSERT_INT16_WITHIN(1, -501, s[3]);
+}
+
+static void test_gain_above_unity_clips_never_wraps(void) {
+    int16_t s[4] = {30000, -30000, 8000, -8000};
+    applyGainQ12(s, 4, gainQ12FromDb(12));
+    TEST_ASSERT_EQUAL_INT16(32767, s[0]);
+    TEST_ASSERT_EQUAL_INT16(-32768, s[1]);
+    TEST_ASSERT_INT16_WITHIN(2, 31848, s[2]);
+    TEST_ASSERT_INT16_WITHIN(2, -31848, s[3]);
+}
+
+// ---------------------------------------------------------------------------
 
 static int runAllTests(void) {
     UNITY_BEGIN();
@@ -843,6 +987,18 @@ static int runAllTests(void) {
     RUN_TEST(test_trace_a_reader_that_falls_behind_is_a_break);
     RUN_TEST(test_trace_bits_survive_the_ring_wrapping);
     RUN_TEST(test_trace_reset_forgets_without_counting);
+
+    RUN_TEST(test_conceal_meets_both_neighbours_exactly);
+    RUN_TEST(test_conceal_leaves_no_step_where_silence_did);
+    RUN_TEST(test_conceal_keeps_left_and_right_apart);
+    RUN_TEST(test_conceal_a_run_fades_out_rests_and_fades_in);
+    RUN_TEST(test_conceal_an_unknown_neighbour_is_silence);
+    RUN_TEST(test_conceal_full_scale_does_not_wrap);
+
+    RUN_TEST(test_gain_factors_are_the_decibels_asked_for);
+    RUN_TEST(test_gain_unity_leaves_samples_alone);
+    RUN_TEST(test_gain_cuts_both_signs_alike);
+    RUN_TEST(test_gain_above_unity_clips_never_wraps);
 
     return UNITY_END();
 }
