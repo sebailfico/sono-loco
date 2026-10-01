@@ -289,6 +289,37 @@ Traps, each of which cost a run on 2026-09-28:
 `mon.py COM19` logs the `a` window every 2 s to `logs/a2dp-<time>.log` while
 somebody plays real music — for "it crackled just then".
 
+## Updating without a cable: `tools/ota.ps1`
+
+Update mode (D15) is tested with the target still on USB, so its log can be
+read, and another node on USB as the relay. Store the WiFi on the target first
+with `tools/ota-wifi.ps1` — a person types the password.
+
+```powershell
+./tools/ota.ps1 -Env esp32stereo -Relay COM20
+```
+
+The target's log should show, in order: `[OTA] update requested over the
+mesh`, `[OTA] update mode ...`, `[OTA] ready ip=...`, `[OTA] receiving`,
+`[OTA] written slot=appN`, a reboot into `[OTA] boot ... pending=1`, then on the
+script's second request `[OTA] image kept (update requested)`. The script ends
+with `PASS` only if the version *and* the slot changed.
+
+**Rollback.** Build an image that crashes — `abort()` straight after the
+`[OTA] boot` line in `setup()`, into a build directory of its own — revert the
+source, and send it with `-NoBuild -NoVerify` and `PLATFORMIO_BUILD_DIR`
+pointing at that directory. The log must show the crashing image boot with
+`pending=1`, the abort, and the previous image back two seconds later with
+`rolledback=` naming the slot it refused.
+
+**Giving up.** `W` with an empty first line shows what is stored. With nothing
+stored, bare `U` comes back in ~3 s with `reason=no_wifi`; with an SSID that
+does not exist (`W<name>` and an empty password line), in ~35 s with
+`reason=wifi`. Either way the node is back on the mesh by itself — and the
+dummy SSID stays stored until `ota-wifi.ps1` replaces it.
+
+---
+
 ## Manual walkthrough
 
 The procedure below is the original by-hand version. It is still the only way to

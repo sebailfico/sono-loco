@@ -30,6 +30,48 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **Update mode: new firmware over the home WiFi, no cable** (2026-10-01,
+  `cc63de0`, `c69ee4e`, `a6816cd`, D15). Asked for a WROOM that lives at a
+  stereo's aux input with a phone charger and nothing else. `U<name>` on any
+  node on USB broadcasts a request in a control group of its own; the named
+  node reboots into update mode, joins the WiFi stored by `W`
+  (`tools/ota-wifi.ps1`), and takes the image as the body of `POST /update`.
+  Two app slots (`min_spiffs.csv`) and rollback: a new image is kept once it
+  has run a minute with its radio up, or answers the next request.
+  `tools/ota.ps1` builds, asks, finds the node on the LAN, uploads and reads
+  the version back.
+
+  The first version used Arduino's WiFi, WebServer, Update and mDNS classes
+  and cost **4,000 bytes of static DRAM** on every boot — a fifth of what a
+  streaming Bluetooth server has left. Rewritten on ESP-IDF directly it costs
+  **80**. Classic image 1.60 of 1.875 MB.
+
+  **On hardware, `v0.2.0-64-ga6816cd`.** The WROOM `0A:1B:2C:3D:4E:62`, now
+  `esp32stereo` / `SonoLoco-Stereo`, updated through WROVER1 as the relay:
+  - *An update*, 54 s end to end: the request heard at once, the home WiFi
+    joined in 7 s (channel 1, RSSI −66 on the bench), the node found by the
+    LAN scan, 1,607,488 bytes in 13.3 s into `app1`. It booted on probation
+    (`pending=1`), was kept the moment it answered the second request, and
+    was back on the mesh.
+  - *Rollback*: an image with `abort()` in `setup()`, sent to `app0`. It
+    booted on probation, aborted, and 2 s later the bootloader had the
+    previous image running, mesh up, reporting `rolledback=app0`.
+  - *Giving up*, on WROVER1: no WiFi stored → back on the mesh in 3 s; a
+    network that does not exist → 30 s of trying, back at 35 s.
+  - *The mesh*, because the receive callback gained a branch:
+    `bench-mesh.ps1 -Flash -Duration 600 -Mute -Source COM22`, WROVER2 to
+    WROVER1 and the S3 (`logs/bench-20261001-132240.log`). Nothing lost,
+    overflowed, underrun, duplicated or resynced, 386.8 pkt/s, `qfull=0`.
+    Corrections: S3 1,405 inserted (2.34/s), WROVER1 201 dropped (0.34/s) —
+    the sync build's 2.44 and 0.38. The stereo WROOM, same mesh, joined as a
+    fourth client on its own, muted, and had `lost=0 und=0` at 439 s.
+  - `test_mesh` on WROVER2: 18 of 18, the 6 new ones on update targeting
+    included.
+
+  Not measured: free heap on a streaming Bluetooth server. The static
+  difference is 80 bytes and nothing new allocates in normal mode, but that
+  is arithmetic, not a measurement.
+
 - **Every node plays on the server's schedule, the server included**
   (2026-09-30, `38a7532`, `cb355de`, D14). Reported by ear first: with
   WROVER2 muted, WROVER1 and the S3 were "a clear echo". Measured with the new

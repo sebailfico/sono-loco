@@ -138,23 +138,16 @@ under "Blocking" below.
 
 ### Updates without a cable (D15)
 
-- [ ] **Update mode has not run on hardware.** It builds for all three
-      targets (classic 1.60 of 1.875 MB, 80 bytes more static DRAM) and the
-      target-matching tests are written, not yet run: no host compiler, so
-      `pio test -e esp32dev -f test_mesh`. To prove it, in this order:
-      1. USB-flash a relay and a target (the new partition table comes with
-         it) and store the WiFi on the target with `tools/ota-wifi.ps1` —
-         the password is typed by a person.
-      2. `./tools/ota.ps1 -Env <target>` with the target still on USB, its log
-         open: request heard, WiFi joined, image written, new image booted,
-         kept, version read back.
-      3. Rollback: send an image that crashes in `setup()`. The node must come
-         back on the old one with `rolledback=` naming the slot.
-      4. A wrong password: falling tone, back on the mesh in ~35 s.
-      5. `./tools/bench-mesh.ps1 -Flash -Duration 600 -Mute` against the
-         baseline in `CHANGELOG.md` — the receive callback gained a branch.
-      6. Free heap on a streaming Bluetooth server, before and after.
-      Then into `CHANGELOG.md`, with the version it was measured on.
+- [ ] **Update the stereo node where it lives.** Update mode, rollback and
+      both failure paths are proven on the bench (`CHANGELOG.md`). Not yet:
+      the WROOM at the stereo, across the house — whether the home WiFi
+      reaches it (−66 dBm on the bench), and whether the relay's request does.
+      If the request does not arrive, a relay nearer the stereo will; if the
+      WiFi does not, D15 says what comes next.
+- [ ] **Free heap on a streaming Bluetooth server, with update mode in the
+      build.** 80 bytes more static DRAM predicts no visible change; worth one
+      `a`/status reading during the next Bluetooth session rather than a
+      session of its own.
 
 ### Timing / sync
 
