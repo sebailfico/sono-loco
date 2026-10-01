@@ -203,13 +203,14 @@ floating it never locks. A silent node whose counters look healthy is its DAC
 - Use separate power supplies for ESP32 and amplifier
 - Add decoupling capacitors (100nF + 10µF) near ESP32 and DAC
 
-**If it turns harsh and distorted above some volume, check the amp's supply
-first.** On 2026-09-28 a TPA3116 fed below its 12 V distorted from 50–60%
-upwards, on two different speakers; at 12 V it was fine.
-
 **To reduce volume with TPA3116:**
-- Check for gain jumpers on your TPA3116 module (20dB/26dB/32dB)
-- Add a resistor voltage divider between DAC and amp input
+- Find the amount by ear first, with the node's own trim (`v-6`, `v-12`, …),
+  then make it permanent in hardware and set the trim back to `v0`
+- A resistor divider between DAC and amp input, per channel: 10 kΩ in series
+  and 3.3 kΩ to ground is about −12 dB (4.7 k / 4.7 k −6 dB, 10 k / 1.5 k
+  −18 dB). On the blue 2×50 W board it goes at the 3-pin input header
+- Or the module's gain setting (the chip offers 20/26/32/36 dB), if your board
+  exposes it — the blue 2×50 W board has no jumper for it
 
 ## Software Setup
 
