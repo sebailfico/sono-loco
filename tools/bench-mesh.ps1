@@ -477,9 +477,19 @@ Write-Host "Source: $($sourceNode.Port) ($($sourceNode.Chip))" -ForegroundColor 
 
 if ($Mute) {
     Write-Host 'Muting every client ...' -ForegroundColor Yellow
+    # Read before toggling: `m` is a toggle, and a node already in bench mode is
+    # not rebooted above, so it may still be muted from the last run -- a blind
+    # `m` would unmute it for the whole run.
     foreach ($n in $nodes) {
-        if ($n.IsSource) { continue }
+        if ($n.IsSource) { continue }   # a bench source never drives its own speaker
         $null = $n.Sp.ReadExisting()
+        Send-Cmd -Sp $n.Sp -Cmd '?'
+        $id = Wait-ForLine -Sp $n.Sp -Pattern '^\[BENCH\] id ' -TimeoutSec 4
+        if ($id -match '\bmute=1') { continue }
+        if (-not $id -or $id -notmatch '\bmute=0') {
+            Write-Warning "$($n.Port) did not report its mute state ($id) -- left alone, it may be playing"
+            continue
+        }
         Send-Cmd -Sp $n.Sp -Cmd 'm'
         $line = Wait-ForLine -Sp $n.Sp -Pattern '^\[OUT\] mute=' -TimeoutSec 4
         if (-not $line -or $line -notmatch 'mute=1') {
