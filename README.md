@@ -457,12 +457,15 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `V` | BT server: `V<0..127>` sets the A2DP volume, as a phone's slider would. Applied before forwarding, so it moves every room; a server that dialled in with `k` starts at 1 |
 | `m` | mute this node's speaker until reboot — zeroes what its ring hands to I2S, on a server and a client alike; the mesh and every timing are untouched. How a mic hears one node alone, and how `bench-mesh.ps1 -Mute` runs silent |
 | `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS |
+| `v` | `v<dB>` this node's own volume trim, −40…+12, e.g. `v-6`; bare `v` reports. Applied at this node's output, after the mesh has its copy, so the phone's slider still moves every room and the trim sets where this room sits among them. Kept in NVS; `trim=` on the identify line |
+| `z` | client: `z1` fills a lost block that was not rebuilt from its two neighbours, each played backwards from the edge it shares, so there is no step and no click; `z0` plays zeroes. `MESH_CONCEAL` is the default (off until measured by microphone) |
 | `e` | BT server: `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
 | `t` | `t<n>` sends each mesh frame n times (1–3) until reboot; `ESPNOW_TX_COPIES` is the default |
 | `D` | `D<n>` each packet carries the block n packets back as well (0–15, 0 = none) until reboot; on the wire, so clients follow. `MESH_REDUNDANCY_DISTANCE` is the default |
 | `P` | `P<us>` spaces audio packets at least that far apart (0 = send each as soon as the radio is free) until reboot; `ESPNOW_TX_PACE_US` is the default |
 | `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
 | `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks rebuilt from a later packet or a repeat copy |
+| `L` | client: `L1` prints which packets were lost, a bit each, once a second as `[LT]` lines (~120 bytes/s); `L0` stops. What `tools/btlisten/losstrace.py` scores every redundancy scheme on. Off at boot |
 
 Bench mode exists because the normal SERVER role needs a phone to connect over
 A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs
@@ -479,8 +482,12 @@ further; the exception below is argued in `docs/decisions.md` (D7).
 - `esp32-code/include/config.h` — every tuneable number. New constants go here,
   never inline in `main.cpp`. Per-node values go in `platformio.ini` instead.
 - `esp32-code/lib/jitter/` — the client's ring buffer (`jitter.h`), packet
-  sequence accounting (`seqtracker.h`), and where each lost block's silence
-  went so a later packet can patch it (`holes.h`). Pure logic, no Arduino or
+  sequence accounting (`seqtracker.h`), where each lost block's silence
+  went so a later packet can patch it (`holes.h`), the blocks held for undoing
+  a parity (`blocks.h`), which packets were missed, one bit each, for
+  scoring redundancy offline (`losstrace.h`), what a lost block plays
+  instead of silence (`conceal.h`), and a node's own volume trim
+  (`gain.h`). Pure logic, no Arduino or
   ESP-IDF, so it can be tested on a PC. This is where both of the worst bugs in this project
   lived.
 - `esp32-code/lib/mesh/` — the mesh name to mesh id derivation. Pure arithmetic
@@ -543,7 +550,11 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   clicks and pitch error; with `--serial` the board's `a` window for the same
   seconds is printed beside it. `mon.py` logs that window every 2 s during
   ordinary use. `sync.py` measures how far apart the nodes play: clicks
-  through the server, one node unmuted at a time.
+  through the server, one node unmuted at a time. `soak.py` is the long
+  silent run behind the server, and with `--trace` records which packets
+  each client missed; `losstrace.py` then replays the firmware's rebuild
+  rules on that record for every redundancy scheme a server can send, so
+  schemes are compared on the same losses rather than in different minutes.
 
 Comments in the code explain *why*, particularly where a line looks wrong but isn't.
 

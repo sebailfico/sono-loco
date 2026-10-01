@@ -264,6 +264,28 @@ server's own loss rate (1.3% holes at 11.7% loss that run, 0.46% at 6.3% in
 the one before). `lost` and `rec` swing with how many frames the server
 loses that minute; compare runs by `late`, `und` and `sjmp`, which do not.
 
+**Which redundancy, scored on one recording.** Because the server's loss
+swings 3× from minute to minute, two schemes run in alternating minutes are
+not compared on the same losses. `--trace` turns on each client's loss trace
+(`L1`: a bit per packet, 1 = never heard) and keeps it in the same log, and
+`losstrace.py` replays the firmware's rebuild rules on it — copy at every
+distance, XOR of blocks 1 and d back in the client's single pass, and the
+same XOR as if a client kept every parity:
+
+```
+python tools/btlisten/soak.py --server COM20 --node COM9 --node COM22 --secs 600 --trace
+python tools/btlisten/losstrace.py logs/soak-<time>.log
+```
+
+It prints, per client, the holes each scheme would have left and their run
+lengths, and with two clients the share of the loss both missed — frames the
+server never sent. Whatever the server sends during the run (`D11` by
+default) does not change the losses, so it does not matter which scheme was
+on; what the trace cannot score is `t2`, which changes the airtime and so the
+losses. Check a trace against the board before believing it: the `[LOSS]`
+histogram `soak.py` prints at the end must match the trace's own `lost runs`
+(it did, run for run, on its first bench check, 2026-10-01).
+
 Traps, each of which cost a run on 2026-09-28:
 
 - **Windows' default microphone path erases the tone.** Its noise suppression
