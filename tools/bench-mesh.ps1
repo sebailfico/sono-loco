@@ -241,8 +241,12 @@ function Wait-ForLine {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
         try { $buf += $Sp.ReadExisting() } catch {}
-        foreach ($l in ($buf -split "`n")) {
-            if ($l -match $Pattern) { return $l.Trim() }
+        # Complete lines only. The last piece has no newline yet when a read
+        # lands mid-line, and matching it returned half an identify line --
+        # `espnow=` and `mesh=` empty, a node reported as off the mesh.
+        $parts = $buf -split "`n"
+        for ($i = 0; $i -lt $parts.Count - 1; $i++) {
+            if ($parts[$i] -match $Pattern) { return $parts[$i].Trim() }
         }
         Start-Sleep -Milliseconds 50
     }
