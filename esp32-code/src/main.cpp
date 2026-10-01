@@ -2733,6 +2733,10 @@ static void traceService() {
         hex[2 * bytes] = '\0';
         DEBUG_SERIAL.printf("[LT] t=%lu s=%u n=%d drop=%lu %s\n", (unsigned long)lastMs,
                             (unsigned)start, n, (unsigned long)dropped, hex);
+        // Only a full line means more is waiting. Otherwise what arrived while
+        // that line went out -- 10 ms at 115200 baud, four packets -- waits for
+        // the next second instead of making a line of its own.
+        if (n < LOSS_TRACE_LINE_PKTS) break;
     }
 }
 
