@@ -30,6 +30,74 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **Which packets a client missed, and what every redundancy scheme would
+  have done with them** (2026-10-01, `b54ab85`, `ca6dfa4`, `bb7ca7e`). The
+  counters say how much was lost, not which packets, and *which* decides what
+  a scheme saves — a lone loss beside a run, two losses 11 apart. Comparing
+  schemes live meant alternating minutes whose loss swung 3× (D13). Now a
+  client with `L1` prints a bit per packet, once a second (~120 bytes,
+  `lib/jitter/losstrace.h`, 7 tests); `soak.py --trace` keeps it in its log;
+  `tools/btlisten/losstrace.py` replays the firmware's rebuild rules on it —
+  copy at every distance, XOR of blocks 1 and d in the client's single pass,
+  and that XOR with every parity kept, as a bound — and with two clients
+  reports the loss they share, which never left the server.
+  - *Checked against the boards*: over 120 s and two 600 s runs the trace's
+    lost-run histogram matched each board's own `[LOSS]` line exactly (23,
+    48; 69, 254; 123, 271), and copy at 11 rebuilt all of it, as `lost=0`
+    said. Aligning two clients by PC time works: on the bench almost none
+    of the loss is shared (5 of 69 and 254), so it is each receiver's own.
+  - *On synthetic losses shaped like the server's* (5% singles, 0.3% runs
+    of 4–5): XOR 1+11 leaves 0.21%, copy at 11 0.54%, copy at 1 1.48%. The
+    real recording behind a streaming server is still to do — the PC's
+    Bluetooth was off.
+
+- **Modem sleep costs a Bluetooth node nothing** (2026-10-01,
+  `v0.2.0-72-gbb7ca7e`). A node that runs Bluetooth keeps `WIFI_PS_MIN_MODEM`
+  because `WIFI_PS_NONE` aborts the coexistence layer, and the code said
+  that made reception miss packets, unmeasured. WROVER1 as a CLIENT of
+  WROVER2's bench stream, the S3 beside it as the control, 600 s each, all
+  muted (`logs/pstrace-20261001-*`):
+
+  | WROVER1 | its WiFi power save | WROVER1 missed | S3 missed (PS_NONE) |
+  |---|---|---|---|
+  | normal mode | `MIN_MODEM` | **69** (0.030%) | 254 (0.111%) |
+  | bench mode | `NONE` | 123 (0.053%) | 271 (0.117%) |
+
+  All singles, all rebuilt, `lost=0 und=0` throughout. Modem sleep engages
+  only while associated with an AP, which this mesh never is.
+
+- **Concealment, and a volume trim per node** (2026-10-01, `b9f609e`).
+  - *Concealment* (`z1`, `lib/jitter/conceal.h`, 6 tests): a lost block that
+    was not rebuilt played zeroes, a step at each edge and a click whatever
+    the music. Both neighbours are known when the hole is made — it is the
+    packet after it that reveals it — so the fill is the previous block
+    played backwards from its last frame, crossfaded into the next played
+    backwards into its first: no step at either edge, the same spectrum. A
+    run fades out, rests, fades in; a block patched later by its copy
+    replaces only its own fill. Off by default (`MESH_CONCEAL` 0) until a
+    microphone has compared it with zeroes.
+  - *Trim* (`v<dB>`, `lib/jitter/gain.h`, 4 tests): the ask of 2026-09-28,
+    every node heard clearly whatever its amp. A gain in dB per node, −40 to
+    +12, in NVS, applied where mute is — after the mesh has its copy — so the
+    phone's slider still moves every room together. Clips, never wraps.
+    Set, clamped and read back across a reboot on the S3.
+  - *The startup sound on every node* (`02f927b`), not only Bluetooth ones,
+    at `TONE_AMPLITUDE` 4000 on the two MAX98357A nodes (500, for the
+    TPA3116's gain, was under a milliwatt there). Not yet confirmed by ear;
+    an S3 or C3 plays it only when plugged in, not when flashed.
+  - *Bench regression, `v0.2.0-76-g15b730e`, concealment on in both
+    clients*, 600 s, `-Mute`, WROVER2 sourcing to WROVER1 and the S3
+    (`logs/bench-20261001-185056.log`): 386.8 pkt/s, `qfull=0`; 231,931 and
+    231,916 blocks, **zero lost/ovf/und/dup/rsy**, `sjmp=0 dry=0`, `se`
+    +250 and −465 µs. Corrections 7.6 ppm (201 drops) and −53.4 ppm (1,413
+    inserts) — the baseline's 7.6 and −53.3. 62 of 62 `test_jitter` on
+    WROVER2.
+  - *Two harness fixes found on the way*: `bench-mesh.ps1 -Mute` toggled each
+    client blind, and a node already in bench mode is not rebooted, so one
+    still muted from the last run would have been unmuted for the whole run
+    (`2b71d51`); and `Wait-ForLine` matched half-received lines, which
+    reported WROVER1 as off the mesh with `espnow=` empty (`8f32be7`).
+
 - **The stereo node, across the room: updated, and measured, in silence**
   (2026-10-01, `3418110`, `66327e2`, D15 amended). The WROOM
   `SonoLoco-Stereo` sits across the room on a phone charger with its PCM5102A

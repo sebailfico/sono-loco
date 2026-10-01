@@ -4,7 +4,7 @@ What is **open**. Completed work is in `CHANGELOG.md`, standing design choices
 and their reasoning are in `docs/decisions.md`. Keep those three separate — this
 file previously carried all of it and the open list got lost inside the done one.
 
-## Current state (2026-09-30)
+## Current state (2026-10-01)
 
 **The ESP-NOW mesh path is proven on hardware, and so is clock-drift
 correction**: WROOM sourcing to four clients, 600 s, zero lost on the S3 and
@@ -46,57 +46,40 @@ under "Blocking" below.
       server's Bluetooth link has the radio — and the send callback reports
       them sent. Redundancy 11 packets back (D13) left 0.33% as holes in the
       60 s A/B and 0.7% over 600 s, when 6% of packets were lost singly — the
-      floor for one copy per block is about the loss rate squared, and in those
-      minutes distance 1 would have left ~0.5%. What would move it, cheapest
-      first: **XOR of blocks n-1 and n-11** in place of the one old block —
-      the same bytes, and a lone loss is rebuilt from the next packet while a
-      run is rebuilt from 11 later (estimated ~0.2% on the 600 s run);
-      **concealment** (below, "Surviving the wild") so the holes left are not
-      clicks; a **loss trace** — each client logging the seqs it missed — so
-      every scheme and distance can be scored on one recording instead of on
-      alternating minutes whose conditions swung 3× (the singles-only minutes
-      favour distance 1, the run minutes 11); `t2` on top of distance 11 at
-      twice the airtime; and a **two-chip server** (an A2DP chip handing PCM
-      to a €2 C3 that only does ESP-NOW), which removes the cause. A phone as
-      the source has not been measured since any of this.
+      floor for one copy per block is about the loss rate squared.
+      **The tools to choose the next scheme are in** (2026-10-01): a loss
+      trace on every client (`L1`), recorded by `soak.py --trace`, and
+      `losstrace.py`, which replays the firmware's rebuild rules on it for
+      copy at every distance and XOR of blocks 1 and d — every scheme scored
+      on the same losses instead of on alternating minutes whose loss swung
+      3×. The trace matched the boards' own loss histograms packet for packet
+      on the bench. On synthetic losses shaped like the server's it predicts
+      XOR 1+11 (`X11`, already in the firmware) at ~0.2% against ~0.5% for
+      today's copy at 11. **Next: one `soak.py --trace` run behind the
+      streaming server**, then make the winner the default and run the bench
+      regression. The PC's Bluetooth was off on 2026-10-01, so that run is
+      still to do. **Concealment** (`z1`) is written and on the bench, so
+      the holes left need not be clicks; it waits for a microphone
+      (`listen.py --client`, `z0` against `z1`) before it is the default.
+      Beyond those: `t2` on top at twice the airtime (the trace cannot score
+      it, it changes the losses), and a **two-chip server** (an A2DP chip
+      handing PCM to a €2 C3 that only does ESP-NOW), which removes the cause.
+      A phone as the source has not been measured since any of this.
       Also unexplained: the server's own output crackled once on 2026-09-28
       (27 holes/s, one per A2DP packet) and never again after a reboot. If
       it comes back, run `listen.py --serial` at once and compare the `a`
       window with the clean ones in `CHANGELOG.md`.
-- [ ] **Tones on every board, and loud enough for the amp they are on.** The
-      user wants the startup tone on every node, DAC or not, BT or not — a
-      client-only build plays nothing at boot today because the startup tone
-      sits under `ENABLE_BLUETOOTH` on the old assumption that only BT nodes
-      have a DAC. And `TONE_AMPLITUDE` 500 (-36 dBFS, chosen for the TPA's
-      gain) is under a milliwatt into a MAX98357A at 9 dB. Plan: startup tone
-      unconditional (it needs the tone I2S init, which is compiled on every
-      build); `TONE_AMPLITUDE` behind `#ifndef` so `platformio.ini` can set
-      `-DTONE_AMPLITUDE=4000` on the MAX98357A nodes (`esp32wrover`,
-      `esp32s3`), the way I2S pins already can. A short "joined the mesh"
-      tone on entering CLIENT would fit the same mechanism.
-- [ ] **Measure whether modem sleep costs a BT node any ESP-NOW packets.** A
-      node that runs Bluetooth now keeps the IDF default `WIFI_PS_MIN_MODEM`,
-      because `WIFI_PS_NONE` aborts the coexistence layer (README gotcha). The
-      comment in `setupESPNow()` says modem sleep makes reception miss
-      packets, but that was never measured, and IDF documents modem sleep as
-      engaging only while associated with an AP — which this mesh never is. The
-      test: WROVER in *normal* mode (not bench — bench never starts BT, so it
-      gets `PS_NONE` like everyone else) as a CLIENT of a bench source, 600 s,
-      compare `lost`/`und` against the baseline. If it costs packets, the
-      next thing to try is `esp_now_set_wake_window()`.
-- [ ] **A per-node volume trim.** The user's ask, 2026-09-28: every node
-      should be heard clearly whatever its amp and speaker — WROVER2's TPA3116
-      is loud by 50%, WROVER1's MAX98357A is a small amp. Today the phone's
-      volume is applied on the server before forwarding, so every room follows
-      one slider and no node can differ. Proposal: a gain in dB per node, in
-      NVS like the mesh name, set over serial (`v<dB>`), applied at that
-      node's output — in `driveRingI2S`, which since D14 is every node's
-      output, the server's included, and runs after the forward is taken.
-      `sync.py --node COMn:dB` works around the lack of it for measuring. The phone slider still
-      moves every room together; the trim sets each room's offset. Worth
-      deciding at the same time whether the mesh should carry pre-volume
-      audio plus the volume value instead: at a low phone volume the forwarded
-      16-bit stream has already lost bits the clients cannot get back.
+- [ ] **Hear the startup sound on an S3 and a C3.** It plays on every node
+      now, at `TONE_AMPLITUDE` 4000 on the MAX98357A nodes (2026-10-01), but
+      only on a power-on, and a USB flash resets an S3 or C3 through USB, not
+      as a power-on. Unplug one and plug it back in. A short "joined the
+      mesh" tone on entering CLIENT would fit the same mechanism.
+- [ ] **Should the mesh carry audio before the phone's volume?** The volume
+      is applied on the server before forwarding, so at a low phone volume
+      the 16-bit stream has already lost bits no client can get back. The
+      per-node trim (`v<dB>`, 2026-10-01) is applied after, at each node, and
+      does not change this. The alternative: forward full-scale audio plus
+      the volume value, and apply both at every output.
 - [ ] **A node playing as a client cannot be connected to.** Its Bluetooth
       is stopped in CLIENT, so a phone trying to take it over fails ("Couldn't
       connect", 2026-09-28) until the current server stops and the node has
@@ -206,13 +189,18 @@ here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
       blocks. Measure on the bench with the monitor watching and the router
       deliberately loaded (a phone video is a repeatable enough "wild"): the
       counters that matter are `lost` (holes left) and `rec` (rebuilt).
-- [ ] **Concealment instead of silence.** Bursts longer than the redundancy
-      window will still happen — 214 consecutive-ish packets in one second
-      were seen at 1 Mbps — and behind a Bluetooth server 0.7% of blocks are
-      holes today, about three a second, each a 2.6 ms drop to zero. Repeat-and-
-      fade the last block on a gap rather than zero-fill; the drift controller
-      already knows how to insert. A hole that is later patched (D13) must not
-      be faded twice. This is what stops a hole being a click.
+- [ ] **Concealment instead of silence: hear it.** Bursts longer than the
+      redundancy window will still happen — 214 consecutive-ish packets in
+      one second were seen at 1 Mbps — and behind a Bluetooth server 0.7% of
+      blocks are holes today, about three a second, each a 2.6 ms drop to
+      zero. Written 2026-10-01 (`z1`, `lib/jitter/conceal.h`): a hole is
+      filled from both neighbours, each played backwards from the edge it
+      shares, so there is no step at either edge; a run fades out, rests and
+      fades in, and a block patched later replaces only its own fill. The
+      tests show the step gone; the 600 s bench regression ran with it on.
+      What is left is the ear: `listen.py --client` behind the streaming
+      server, one client unmuted, `z0` against `z1`, the dips and clicks
+      counted. If it holds, `MESH_CONCEAL` 1.
 - [ ] **Buffer for bursts.** A deeper jitter buffer rides out longer bursts
       at the cost of latency. Who waits is decided (D14): the server plays
       through a ring as deep as its clients', so a deeper `JITTER_PREFILL`
@@ -341,8 +329,6 @@ proof and polish.
 
       `./tools/test-client-only.ps1 -Client COM8 -Source COM10 -Duration 600`
       reports both figures.
-- [ ] Connect/disconnect tones write into `I2S_NUM_0` while the A2DP task also
-      owns it; sequence them properly instead of interleaving.
 - [ ] Rename `esp32-code/` to something consistent with the project name.
 
 ---

@@ -691,7 +691,9 @@ Each of these was a real bug. Don't re-introduce them.
   from the WiFi task. Either way a boot loop with no message but a backtrace.
   Found on the first boot of the first WROVER — the WROOM never reached this
   code because it bails before WiFi, and the S3/C3 have no BT. `setupESPNow()`
-  now only sets `WIFI_PS_NONE` on a boot that will never start Bluetooth.
+  now only sets `WIFI_PS_NONE` on a boot that will never start Bluetooth. The
+  modem sleep a BT node keeps instead costs it no packets (measured
+  2026-10-01): it engages only while associated with an AP.
 - **A `build_flags` in an `[env:...]` section replaces the parent's, it does not
   add to it.** Writing `build_flags = -DROOM_NAME='"Kitchen"'` under
   `extends = esp32_classic` silently drops `-DENABLE_BLUETOOTH` and the node

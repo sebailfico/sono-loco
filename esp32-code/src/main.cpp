@@ -1104,9 +1104,11 @@ static void setupESPNow() {
     // PS_NONE set here, then BT started  -> abort() in coex_core_enable, boot loop;
     // BT started, then PS_NONE set       -> abort() in pm_set_sleep_type, boot loop.
     // So it is not an ordering question -- a BT node keeps the IDF default
-    // (WIFI_PS_MIN_MODEM). Whether that actually costs a BT node any ESP-NOW
-    // packets is untested: modem sleep is documented to engage only while
-    // associated with an AP, which this mesh never is. See TODO.
+    // (WIFI_PS_MIN_MODEM). It costs a client nothing measurable: modem sleep
+    // engages only while associated with an AP, which this mesh never is.
+    // WROVER1 as a CLIENT of a bench source, 600 s each way (2026-10-01): 69
+    // packets missed in normal mode, 123 in bench mode with PS_NONE, against
+    // 254 and 271 on an S3 beside it.
     if (!btWillStart) {
         esp_wifi_set_ps(WIFI_PS_NONE);
     }
