@@ -42,12 +42,19 @@
 .PARAMETER NoBuild
     Upload the image already built for -Env.
 
+.PARAMETER Status
+    No image at all: ask the node into update mode, print what it reports --
+    its WiFi signal where it stands, and its stream counters up to the
+    request -- and send it back to the mesh. How a speaker with no cable is
+    measured: stream at it, then ask while the stream still plays.
+
 .PARAMETER NoVerify
     Stop once the image is written, without the second round. The new image
     then stays on probation until it has run OTA_CONFIRM_MS with its radio up.
 
 .EXAMPLE
     ./tools/ota.ps1 -Env esp32wrover2
+    ./tools/ota.ps1 -Env esp32stereo -Status
     ./tools/ota.ps1 -Env esp32dev -Target 0A:1B:2C:3D:4E:60 -Relay COM9
 #>
 
@@ -58,7 +65,8 @@ param(
     [string]$Target = '',
     [string]$Ip = '',
     [switch]$NoBuild,
-    [switch]$NoVerify
+    [switch]$NoVerify,
+    [switch]$Status
 )
 
 $ErrorActionPreference = 'Stop'
@@ -268,6 +276,7 @@ if ($version -like '*`*') {
 
 $buildDir = if ($env:PLATFORMIO_BUILD_DIR) { $env:PLATFORMIO_BUILD_DIR } else { Join-Path $projectDir '.pio\build' }
 $bin = Join-Path (Join-Path $buildDir $Env) 'firmware.bin'
+if ($Status) { $NoBuild = $true }
 if (-not $NoBuild) {
     Write-Host '  building ...' -NoNewline
     $pio = Get-PioExe
@@ -279,9 +288,10 @@ if (-not $NoBuild) {
     if ($LASTEXITCODE -ne 0) { Write-Host ''; Write-Host $out; throw "Build failed (exit $LASTEXITCODE)" }
     Write-Host ' done'
 }
-if (-not (Test-Path $bin)) { throw "No image at $bin -- build without -NoBuild" }
-$size = (Get-Item $bin).Length
-Write-Host ("  image {0:N0} bytes" -f $size)
+if (-not $Status) {
+    if (-not (Test-Path $bin)) { throw "No image at $bin -- build without -NoBuild" }
+    Write-Host ("  image {0:N0} bytes" -f (Get-Item $bin).Length)
+}
 
 # ---------------------------------------------------------------------------
 # 2. The relay
@@ -312,6 +322,12 @@ try {
     $addr, $before = $found
     Write-Host " at $addr"
     Write-Host "  running : $before"
+
+    if ($Status) {
+        try { $null = Invoke-WebRequest -Uri "http://$addr/exit" -Method Post -UseBasicParsing -TimeoutSec 5 } catch {}
+        Write-Host '  sent back to the mesh, nothing uploaded'
+        return
+    }
 
     # -----------------------------------------------------------------------
     # 4. Upload

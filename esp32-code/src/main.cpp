@@ -2070,6 +2070,20 @@ static void meshServiceButton() {
 #define OTA_MAGIC 0x0DA7E501
 RTC_NOINIT_ATTR static uint32_t otaMagic;   // RTC_NOINIT for bench mode's reason
 
+// What the node was receiving when the request reached it, carried across the
+// restart for GET / to report. A node with no cable has no other way to say
+// how the mesh reaches it -- a client never transmits -- so this is how a
+// speaker across the house is measured: stream at it, ask, read. The counters
+// are the current session's, the ones the status line prints; they restart
+// whenever the node enters CLIENT, so ask while the stream is still playing.
+#define OTA_SNAP_MAGIC 0x0DA75AA5
+struct OtaSnapshot {
+    uint32_t magic, upMs, rx, lost, ovf, und, rec, late, dup, rsy, fgn, sjmp, dry;
+    uint32_t runs[8];
+    uint8_t  mode;
+};
+RTC_NOINIT_ATTR static OtaSnapshot otaSnap;
+
 // The request this node is broadcasting on somebody else's behalf.
 static char          otaReqTarget[MESH_TARGET_MAX + 1] = {0};
 static uint8_t       otaReqLeft   = 0;
@@ -2140,6 +2154,22 @@ static void otaRebootIntoUpdate() {
     // Otherwise the restart below would count as the failed boot that
     // rolls a perfectly good image back.
     otaConfirm("update requested");
+
+    otaSnap.upMs = millis();
+    otaSnap.rx   = rxCount;
+    otaSnap.lost = seqTracker.lost;
+    otaSnap.ovf  = rxOverflow;
+    otaSnap.und  = rxUnderrun;
+    otaSnap.rec  = rxRecovered;
+    otaSnap.late = rxLate;
+    otaSnap.dup  = seqTracker.dupe;
+    otaSnap.rsy  = seqTracker.resync;
+    otaSnap.fgn  = rxForeign;
+    otaSnap.sjmp = syncJumps;
+    otaSnap.dry  = outDry;
+    for (int i = 0; i < 8; i++) otaSnap.runs[i] = rxLossRuns[i];
+    otaSnap.mode  = (uint8_t)currentMode;
+    otaSnap.magic = OTA_SNAP_MAGIC;
     otaMagic = OTA_MAGIC;
     DEBUG_SERIAL.println("[OTA] rebooting into update mode");
     DEBUG_SERIAL.flush();
@@ -2233,8 +2263,31 @@ static void otaOnNetEvent(void *, esp_event_base_t base, int32_t id, void *data)
 
 /** GET / -- who is this and what is it running. The PC reads it before uploading. */
 static esp_err_t otaHttpIdentify(httpd_req_t *req) {
-    char info[256];
+    char info[640];
     otaDescribe(info, sizeof(info));
+    size_t n = strlen(info);
+
+    // The home WiFi as this node hears it, where it stands.
+    wifi_ap_record_t ap = {};
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        n += snprintf(info + n, sizeof(info) - n, " rssi=%d ch=%d", (int)ap.rssi, (int)ap.primary);
+    }
+    // And the mesh as it heard it, up to the request (see OtaSnapshot).
+    if (otaSnap.magic == OTA_SNAP_MAGIC && n < sizeof(info)) {
+        const uint8_t m = otaSnap.mode;
+        n += snprintf(info + n, sizeof(info) - n,
+            " before=%s up=%lus rx=%lu lost=%lu ovf=%lu und=%lu rec=%lu late=%lu dup=%lu"
+            " rsy=%lu fgn=%lu sjmp=%lu dry=%lu runs=%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+            m == MODE_CLIENT ? "CLIENT" : m == MODE_SERVER ? "SERVER" : "DISCOVERY",
+            (unsigned long)(otaSnap.upMs / 1000), (unsigned long)otaSnap.rx,
+            (unsigned long)otaSnap.lost, (unsigned long)otaSnap.ovf, (unsigned long)otaSnap.und,
+            (unsigned long)otaSnap.rec, (unsigned long)otaSnap.late, (unsigned long)otaSnap.dup,
+            (unsigned long)otaSnap.rsy, (unsigned long)otaSnap.fgn, (unsigned long)otaSnap.sjmp,
+            (unsigned long)otaSnap.dry,
+            (unsigned long)otaSnap.runs[0], (unsigned long)otaSnap.runs[1], (unsigned long)otaSnap.runs[2],
+            (unsigned long)otaSnap.runs[3], (unsigned long)otaSnap.runs[4], (unsigned long)otaSnap.runs[5],
+            (unsigned long)otaSnap.runs[6], (unsigned long)otaSnap.runs[7]);
+    }
     strlcat(info, "\n", sizeof(info));
     httpd_resp_set_type(req, "text/plain");
     return httpd_resp_sendstr(req, info);
