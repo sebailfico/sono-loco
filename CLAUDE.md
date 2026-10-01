@@ -27,8 +27,9 @@ code, not the docs — assume the code is the truth and fix the doc.
 ## Working on the firmware
 
 - Pure logic belongs in `esp32-code/lib/`, where it is tested on the host
-  (`pio test -e native`, or `pio test -e esp32dev` on a board — there is no host
-  compiler on this machine yet). Code that touches I2S, the radio or A2DP stays
+  (`pio test -e native`, or on a board, e.g. `pio test -e esp32wrover2 -f
+  test_jitter` — there is no host compiler on this machine yet). Code that
+  touches I2S, the radio or A2DP stays
   in `main.cpp`. Don't widen that split into a general refactor.
 - New tuneable constants go in `include/config.h`, never inline. Per-node values
   go in `platformio.ini`.
@@ -43,10 +44,10 @@ code, not the docs — assume the code is the truth and fix the doc.
   or make it a setting — don't add a build config.
 - **Anything touching the client audio path must be re-measured, not reasoned
   about.** Run `./tools/bench-mesh.ps1 -Flash -Duration 600 -Mute` and compare
-  against the recorded baseline in `CHANGELOG.md`: zero lost/ovf/und/dup/rsy,
-  source at 386.8 pkt/s (220.5 before the ADPCM format), and the drift recorded
-  for that pair of boards (-30 ppm WROOM/S3, -44 ppm S3/WROVER2, about -5 ppm
-  between the two WROVERs). The worst bug found so far — a permanent 24/s
+  against the latest bench regression in `CHANGELOG.md`: zero
+  lost/ovf/und/dup/rsy, source at 386.8 pkt/s, and the corrections recorded
+  for that pair of boards (WROVER2 sourcing: WROVER1 +7.6 ppm in drops, the S3
+  −53 ppm in inserts). The worst bug found so far — a permanent 24/s
   underrun — was invisible in the code and obvious in that output. `-Flash`
   names every classic board SonoLoco-WROOM; before a Bluetooth test, flash the
   WROVERs by name (`pio run -e esp32wrover -t upload`) and run without it.

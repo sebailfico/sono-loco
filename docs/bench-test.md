@@ -1,88 +1,83 @@
 # Hardware Bench Test
 
-**The ESP-NOW mesh path works.** First proven 2026-08-19: a WROOM sourcing and an
-ESP32-S3 playing, 132,069 packets over 600 s with zero lost, zero overflow, zero
-underrun, zero duplicates and zero resyncs. What remains unproven is the
-*Bluetooth* half of the server role — audio taken from a phone and forwarded —
-because no board on the bench can do it (see "What you need" below).
+How to test on real boards, in the order to reach for them:
 
-There are two ways to test. Use the automated one by default.
+1. **`tools/bench-mesh.ps1`** — the mesh, automated: any number of boards on
+   this PC, a synthetic stream, no phone. The default for anything that touches
+   the client audio path.
+2. **`tools/btlisten/`** — the Bluetooth half, driven from the PC: the PC is the
+   phone, and its microphone is the ear.
+3. **By hand, with a phone** — the role changes no script can make: connect,
+   disconnect, swap servers.
+
+Board names, ports and MACs are in the README's build table; results go in
+`CHANGELOG.md` with the firmware version they came from.
 
 ## Automated: `tools/bench-mesh.ps1`
 
 ```powershell
-./tools/bench-mesh.ps1 -Flash -Duration 120
+./tools/bench-mesh.ps1 -Flash -Duration 600 -Mute
 ```
 
 It discovers every ESP32 attached to the PC, identifies each by chip, flashes the
 matching firmware, reboots them all into bench mode, elects one to generate a
 synthetic test stream, collects telemetry, and reports stream health and clock
-drift. There is no board limit — a third node is picked up automatically.
+drift. There is no board limit — five at once has been done. Bench mode never
+starts Bluetooth (D9), which is also why a WROOM can take part.
 
-**It is loud.** Every client with an amp plays the bench tone (440 Hz at
-about -15 dBFS) for the whole run — ten minutes at `-Duration 600`, and even
-the MAX98357A that sounds faint at `listen.py`'s levels is loud with it.
-**Add `-Mute`** and every client zeroes what it hands to I2S and nothing else:
-the stream is received, buffered, drift-corrected and consumed as always. Run
-unmuted only to hear it, and say so before starting one.
+**It is loud without `-Mute`.** Every client with an amp plays the bench tone
+(440 Hz at about -15 dBFS) for the whole run, and even the MAX98357A that sounds
+faint at `listen.py`'s levels is loud with it. With `-Mute` every client zeroes
+what it hands to I2S and nothing else: the stream is received, buffered,
+drift-corrected and consumed as always. The harness reads each client's `mute=`
+before toggling it. Run unmuted only to hear it, and say so before starting one.
 
-```powershell
-./tools/bench-mesh.ps1 -Duration 600 -Mute
-```
-
-It works around the fact that the normal SERVER role needs a phone: bench mode
-generates the stream itself and never starts Bluetooth. That is also why a WROOM
-can take part (see D3).
+**`-Flash` names every classic board `SonoLoco-WROOM`**, because it flashes them
+all as `esp32dev`. Before a Bluetooth test, flash the WROVERs by name
+(`pio run -e esp32wrover -t upload`) and run the harness without `-Flash`
+(`-Source COM22` picks the source). Without `-Flash` it identifies boards from
+their own `[BENCH] id` line and never asks esptool to reset anything — which is
+also the way round a board whose auto-reset into download mode has become
+unreliable ("did not enter download mode"): flash that one by hand, repeating
+until "Hash of data verified", or with BOOT held.
 
 What to read in its output:
 
 - **Firmware line** — the `git describe` version each node is actually running,
   printed at the top of the run and again with the results. Warnings here come
-  before anything else in the output for a reason: a board left running an older
-  build, or a build made from a dirty tree, produces numbers that will not
-  reproduce, and nothing else on screen would reveal it. Rerun with `-Flash` if
-  a node does not match the tree, and commit before measuring anything you intend
-  to record. See D10.
-- **Mesh line** — each node prints the `mesh=` id it is using, and the harness
-  warns when they disagree. Take that warning seriously before reading anything
-  else: nodes on different meshes ignore each other by design, and the result is
-  a client reporting `rx=0`, which looks exactly like a client out of range or a
-  source that never started. `fgn=` in the telemetry is the tell — packets heard
-  and dropped as somebody else's.
+  before anything else for a reason: a board left on an older build, or a build
+  from a dirty tree (`*`), produces numbers that will not reproduce. Commit
+  before measuring anything you intend to record. See D10.
+- **Mesh line** — each node's `mesh=` id; the harness warns when they disagree.
+  Nodes on different meshes ignore each other by design, and the result is a
+  client reporting `rx=0`, exactly like one out of range. `fgn=` in the
+  telemetry is the tell — packets heard and dropped as somebody else's.
 - **Stream table** — `lost`, `ovf`, `und`, `dup`, `rsy` should all be 0. `rx`
   should be within a few packets of the source's `tx`.
-- **Source line** — packets per second should be 386.8 (44,100 frames/s in
-  blocks of 114; it was 220.5 before ADPCM). `qfull`, `senderr` and
-  `radiofail` at 0 mean the radio kept up.
+- **Source line** — 386.8 packets/s (44,100 frames/s in blocks of 114).
+  `qfull`, `senderr` and `radiofail` at 0 mean the radio kept up.
 - **Clock drift** — three measures. `log ppm` regresses each node's `millis()`
-  against PC time; `audio ppm` derives the same thing from how fast the jitter
-  buffer fills or empties; `corr` counts the samples the drift controller
-  inserted or dropped. Prefer the audio column over the log one: it measures the
-  drift that actually causes dropouts, and it is immune to the serial latency
-  jitter that makes the log column useless on native-USB boards. The script says
-  so itself when a figure is below its own noise floor.
+  against PC time; `audio ppm` derives the same from how fast the jitter buffer
+  fills or empties; `corr` counts the frames the controller inserted or dropped.
+  Prefer `audio` to `log`: it measures the drift that causes dropouts, and it is
+  immune to the serial latency that makes `log` useless on native-USB boards.
 - **Which column is the measurement depends on whether correction is on.** With
-  correction running, a flat `audio ppm` is the *result*, not the measurement —
-  the drift has been moved into the `corr` column, one sample at a time. Read it
-  as `+2418/-0`: inserts and drops are shown separately because a controller
-  doing both in equal measure is hunting rather than correcting, and a net figure
-  would hide that.
+  it on, a flat `audio ppm` is the *result*; the drift has moved into `corr`,
+  shown as `+1413/-0` because a controller doing both in equal measure is
+  hunting, and a net figure would hide that. `-NoDrift` measures the raw drift;
+  only a back-to-back pair on the same boards in the same session is worth
+  comparing — the offset belongs to that pair of crystals at that temperature.
+- **Time to exhaustion** — at the measured drift, how long before the buffer
+  overflows or underruns. With correction on it should not appear at all.
+- **Re-arm notice** — the buffer columns then describe the longest
+  uninterrupted stretch, and the harness says what fraction of the run that
+  was: a re-arm steps the level back up, and averaging across it once reported
+  -7.6 ppm for a client really drifting at -58. Since D14 one re-arm at the very
+  start, the client arming on the source's schedule, is normal.
 
-  To measure the raw drift instead, run with `-NoDrift`. Doing both back to back
-  on the same boards in the same session is the only comparison worth recording:
-  the offset is a property of that pair of crystals at that temperature, so a
-  corrected run today against an uncorrected one from last week proves nothing.
-- **Time to exhaustion** — at the measured drift, how long before the jitter
-  buffer overflows or underruns. With correction on this should not appear at
-  all; if it does, the drift is beyond what the controller is allowed to correct.
-- **Re-arm notice** — if playback re-armed during the run, the buffer columns
-  describe the longest uninterrupted stretch and the harness says what fraction
-  of the run that was. It regresses that segment rather than the whole run on
-  purpose: a re-arm steps the level back up, and averaging a drain against that
-  step reported -7.6 ppm for a client that was really drifting at -58 ppm.
-
-Drift precision improves with run length. 45 s is enough to see whether audio
-flows; use 600 s or more before trusting a ppm figure.
+What good looks like, and the numbers a change to the client path is compared
+against, are the latest bench regression in `CHANGELOG.md`. 45 s shows whether
+audio flows; 600 s is the shortest run worth quoting a ppm figure from.
 
 ## Checking mesh isolation
 
@@ -120,47 +115,17 @@ with **no** offer open, a listening node must ignore a foreign stream entirely.
 Start the source on another mesh, press `p` on the odd node out, and confirm it
 reports `listening closed, no offer heard` 60 s later rather than joining.
 
-## Listening to a Bluetooth server: `tools/btlisten/`
+## The Bluetooth half from the PC: `tools/btlisten/`
 
 The mesh half has a synthetic stream (bench mode); this is the equivalent for
 the Bluetooth half, and it needs no phone. The PC is the A2DP source: pair the
-server with Windows once, click Connect, and it appears as an audio endpoint.
-`listen.py` plays a 997 Hz tone into it and records the node's speaker with
-the PC's microphone.
+server with Windows once, connect it, and it appears as an audio endpoint.
 
 One-time setup, any Python 3 with a venv (the PlatformIO Python has no numpy):
 
 ```
 python -m venv .venv-btlisten
 .venv-btlisten/Scripts/pip install -r tools/btlisten/requirements.txt
-```
-
-Then, first the control, then the node:
-
-```
-python tools/btlisten/listen.py --device "Speakers (Realtek" --label control
-python tools/btlisten/listen.py --serial COM19 --label baseline
-python tools/btlisten/listen.py --serial COM19 --pre f --label no-forwarding
-```
-
-Each run is ~11 s, writes `logs/listen-<time>-<label>.wav` and a plot beside it,
-and prints the node's `a` window for the same seconds. `--pre f` toggles
-forwarding before the run (send it again to turn it back on); `--pre w` stops
-WiFi until the next reboot. `--at 3.0:j` sends a command three seconds into
-playback — `j` plays the connect jingle over the test tone. (Until D14 the
-server played through the A2DP library's own I2S ring, and `q<frames>`
-changed its depth between runs; the server now plays through a ring exactly
-like a client's, and `q` is gone.)
-
-**Listening to the mesh path instead.** The same tone, but heard from a
-*client* of the server: `m` mutes the server's own speaker, and `--client`
-prints the client's counters for the recorded seconds — `lost` (holes left),
-`rec` (blocks rebuilt from the next packet) and the lengths of the lost runs.
-Repeat `--client` for every client; the mic hears whichever are not muted:
-
-```
-python tools/btlisten/ser.py COM20 m
-python tools/btlisten/listen.py --serial COM20 --client COM22 --client COM9 --level -30 --label mesh
 ```
 
 A server that reboots or is reflashed drops the Bluetooth link; `k` gets it
@@ -174,14 +139,32 @@ V40
 " 8
 ```
 
-**What clean looks like** (the control through the laptop's own speaker, and
-WROVER2 on 2026-09-28 after a reboot): tone **997.00 Hz**, **6.02 s** long,
-**0 dips**. What the crackle looked like, the one time it was caught
-(`logs/listen-20260928-170905-crackle-fwd-on.wav`): 27 dips/s lasting ~3 ms,
-spaced 24–28 ms — one per A2DP packet from Windows (1024 frames, 23.2 ms) —
-with the tone at 987 Hz and 6.55 s long. Pitch and length are the strongest
-signal: the analysis cannot mistake room noise for a tone that took half a
-second longer to play than it was.
+If the dial times out, check that the PC's Bluetooth is switched on.
+
+**`listen.py` — is there a hole in what one node plays?** It plays a 997 Hz
+tone into the server and records with the PC's microphone. First the control,
+through the laptop's own speaker, then the node:
+
+```
+python tools/btlisten/listen.py --device "Speakers (Realtek" --label control
+python tools/btlisten/listen.py --serial COM20 --label baseline
+python tools/btlisten/listen.py --serial COM20 --pre f --label no-forwarding
+```
+
+Each run is ~11 s, writes `logs/listen-<time>-<label>.wav` and a plot beside it,
+and prints the server's `a` window for the same seconds. `--pre f` toggles
+forwarding before the run (send it again to turn it back on); `--pre w` stops
+WiFi until the next reboot; `--at 3.0:j` sends a command three seconds into
+playback — `j` plays the connect jingle over the tone. To hear a *client*
+instead, mute the others (`m`, reading `?` first) and add `--client COMn` for
+each client: its `lost`, `rec` and lost-run lengths for the recorded seconds.
+
+**What clean looks like:** tone **997.00 Hz**, **6.02 s** long, **0 dips** (the
+control, and WROVER2 on 2026-09-28). What the crackle looked like, the one time
+it was caught (`logs/listen-20260928-170905-crackle-fwd-on.wav`): 27 dips/s
+lasting ~3 ms, spaced 24–28 ms — one per A2DP packet from Windows (1024 frames,
+23.2 ms) — with the tone at 987 Hz and 6.55 s long. Pitch and length are the
+strongest signal: room noise cannot make a tone take half a second longer.
 
 The `a` window, one line per run:
 
@@ -192,110 +175,81 @@ The `a` window, one line per run:
 ```
 
 `gap5ms` is a histogram in 5 ms buckets of the time between one packet from
-the Bluetooth stack and the next, and `cbmax` the longest our callback took
-(pushing into the server's own ring, forwarding to the mesh). Since D14 the
-server plays from its own ring, as a client does, so a gap is absorbed by the
-ring (`jit`, bytes) and only a gap longer than the ring holds is a hole —
-counted in `und`, on the server's speaker and, a moment later, in every room.
-`dry` counts the times its DMA ran dry under a playing ring.
+the Bluetooth stack and the next, and `cbmax` the longest our callback took.
+The server plays from its own ring, as a client does (D14), so a gap is
+absorbed by the ring (`jit`, bytes) and only a gap longer than it holds is a
+hole — `und`, on the server's speaker and a moment later in every room. Windows
+logged before `cb355de` measured the library's own I2S output instead, and
+carry `ring=`, `late=`, `nb=` and `writemax=`.
 
-Before D14 the library wrote I2S itself and the window measured that: the
-time between two `i2s_write()` calls against a DMA ring of 11.6 or 46 ms,
-with `late` for the gaps longer than the ring. On the 11.6 ms ring a 31.9 ms
-gap was the 22 ms hole the mic heard in the same run. Windows logged before
-`cb355de` carry `ring=`, `late=`, `nb=` and `writemax=`; windows before
-`b8273ae` say `idle5ms` and undercount.
-
-**How far apart the nodes play.** `sync.py` plays clicks into the server and
-unmutes one node at a time: the server, each `--node` in turn, the server
-again. All of it is one Bluetooth stream, so the PC's own latency cancels and
-each line is that node's delay against the server's, plus the sound's flight
-to the mic (~2.9 ms a metre). The two server phases must agree to a fraction
-of a millisecond, or the reference moved and nothing between is worth
-quoting:
+**`sync.py` — how far apart do the nodes play?** Clicks into the server, one
+node unmuted at a time: the server, each `--node` in turn, the server again.
+All of it is one Bluetooth stream, so the PC's own latency cancels and each
+line is that node's delay against the server's, plus the sound's flight to the
+mic (~2.9 ms a metre). The two server phases must agree to a fraction of a
+millisecond, or the reference moved and nothing between is worth quoting:
 
 ```
 python tools/btlisten/sync.py --server COM20 --node COM9 --node COM22:-24 --level -6 --volume 120 --clicks 12
 ```
 
 About 35 s, mostly silence, each node clicking for ~5 s. The MAX98357A nodes
-need the level and the volume that high to be heard over a quiet room;
-`:-24` keeps WROVER2's TPA3116 from being deafening meanwhile. `--volume`
-sets the server's A2DP volume for the run and puts back what it found, and
-every mute is read before it is toggled and restored as it was. A client
-reported with `und=+1` re-armed during the run and its figure is suspect.
-The baseline, every board on `v0.2.0-51-g8183ddc`
-(`logs/sync-20260930-131656-baseline`):
+need that level and volume to be heard over a quiet room; `:-24` keeps
+WROVER2's TPA3116 from being deafening meanwhile. Every mute is read before it
+is toggled and put back as found. Since D14 the clients play within 1.5 ms of
+the server (`logs/sync-20260930-175830-synced-136ms`); before, they were 44 and
+51 ms behind it. An `und=+1` on each client afterwards is the stream ending as
+the recording stops, not a hole in the run.
+
+**`soak.py` — what a long stream does.** The silent long run behind the
+server: a quiet tone for `--secs` with every node muted, and every 10 s, while
+the stream is still open, each client's telemetry and the server's `a` window:
 
 ```
-phase                    clicks  delay ms  spread  vs server
-COM20 (server)               12    -97.09    0.09      +0.00
-COM9                         12    -46.10    2.52     +50.99
-COM22                        11    -53.27    1.94     +43.82
-COM20 (server)               12    -96.67    0.09      +0.42
+python tools/btlisten/soak.py --server COM20 --node COM9 --node COM22 --secs 600 --trace
 ```
 
-The absolute column means nothing (it is against a guess at when playback
-started); the last column is the echo. A room with people in it drowns the
-MAX98357A's clicks — the first attempt found 2 of 8 — so run it quiet.
-After D14, same command, `v0.2.0-59-g2fe7791`: COM9 **+0.82**, COM22
-**+1.48**, the reference steady to 0.42 ms. The `und=+1` it reports on each
-client after such a run is the stream ending (Windows closes it as the
-recording stops), not a hole in the run — `soak.py` reads while the stream
-is open.
-
-**What a long stream does to them.** `soak.py` is the silent long run behind
-the Bluetooth server: the PC streams a quiet tone into it for `--secs` with
-every node muted, and every 10 s, *while the stream is still open*, reads each
-client's telemetry and the server's `a` window:
-
-```
-python tools/btlisten/soak.py --server COM20 --node COM9 --node COM22 --secs 600
-```
-
-It reports per client the underruns (`und`, a DMA that ran dry), `dry`, the
-schedule jumps (`sjmp`), the range of the timing error (`se`), the blocks
-lost and rebuilt, the lost-run histogram and `late` (late copies that came
-after their silence played), and for the server its own `und`/`dry`/`ovf`
-and the worst gap between Bluetooth packets. What good looked like on
-2026-09-30 (`logs/soak-20260930-174707.log`): no `und`, `dry` or `sjmp`
-anywhere, `se` within ±0.55 ms, `late=0`, and holes near the square of the
-server's own loss rate (1.3% holes at 11.7% loss that run, 0.46% at 6.3% in
-the one before). `lost` and `rec` swing with how many frames the server
-loses that minute; compare runs by `late`, `und` and `sjmp`, which do not.
+Per client: underruns (`und`), `dry`, schedule jumps (`sjmp`), the range of
+the timing error (`se`), the blocks lost and rebuilt, the lost-run histogram
+and `late` (copies that came after their silence played); for the server its
+own `und`/`dry`/`ovf` and the worst gap between Bluetooth packets. Good is no
+`und`, `dry` or `sjmp` anywhere, `se` within about ±1 ms, `late=0`. `lost` and
+`rec` swing with how many frames the server loses that minute (3–12%), so
+compare runs by `late`, `und` and `sjmp`, which do not.
 
 **Which redundancy, scored on one recording.** Because the server's loss
 swings 3× from minute to minute, two schemes run in alternating minutes are
 not compared on the same losses. `--trace` turns on each client's loss trace
 (`L1`: a bit per packet, 1 = never heard) and keeps it in the same log, and
 `losstrace.py` replays the firmware's rebuild rules on it — copy at every
-distance, XOR of blocks 1 and d back in the client's single pass, and the
-same XOR as if a client kept every parity:
+distance, XOR of blocks 1 and d back in the client's single pass, and the same
+XOR as if a client kept every parity:
 
 ```
-python tools/btlisten/soak.py --server COM20 --node COM9 --node COM22 --secs 600 --trace
 python tools/btlisten/losstrace.py logs/soak-<time>.log
 ```
 
 It prints, per client, the holes each scheme would have left and their run
 lengths, and with two clients the share of the loss both missed — frames the
-server never sent. Whatever the server sends during the run (`D11` by
-default) does not change the losses, so it does not matter which scheme was
-on; what the trace cannot score is `t2`, which changes the airtime and so the
-losses. Check a trace against the board before believing it: the `[LOSS]`
-histogram `soak.py` prints at the end must match the trace's own `lost runs`
-(it did, run for run, on its first bench check, 2026-10-01).
+server never sent. Whatever the server sends during the run does not change
+the losses, so it does not matter which scheme was on; what the trace cannot
+score is `t2`, which changes the airtime and so the losses. Check a trace
+against the board before believing it: the `[LOSS]` histogram `soak.py` prints
+at the end must match the trace's own `lost runs`.
 
-Traps, each of which cost a run on 2026-09-28:
+`mon.py COM20` logs the `a` window every 2 s to `logs/a2dp-<time>.log` while
+somebody plays real music — for "it crackled just then".
+
+Traps, each of which cost a run:
 
 - **Windows' default microphone path erases the tone.** Its noise suppression
-  treats a steady sine as hum and gates the rest to exact zeros; the recording
-  is silent. `listen.py` opens the mic in WASAPI RAW mode for that reason.
-  Exclusive mode is no better on this laptop: the Realtek driver delivers
-  65–82 k frames/s for a 48 k stream, i.e. repeated audio — clicks of its own.
+  treats a steady sine as hum and gates the rest to exact zeros. `listen.py`
+  opens the mic in WASAPI RAW mode for that reason. Exclusive mode is no better
+  on this laptop: the Realtek driver delivers 65–82 k frames/s for a 48 k
+  stream, i.e. repeated audio — clicks of its own.
 - **A muted microphone records exact zeros**, which reads like a speaker that
-  is not playing. A real room is never digital silence, so `listen.py` now
-  stops and says so (2026-10-01: `mic peak 0.00`, the mic muted in Windows).
+  is not playing. A real room is never digital silence, so `listen.py` stops
+  and says so.
 - **The volume resets on every reconnect**, and a tone 40 dB quieter looks like
   90 dips/s of noise. The script warns below −55 dBFS at the mic; above
   `peak 0.99` it clipped. Lower `--level` rather than the volume.
@@ -304,15 +258,16 @@ Traps, each of which cost a run on 2026-09-28:
   endpoint was missing. If `listen.py` says no device matches, check the
   node's status line.
 - **Every flash or reboot drops the Bluetooth link** and it does not come back
-  by itself (`set_auto_reconnect(false)`): somebody clicks Connect.
+  by itself (`set_auto_reconnect(false)`): `k`, or somebody clicks Connect.
 - **Opening the serial port can reset the node** — and drop the link under
   test. `ser.py` sets DTR and RTS false *before* the port opens; `pio device
   monitor` does not.
 - **Loud and distorted is not a firmware problem** until the amp's supply has
   been checked: an undervolted TPA3116 distorted from 50–60% up.
-
-`mon.py COM19` logs the `a` window every 2 s to `logs/a2dp-<time>.log` while
-somebody plays real music — for "it crackled just then".
+- **Silence from one node with healthy counters is its DAC.** The stereo
+  WROOM reported `rx`, `lost=28 und=0` as a CLIENT and played nothing: its
+  PCM5102A's pins had never been soldered. A PCM5102A also stays silent with
+  XSMT low or SCK floating (README, pin configuration).
 
 ## Updating without a cable: `tools/ota.ps1`
 
@@ -344,229 +299,107 @@ does not exist (`W<name>` and an empty password line), in ~35 s with
 dummy SSID stays stored until `ota-wifi.ps1` replaces it.
 
 **A node across the house.** It has no serial port, and a client never
-transmits, so its reception is read with `-Status` while a stream plays at
-it: run `bench-mesh.ps1` on the nodes at the PC, keep one node out of the
-harness (`-Ports`) to relay, and ask before the harness stops the source —
-a node back in DISCOVERY has already zeroed its counters.
-`./tools/ota.ps1 -Env esp32stereo -Relay COM9 -Status` prints `rssi=` (the
-home WiFi) and `before=CLIENT up= rx= lost= und= ... runs=` (the mesh, up to
-the request), to compare with the harness's own client in the same minutes.
-Mute the relay first if it has a speaker: it is a client of that stream too.
+transmits, so its reception is read with `-Status` while a stream plays at it:
+`./tools/ota.ps1 -Env esp32stereo -Relay COM9 -Status` prints `rssi=` (the home
+WiFi) and `before=CLIENT up= rx= lost= und= ... runs=` (the mesh, up to the
+request). The relay can be any node on USB, a client of the same stream
+included. Behind `bench-mesh.ps1`, keep the relay out of the harness (`-Ports`)
+and ask before the harness stops the source: a node back in DISCOVERY has
+already zeroed its counters.
 
----
+## By hand, with a phone
 
-## Manual walkthrough
-
-The procedure below is the original by-hand version. It is still the only way to
-test the Bluetooth path, and worth doing once so the log output is familiar.
-Each step has a pass criterion readable directly from the serial log.
-
-## What you need
-
-For the **automated** mesh test: two or more boards on this PC, any mix. Bench
-mode does not use Bluetooth, so a WROOM counts. Five at once has been done.
-
-If a board keeps being skipped with "did not enter download mode", its
-auto-reset is the problem (the WROOM on COM8, since 2026-09-14). Flash it by
-hand — `pio run -e esp32dev --target upload --upload-port COM8`, repeating
-until "Hash of data verified", or with BOOT held — and run the harness
-**without `-Flash`**: it then identifies boards from their own ident line and
-never asks esptool to reset anything.
-
-For the **manual** test of the Bluetooth path: at least one **WROVER**, plus a
-phone. The WROOM cannot be an A2DP server (no PSRAM, D3) and neither can the S3
-or C3 (no BT Classic). A WROVER-E has been on COM12 since 2026-09-14 and boots
-`SERVER capable`; the walkthrough below has not yet been run against it.
-
-A PCM5102 on each node if you want to hear anything; the counters work without
-one.
-
-Known bench hardware as of 2026-08-19 (`pio device list`, confirmed by
-`esptool chip_id`):
-
-| Port | Chip | Module | Role in a bench run |
-|------|------|--------|---------------------|
-| COM8 | ESP32-D0WD-V3 | WROOM, no PSRAM | source or client, bench mode only |
-| COM9 | ESP32-S3 | 8 MB embedded PSRAM | source or client |
-
-Note the S3 enumerates on its **native USB** port (VID 303A), not a UART bridge,
-which is why the build sets `-DARDUINO_USB_CDC_ON_BOOT=1`. Without that flag
-`Serial` goes to GPIO43/44 and the board is silent over USB.
-
-Capture a manual run so two runs can be compared:
+What no script can do: a phone connecting, leaving, and moving to another node.
+It needs a server-capable node (a WROVER; a WROOM, S3 or C3 cannot be one, D3),
+a phone, and any other boards as clients, with a DAC on each one you want to
+hear. Capture each board's log so two runs can be compared:
 
 ```
 ./tools/capture-serial.ps1 -Environment esp32wrover
 ```
 
----
+### Step 1 — Boot
 
-## Step 0 — Host tests still pass
-
-```
-pio test -e native
-```
-
-Or, without a host compiler, on a connected board:
-
-```
-pio test -e esp32dev
-```
-
-**Pass:** all tests OK. If the ring buffer or sequence accounting is broken there
-is no point looking at radios yet.
-
----
-
-## Step 1 — Boot, heap and PSRAM report
-
-Flash and monitor each board on its own.
-
-```
-pio run -e esp32wrover --target upload
-pio device monitor -e esp32wrover
-```
-
-**Expect:**
+Flash and monitor each board on its own (`pio run -e esp32wrover -t upload`,
+then `pio device monitor -e esp32wrover`). Expect:
 
 ```
   SonoLoco — Multi-Room Audio
-  Firmware: v0.1.0
+  Firmware: v0.2.0-…
   Mode: SERVER capable (BT + ESP-NOW)
-[INFO]  Chip: ...
 [INFO]  PSRAM: 4194304 bytes
 [INFO]  Heap after WiFi init: ...
 [INFO]  ESP-NOW ready — MAC: XX:XX:XX:XX:XX:XX
-[INFO]  Heap after ESP-NOW init: ...
 [INFO]  BT discoverable as: SonoLoco-WROVER
 [INFO]  Setup complete. Entering DISCOVERY...
 ```
 
-**Pass criteria:**
+**Pass:** `PSRAM:` non-zero on a WROVER — at 0 the mesh is off by design (D3).
+A WROOM prints `No PSRAM detected` unless it is in client-only mode (`c`),
+where it prints `Mode: CLIENT only (configured — BT never starts)` and joins
+the mesh. `Firmware:` has no trailing `*`. A power-on plays the startup sound.
 
-- `PSRAM:` is non-zero on the WROVER. If it reports 0, the mesh is disabled by
-  design and everything after this step will fail — fix that before continuing.
-- `Heap after ESP-NOW init` is comfortably above zero. This is the number the
-  whole WROOM exclusion is about; write it down, it is the baseline for judging
-  whether any later change is affordable.
-- A WROOM instead prints `No PSRAM detected — WiFi/ESP-NOW disabled` and that is
-  correct behaviour, not a failure.
-- Record each board's MAC. The client locks onto the server's MAC, so knowing
-  which is which makes the next steps readable.
-- `Firmware:` shows the commit the board was built from, and no trailing `*`.
-  A `*` means uncommitted changes, so the run cannot be reproduced from the sha
-  and is not worth recording.
+### Step 2 — DISCOVERY → SERVER on phone connect
 
----
+Connect the phone to the WROVER and play something.
 
-## Step 2 — DISCOVERY → SERVER on phone connect
+**Expect:** `BT connected`, `=== SERVER — local playback + ESP-NOW broadcast
+===`, `BT audio started → ESP-NOW TX will activate in …`.
 
-One board only. Connect the phone to `SonoLoco-WROVER` and start playing audio.
+**Pass:** audio from the server's DAC; the connect jingle does not distort the
+music after it; status lines every 10 s with `mode=SERVER` and **`qfull=0
+senderr=0 radiofail=0`** — any of those climbing means the radio cannot keep up
+with ~387 packets/s.
 
-**Expect:** `BT connected`, then `=== SERVER — local playback + ESP-NOW
-broadcast ===`, then `BT audio started → ESP-NOW TX will activate in 1000ms`.
+### Step 3 — Every other board reaches CLIENT and holds
 
-**Pass criteria:**
-
-- Audio plays locally out of the DAC.
-- The connect tone plays without distorting the music that follows.
-- Status lines every 10 s show `mode=SERVER` with **`qfull=0 senderr=0
-  radiofail=0`**. Any of those climbing means the radio cannot keep up with
-  ~387 packets/s and nothing downstream will be trustworthy.
-
-`radiofail` in particular counts frames the radio reported as not delivered. With
-no client listening yet, broadcast frames are not acknowledged, so treat a
-non-zero value here as informational and re-read it in step 3.
-
----
-
-## Step 3 — Second board reaches CLIENT and holds
-
-Power the second board with the first still serving.
-
-**Expect on the second board:**
+**Expect on each:**
 
 ```
 [INFO]  === CLIENT — ESP-NOW → I2S ===
 [INFO]  Stopping BT to release I2S...
-[INFO]  I2S initialised for CLIENT mode at 22050 Hz mono
-[INFO]  Jitter buffer ready (~4000 bytes) — starting I2S
+[INFO]  I2S output at 44100 Hz stereo
+[SYNC] armed late=…us dropped=… frames
+[INFO]  Ring ready (… bytes) — starting I2S, on the server's schedule
 ```
 
-**Pass criteria:**
+**Pass:** it starts within a few seconds of the server streaming; audio from
+its DAC; and in its status line `und=0 ovf=0`, `sync=1` and `se=` (µs from the
+server's schedule) within about ±1 ms. `lost` is the holes left after
+redundancy, `rec` the blocks it rebuilt.
 
-- It reaches `Jitter buffer ready` within a few seconds of the server streaming.
-- Audio comes out of the client's DAC.
-- `jitter=` in the status line **holds roughly steady**. This is the single most
-  informative number on the bench:
-  - steadily climbing → the client consumes slower than the server sends, and it
-    will eventually overflow
-  - steadily falling → the opposite, and it will underrun
-  - either drift is the clock-drift problem in `TODO.md`, not a wiring fault
-- `und=` (underrun) and `ovf=` (overflow) stay at 0 over a minute.
+**The rooms should sound as one.** Since D14 every node plays on the server's
+schedule, measured within 1.5 ms. An echo between rooms is a bug — measure it
+with `sync.py`.
 
----
+### Step 4 — Five minutes
 
-## Step 4 — Five-minute stream
+**Pass:** `ovf`, `und`, `dup`, `rsy` stay at 0; `sjmp` stays at 0; `heap=`
+is flat (a slow decline is a leak). `lost` grows with the server's own frame
+loss, and should stay well under 1% of `rx`.
 
-Leave it playing for five minutes and watch the status lines.
-
-**Pass criteria:**
-
-- `lost=` grows slowly if at all. A steady climb means the radio is saturated —
-  ADPCM compression is the planned answer.
-- `ovf=` and `und=` stay at 0. Either one climbing while `lost` stays flat is a
-  timing problem, not a radio problem.
-- `dup=` and `rsy=` stay at 0. A non-zero `rsy` with no server restart means
-  packets are arriving out of order, which the sequence tracker handles but which
-  says something about the radio conditions.
-- `heap=` is flat. A slow decline is a leak; the `String` concatenation in the
-  log macros is the first suspect.
-
-Note explicitly whether the two rooms sound aligned. They are expected **not**
-to: the server plays through A2DP at tens of ms latency, the client after a
-~137 ms of buffering. Record the perceived offset — it is the input to the
-timing work.
-
----
-
-## Step 5 — Teardown and recovery
+### Step 5 — Teardown and recovery
 
 The transitions that have historically broken:
 
-1. **Disconnect the phone.** Both boards should print `=== DISCOVERY ===`, the
-   client after `ESP-NOW silent for 5s → DISCOVERY`.
+1. **Disconnect the phone.** Every board prints `=== DISCOVERY ===`, a client
+   after `ESP-NOW silent for 5s → DISCOVERY`.
 2. **Reconnect the phone to the same node.** It must become SERVER again. This is
    what `a2dpSink.end(false)` exists for; if it fails here, the controller was
    freed.
-3. **Now connect the phone to the *other* node.** The roles must swap. This is
-   the whole premise of the project and the step most likely to expose a stale
-   `senderLocked` — a node that ignores every future server.
-4. **Reboot the server mid-stream.** The client should log `rsy=1` and keep
+3. **Connect the phone to *another* WROVER.** The roles must swap — the
+   premise of the project, and the step most likely to expose a stale
+   `senderLocked`, a node that ignores every future server. A node playing as
+   a client cannot be connected to until it has fallen back to DISCOVERY
+   (`TODO.md`).
+4. **Reboot the server mid-stream.** A client should log `rsy=1` and keep
    playing, not report tens of thousands of lost packets.
 
 **Pass:** all four, repeatedly, with no power cycle.
 
----
-
 ## Recording the result
 
-Keep the captured logs. When a change later makes something better or worse, the
-only way to tell is to compare the counters between two runs of this same
-procedure, so record the firmware version alongside the numbers in
-`CHANGELOG.md`.
-
-`tools/bench-mesh.ps1` writes that version into its log header for you:
-
-```
-# SonoLoco mesh bench
-# started  : 2026-08-20 11:04:12
-# version  : v0.1.0-3-gabc1234
-# duration : 600 s
-# source   : COM8
-# nodes    : COM8=ESP32-D0WD-V3 COM9=ESP32-S3
-# firmware : COM8=v0.1.0-3-gabc1234 COM9=v0.1.0-3-gabc1234
-```
-
-A manual capture has no such header, so write the version down from the boot
-banner. A measurement whose build cannot be identified is an anecdote.
+Keep the logs, and record the firmware version beside every number in
+`CHANGELOG.md`: a measurement whose build cannot be identified is an anecdote.
+`bench-mesh.ps1` writes the version of every node into its log header; a manual
+capture has none, so take it from the boot banner.

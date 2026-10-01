@@ -68,9 +68,11 @@ on something directly verified in this repo.
 
 ---
 
-## D3 — The WROOM is deliberately excluded from the mesh
+## D3 — A WROOM is a Bluetooth speaker or a mesh client, never both
 
-**Decided:** during the first audit. **Status:** holding, and it is not a bug.
+**Decided:** during the first audit, as "the WROOM is excluded from the mesh";
+narrowed 2026-08-19 to this. **Status:** holding. A WROOM in client-only mode
+plays the mesh through a stereo across the room (2026-10-01).
 
 Running BT Classic and WiFi simultaneously on an ESP32 needs PSRAM. Without it,
 WiFi claims ~80 KB of the ~215 KB DRAM heap and the BT stack can no longer
@@ -110,10 +112,10 @@ internal DRAM free in DISCOVERY. That is the first real number for the "BT +
 WiFi together" heap question and it is smaller than the ~80 KB reasoning above
 implies for a board with PSRAM: PSRAM absorbs large allocations, but the WiFi
 static RX buffers, the BT controller and every allocation below the
-always-internal threshold still come out of DRAM. Whether it survives a phone
-actually streaming is the open item in `TODO.md`. Also learned the hard way:
+always-internal threshold still come out of DRAM. Also learned the hard way:
 coexistence forbids `WIFI_PS_NONE` on a BT node (README gotcha), so a BT node
-runs WiFi with modem sleep on, while a BT-free node still turns it off.
+runs WiFi with modem sleep on, while a BT-free node still turns it off — which,
+measured 2026-10-01, costs a client no packets.
 
 **Amended 2026-09-14, evening:** BT and WiFi *together* now has two numbers.
 Memory: a phone connecting needs more than the 15.5 KB of internal DRAM the
@@ -123,9 +125,9 @@ and holds 18–32 KB while streaming. Radio: with A2DP streaming, about a fifth
 of the ESP-NOW frames handed to the radio never reach the air intact — 215/s
 sent, ~170/s seen by a monitor 30 cm away, ~153/s at a client. The
 coexistence arbiter is real and it is the binding constraint on a one-chip
-server. Fewer frames (ADPCM) and a coexistence preference are the next things
-to measure; a two-chip server is the fallback that removes the question. See
-`TODO.md`.
+server. What came of that is D5 (fewer bytes) and D13 (shorter frames,
+redundancy); a coexistence preference made no difference; a two-chip server
+is still the fallback that removes the question.
 
 **What would change this:** shrinking the mesh's RAM footprint far enough that
 BT and WiFi coexist without PSRAM — unlikely, the 80 KB is the WiFi driver's own
@@ -165,28 +167,19 @@ a runtime setting stored in NVS (D3), not a fourth build.
 ## D5 — Mesh audio is 44.1 kHz stereo IMA ADPCM (was 22.05 kHz mono PCM)
 
 **Decided:** at implementation time (22.05 kHz mono); **changed 2026-09-29**
-to 44.1 kHz stereo ADPCM, see the amendment below. **Status:** holding.
+to 44.1 kHz stereo ADPCM. **Status:** holding; through a stereo on 2026-10-01
+it "works incredibly well".
 
-BT A2DP delivers 44.1 kHz stereo 16-bit = 176 KB/s. Broadcasting that over
-ESP-NOW while BT Classic shares the same radio is not realistic, so the server
-halves the sample rate and folds stereo to mono: 4x reduction, 44 KB/s,
-~220 packets/s of 200 bytes.
-
-Decimation goes through a 4-tap `[1 3 3 1]/8` FIR. Naive 2:1 decimation folds all
-11-22 kHz content back into the audible band and turns cymbals to fizz.
-
-**Known cost:** the server plays the full 44.1 kHz stereo stream locally, so the
-server room and the client rooms do not sound identical. Unresolved — see
-`TODO.md`.
-
-**What would change this:** IMA ADPCM (4:1, cheap) would take the same audio to
-~11 KB/s, which would buy back enough headroom to reconsider the sample rate or
-the stereo fold. That is the first thing to try if bandwidth turns out to be the
-binding constraint on the bench.
+BT A2DP delivers 44.1 kHz stereo 16-bit = 176 KB/s, too much to broadcast over
+ESP-NOW with BT Classic on the same radio. The first mesh took a quarter of it
+the simple way: half the rate, stereo folded to mono, 44 KB/s, through a
+`[1 3 3 1]/8` FIR so the decimation did not fold 11–22 kHz into the audible
+band. The cost was that the server played the full stream and the clients did
+not, and the note here said IMA ADPCM (4:1, cheap) was the thing to try.
 
 **Changed 2026-09-29 — 44.1 kHz stereo, through IMA ADPCM.** That is what the
-paragraph above said to try, spent the other way: not today's audio in a
-quarter of the bytes, but the server's own audio in today's bytes. The decision
+note said to try, spent the other way: not the same audio in a quarter of the
+bytes, but the server's own audio in the same bytes. The decision
 was made by ear before any firmware was written: `tools/codec/abtest.py` ran two
 20 s excerpts (drums and cymbals; a quiet acoustic track) through the old path
 and through ADPCM, and the listener found ADPCM "way better". The numbers
@@ -197,18 +190,18 @@ follows the music's level and was judged "pretty noisy" when isolated and
 turned up, and not a reason to stay.
 
 So the server forwards what A2DP gives it: no fold, no decimation, no FIR. A
-packet carries its own 114-frame block and the previous one (D13), 387
-packets/s of 246 bytes. Every block carries the decoder's state, so any block
-decodes alone — which is what lets a client rebuild a lost packet from the next
-one. The known cost above is gone: every room plays what the server plays. A
-node with one speaker mixes to mono (`M`), because a MAX98357A plays only one
-channel.
+packet carries its own 114-frame block and an older one for redundancy (D13),
+387 packets/s of 248 bytes. Every block carries the decoder's state, so any
+block decodes alone — which is what lets a client rebuild a lost block from a
+later packet. Every room plays what the server plays. A node with one speaker
+mixes to mono (`M`), because a MAX98357A plays only one channel.
 
-**What would change it now:** the noise. If it is audible in real listening,
-the next step is not back to PCM but a better codec — SBC is what the phone
-already sends, but this Arduino core hands over only decoded PCM, so the server
-would re-encode. Or an ADPCM variant with more bits per sample, if the airtime
-allows it.
+**What would change it now:** the noise, if somebody hears it. The first real
+listening, 2026-10-01 — a WROVER server, a WROOM client into a stereo — asked
+for nothing. If it ever is audible, the next step is not back to PCM but a better codec: SBC is
+what the phone already sends, but this Arduino core hands over only decoded
+PCM, so the server would re-encode. Or an ADPCM variant with more bits per
+sample, if the airtime allows it.
 
 ---
 
@@ -243,10 +236,12 @@ answer.
 
 ## D7 — Pure logic lives in `lib/`, and is tested on the host
 
-**Decided:** 2026-08-19. **Status:** new.
+**Decided:** 2026-08-19. **Status:** holding; five libraries now (`jitter`,
+`adpcm`, `mesh`, `drift`, `sync`), each with its suite.
 
-The ring buffer and the packet sequence accounting are in `lib/jitter/` rather
-than in `main.cpp`, with host tests in `test/test_jitter/`.
+The ring buffer and the packet sequence accounting were the first to move to
+`lib/jitter/` rather than stay in `main.cpp`, with host tests in
+`test/test_jitter/`.
 
 The argument is not general tidiness — `main.cpp` is otherwise deliberately one
 file. It is that this specific code is (a) pure logic with no hardware
@@ -263,7 +258,8 @@ one pass.
 
 ## D8 — `ROOM_NAME` is set per environment, not in `config.h`
 
-**Decided:** 2026-08-19. **Status:** new.
+**Decided:** 2026-08-19. **Status:** holding. A board still advertising
+`Room1`, the old default in `config.h`, is running firmware from before it.
 
 Per-node naming used to mean editing `config.h` before each flash, which made the
 source tree differ per board and left no way to tell which binary was on which
@@ -282,13 +278,13 @@ if nodes ever get a configuration interface.
 
 ## D9 — Bench mode is a runtime mode, not a build
 
-**Decided:** 2026-08-19. **Status:** new.
+**Decided:** 2026-08-19. **Status:** holding.
 
 Automated multi-board testing needs a node that produces a stream unattended.
 The normal SERVER role cannot: it requires a phone to connect over A2DP. So a
 node can be told over serial to reboot into **bench mode**, where it never starts
-Bluetooth and can generate a synthetic 22.05 kHz tone straight into the ESP-NOW
-transmit path.
+Bluetooth and can generate a synthetic tone straight into the ESP-NOW transmit
+path — the same encoder, packets and schedule stamps as a server's.
 
 It is a runtime mode rather than a `-DBENCH` build for the reason D4 gives: the
 test should exercise the same binary that ships. The flag lives in
@@ -300,14 +296,15 @@ the bootloader, so the flag is already zero again by the time it is read.
 Because bench mode never starts Bluetooth, it also works on a WROOM (see D3),
 which is what made a two-board test possible at all with the hardware to hand.
 
-**What would change this:** nothing foreseen. If bench mode ever needs to test
-the *Bluetooth* path it stops being useful, and that part stays manual.
+**What would change this:** nothing foreseen. The *Bluetooth* path is outside
+it by construction; that half is driven from the PC instead
+(`tools/btlisten/`, the PC as the A2DP source).
 
 ---
 
 ## D10 — The version comes from git, not from a constant
 
-**Decided:** 2026-08-20. **Status:** new.
+**Decided:** 2026-08-20. **Status:** holding.
 
 `scripts/version.py` runs before every build and defines `FW_VERSION` from
 `git describe --tags --always --dirty=*`. The node prints it in its boot banner
@@ -333,12 +330,12 @@ a baseline like "-30.5 ppm" is only useful if the firmware that produced it can
 be rebuilt.
 
 **What would change this:** nothing about the mechanism. The tagging *policy* is
-worth revisiting once there is a second person flashing boards, or an OTA path
-(`TODO.md`) that has to decide whether an image is newer than the running one —
+worth revisiting once there is a second person flashing boards, or an update
+path that has to decide whether an image is newer than the running one —
 `git describe` output does not order without parsing, and that would be the
-moment to put a real semver in the tag and compare against it.
-D15's update mode did not bring that moment: it never compares versions --
-the PC decides what to send, and reads `fw=` back afterwards to check it.
+moment to put a real semver in the tag and compare against it. D15's update
+mode did not bring that moment: it never compares versions — the PC decides
+what to send, and reads `fw=` back afterwards to check it.
 
 ---
 
@@ -355,10 +352,10 @@ fills. Measured over 600 s on the first pair of boards, -30.5 ppm, which drains
 the buffer in about 18 minutes of continuous play. Every client has to correct
 for it or eventually break.
 
-The correction is **one mono sample, duplicated or skipped, at a batch
-boundary**. 30 ppm at 22.05 kHz is 0.67 samples per second — roughly one edit
-every 1.5 s, holding a single sample for one extra sample period. That is far
-below audibility on this material and it costs nothing: no filter state, no
+The correction is **one frame, duplicated or skipped, at a batch boundary** —
+a mono sample when this was decided, a stereo frame since D5. 30 ppm at
+44.1 kHz is 1.3 frames a second, each held for one extra sample period. That
+is far below audibility and it costs nothing: no filter state, no
 fractional-delay interpolation, no per-sample arithmetic in the audio path at
 all.
 
@@ -366,8 +363,8 @@ The alternative is a real asynchronous sample-rate converter, which resamples th
 whole stream by the measured ratio. It is the correct answer for a system that
 has to survive large or fast-changing offsets, and the wrong one here: it would
 add a resampler to a 240 MHz core that also runs a radio, to fix an error of
-0.003%. If the mesh ever carries stereo, a higher rate, or material where a
-held sample is audible, that trade changes.
+0.003%. This entry said the trade would change if the mesh ever carried stereo
+at a higher rate; it now does (D5), and the trade held.
 
 **It is a controller, not a constant.** -30.5 ppm is one pair of crystals at one
 temperature; a third board has a different offset, and the same board has a
@@ -379,7 +376,9 @@ it can actually see, rather than on a number measured once. Proportional control
 on the smoothed fill error with a deadband — the deadband is what keeps it from
 chasing packet-arrival jitter, and it costs a slightly shallower buffer in
 exchange. The full reasoning, including why there is no integral term, is in
-`lib/drift/drift.h`.
+`lib/drift/drift.h`. Since D14 a client on the server's schedule steers the
+same controller on its timing error instead of its depth; the server, and a
+client of a source that sends no schedule, still steer on depth.
 
 Placing the edit at a batch boundary rather than hunting for a zero crossing is
 also deliberate: the partial-write accounting in `driveRingI2S` is the code
@@ -407,16 +406,17 @@ underran on a two-packet loss with 1,304 bytes showing a second earlier. This is
 the sort of thing that is invisible in the code and obvious in a 600 s run.
 
 **What would change this:** material where a held sample is audible, a client
-whose offset exceeds the 227 ppm the controller is allowed to correct, or a
-sample rate that stops being fixed at 22.05 kHz (`TODO.md` — if A2DP negotiates
+whose offset exceeds what the controller is allowed to correct, or a sample
+rate that stops being fixed at 44.1 kHz (`TODO.md` — if A2DP negotiates
 48 kHz, the whole rate assumption changes and an SRC may be needed anyway).
 
 ---
 
 ## D12 — A mesh is a 16-bit id in every packet, derived from a name
 
-**Decided:** 2026-09-02. **Status:** new. Compiles and is covered by host tests;
-not yet measured on hardware with two meshes in the air at once.
+**Decided:** 2026-09-02. **Status:** holding. Covered by host tests and in use
+on every node; not yet measured with two meshes in the air at once, and the
+pairing button has not been pressed.
 
 Two SonoLoco installations within radio range hear each other perfectly: the
 channel is fixed, the destination is the broadcast address, and a client locked
@@ -492,7 +492,7 @@ Reusing the audio layout meant the wire format did not have to break twice, and
 it goes out through the existing queue and send gate rather than a second
 transmit path that could rot. Both halves of the test matter: length alone would
 promote any truncated frame to a beacon, and the magic alone would make one
-audio packet in 65536 — a false beacon every five minutes at 220 packets/s — an
+audio packet in 65536 — a false beacon every three minutes at 387 packets/s — an
 invitation to join a stranger. A beacon must also be dropped *before* the
 sequence tracker sees it, or its sequence number reads as a stream restart.
 
@@ -500,9 +500,8 @@ sequence tracker sees it, or its sequence number reads as a stream restart.
 three-note tone on adoption, a falling one when a window closes empty. Pairing
 is used by somebody holding a button on a box with no screen and no console, and
 without them the button is indistinguishable from a button that does nothing.
-They play only in DISCOVERY: in CLIENT mode the I2S driver is being fed by the
-jitter buffer, and on a SERVER the A2DP task owns it — the conflict `TODO.md`
-already tracks for the connect and disconnect tones.
+They play only in DISCOVERY: in CLIENT and SERVER mode `loop()` is feeding the
+I2S driver from the ring.
 
 It is a long press **while running**, never a press held through a reset. The
 BOOT button these devkits use is a strapping pin — held across a reset it puts
@@ -526,7 +525,8 @@ id stays but stops being the only thing keeping the two apart.
 
 **Decided:** 2026-09-14 (6 Mbps), amended 2026-09-29 (12 Mbps, two copies),
 2026-09-30 (the second copy 11 packets later).
-**Status:** holding, range untested.
+**Status:** holding. Range: across one room, at a stereo, 240,425 packets
+and none lost (2026-10-01); further than that untested.
 
 ESP-NOW sends broadcast frames at 1 Mbps DSSS unless `esp_wifi_config_espnow_rate`
 says otherwise. That is the most robust rate 802.11 has — the best receiver
@@ -581,9 +581,7 @@ sends two for comparison). The rate stays 12 Mbps.
 for the radio and the client dropped out — so it is no longer the fallback
 below); unicast to known clients, which gets the MAC's own retries for free
 but needs a peer list (D6) and multiplies the airtime by the number of rooms;
-and ADPCM with the previous block in every packet, which recovers a lost
-packet from its successor 4.5 ms later instead of 0.3 ms, and is the next step
-if the bursts that take both copies turn out to matter (`TODO.md`).
+and ADPCM with the previous block in every packet — done the same day, above.
 
 **Amended 2026-09-30 — the second copy goes 11 packets later, not 1.**
 Measured behind a streaming server for the first time, the previous-block
@@ -612,9 +610,18 @@ twice the airtime. Three blocks a packet would need shorter blocks, and more
 packets. And the fix at the source: a server that loses fewer frames — see
 the next paragraph.
 
-**What would change this:** a range measurement showing 6 Mbps reaching a room
-that 12 does not — then 9 Mbps, or the copies alone at 6, before anything
-slower. A server with no Bluetooth of its own (the two-chip server in
+**Measured 2026-10-01, on one recording.** Every scheme compared on the same
+losses (`L1`, `losstrace.py`), 600 s behind the streaming server at 6.4% loss:
+copy at 11 left 0.50% holes, the best copy distance (15) 0.43%, the XOR of
+blocks 1 and 11 back 0.29%, and of 1 and 15 back 0.24%. The XOR's near half
+rebuilds a lone loss from the next packet and its far half a run from 15
+later, in the same bytes. It is already in the firmware (`X<n>`) and becomes
+the default once a live run confirms the firmware rebuilds what the model
+says it does (`TODO.md`).
+
+**What would change this:** that confirmation, first. Then a range
+measurement showing 6 Mbps reaching a room that 12 does not — then 9 Mbps, or
+the copies alone at 6, before anything slower. A server with no Bluetooth of its own (the two-chip server in
 `TODO.md`) would make the copies a hedge against interference only, and worth
 re-measuring against their airtime — and would remove the 4–5-packet runs
 the distance exists for, so distance 1 might win again. Or ADPCM shrinking the frames so far that
@@ -650,8 +657,9 @@ were two causes, and neither is visible in any counter:
 - The server no longer lets the library write I2S (`set_stream_reader(cb,
   false)`). It pushes each A2DP packet into its own ring and plays it
   through exactly the code a client uses (`driveRingI2S`). Its speaker is
-  now as late as a client's (~90 ms against ~40), with a buffer as deep as a
-  client's against Bluetooth's own pauses. Its level controller also locks
+  now as late as a client's (~90 ms against ~40 at first, 136 ms since the
+  amendment below), with a buffer as deep as a client's against Bluetooth's
+  own pauses. Its level controller also locks
   it to the source's clock, which the library's output never was.
 - Every node reads its own output clock: an `i2s_write()` that had to wait
   returns just after a DMA buffer finished. At that moment the frames queued

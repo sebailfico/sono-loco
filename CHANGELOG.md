@@ -30,6 +30,18 @@ in `TODO.md` false.
 
 ## Unreleased
 
+- **By ear, through a stereo** (2026-10-01, `v0.2.0-78-geb8fff0` on the
+  WROVERs and the S3, `v0.2.0-68-g66327e2` on the WROOM). Streaming into
+  WROVER2, with the stereo WROOM across the room as a client: "works
+  incredibly well" — the first real listening to the ADPCM mesh (D5) on a
+  proper speaker, and the WROOM's first sound at all. It played nothing at
+  first while reporting a healthy stream (`ota.ps1 -Status`: `before=CLIENT
+  rx=22769 lost=28 und=0`, −54 dBm): the PCM5102A's header had never been
+  soldered. Also from the soak that evening: a streaming, forwarding server
+  with update mode in the build had 23.4–25.4 KB of heap over 600 s, against
+  the 21–23 KB D15 recorded before update mode — the 80 bytes it costs do not
+  show.
+
 - **Which packets a client missed, and what every redundancy scheme would
   have done with them** (2026-10-01, `b54ab85`, `ca6dfa4`, `bb7ca7e`). The
   counters say how much was lost, not which packets, and *which* decides what
@@ -46,10 +58,15 @@ in `TODO.md` false.
     48; 69, 254; 123, 271), and copy at 11 rebuilt all of it, as `lost=0`
     said. Aligning two clients by PC time works: on the bench almost none
     of the loss is shared (5 of 69 and 254), so it is each receiver's own.
-  - *On synthetic losses shaped like the server's* (5% singles, 0.3% runs
-    of 4–5): XOR 1+11 leaves 0.21%, copy at 11 0.54%, copy at 1 1.48%. The
-    real recording behind a streaming server is still to do — the PC's
-    Bluetooth was off.
+  - *Behind the streaming server*, 600 s, `v0.2.0-76-g15b730e`, every node
+    muted (`logs/soak-20261001-190328.log`): the server lost 6.4% of its
+    frames, 96–98% of them missed by both clients. Holes left, S3 / WROVER2:
+    none 6.42 / 6.31%; copy 1 1.76 / 1.60%; **copy 11, today's default, 0.50
+    / 0.49%**; copy 15, the best copy, 0.43 / 0.42%; **XOR 1+11 0.29 /
+    0.28%; XOR 1+15 0.24 / 0.23%**; XOR 1+15 keeping every parity 0.16 /
+    0.15%. The model's copy-at-11 figure for the S3, 1,145 holes, against
+    the S3's own count over nearly the same window, 1,134. The live run itself
+    was clean: no `und`, `dry` or `sjmp`, `late=0`.
 
 - **Modem sleep costs a Bluetooth node nothing** (2026-10-01,
   `v0.2.0-72-gbb7ca7e`). A node that runs Bluetooth keeps `WIFI_PS_MIN_MODEM`

@@ -74,88 +74,47 @@ Phone ──BT A2DP──► ESP32 ──► ring ──► I2S DMA ──► PC
 **CLIENT mode:**
 ```
 ESP-NOW RX ──► ring ──► I2S DMA ──► PCM5102 ──► TPA3116 ──► Speaker
-            (~90 ms)    (~44 ms)
+            (~136 ms, with the DMA)
 ```
 
 **Every node plays each block at the same moment**, the server included
 (D14, `lib/sync`). The server plays its own stream through its own ring and
-DMA, exactly as a client does, about 136 ms after the A2DP packet reached it:
-`JITTER_PREFILL` (24000 bytes of decoded stereo ≈ 136 ms) is what its ring
-starts from. Each packet says when its block plays on the server's speaker,
-and a client starts, then steers, onto that schedule, rather than onto a
-depth of its own. The ring itself is 32768 bytes ≈ 185 ms, which is its
-capacity, not its latency — the prefill must stay above the DMA capacity, see
-the gotchas.
+DMA, exactly as a client does, about 136 ms after the A2DP packet reached it
+(`JITTER_PREFILL`). Each packet says when its block plays on the server's
+speaker, and a client starts, then steers, onto that schedule rather than
+onto a depth of its own. The ring holds 32 KB ≈ 185 ms, which is its
+capacity, not its latency.
 
-Before 2026-09-30 the server played through the A2DP library's own 46 ms I2S
-ring, and a microphone put the clients 44–51 ms behind it: an echo between
-any two rooms. `tools/btlisten/sync.py` is that measurement.
-
-Clients get what the server plays: full-rate stereo, in a quarter of the bytes,
-through IMA ADPCM (D5). Until 2026-09-29 the mesh carried 22.05 kHz mono PCM
-instead — same bytes, no stereo, and nothing above ~11 kHz. A client with one
-speaker mixes the two channels (`M`).
+Clients get what the server plays: 44.1 kHz stereo, in a quarter of the
+bytes, through IMA ADPCM (D5). A client with one speaker mixes the two
+channels (`M`).
 
 ## Current Status
 
-The Bluetooth speaker half works on hardware: A2DP sink, I2S output to the
-PCM5102, notification sounds, volume.
+**It works, by ear and by counter.** A phone or the PC streams into a WROVER,
+which plays and forwards; any number of other nodes play the mesh — WROVERs,
+the S3, the C3, and a WROOM in client-only mode. On 2026-10-01, streaming
+into WROVER2 with the WROOM playing through a stereo across the room, it
+"works incredibly well". What stands behind that:
 
-**The ESP-NOW mesh works**, as of 2026-08-19: a WROOM sourcing and an ESP32-S3
-playing, **132,069 packets over 600 s with zero lost, overflowed, underrun,
-duplicated or resynced**. Run it yourself with `./tools/bench-mesh.ps1 -Flash`.
-As of 2026-09-14 it works with **four clients at once** (two WROVERs, S3, C3):
-zero loss on the S3 and C3 over 600 s on channel 11 while the house router was
-busy on channel 1. On channel 1 the same boards had lost up to 10% — to the
-router, not to each other; `tools/airmon/` is the sniffer that showed which.
-What a building full of routers does to it is the open question, and the plan
-for it is "Surviving the wild" in `TODO.md`.
+- **In time:** every room within 1.5 ms of the server by microphone, where
+  they were 44–51 ms apart before D14.
+- **Clock drift corrected** (D11): −30 to −58 ppm between these boards, held
+  flat by duplicating or dropping one frame at a time.
+- **The bench mesh is clean:** 600 s, zero lost, overflowed or underrun on
+  every client (`./tools/bench-mesh.ps1 -Mute`); four clients at once on
+  channel 11 with the house router busy on channel 1.
+- **Updates without a cable** (D15): the stereo node across the room takes a
+  new image over the home WiFi in about a minute.
+- **Households apart** (D12): every packet carries a mesh id. Two meshes in
+  the air, and the pairing button, have not been tested on hardware.
 
-**The Bluetooth server path works**, as of 2026-09-29: the PC streaming into
-a WROVER-E, which plays it and forwards it, and a second WROVER playing the
-mesh stream, **0.094% lost over 600 s**, and no holes a microphone could find in
-short runs. Getting there took a boot loop (`WIFI_PS_NONE` gotcha), a crash on
-connect (15 KB of internal DRAM was not enough for one L2CAP link; it is 43 KB
-now), a 46 ms I2S ring for the server's own speaker, and one finding: a server
-streaming Bluetooth loses 12–24% of its mesh frames to its own BT radio, one
-frame at a time. Every frame then went out twice, at 12 Mbps instead of 6 (D13).
-Since ADPCM each packet carries its own block and the one 11 packets back
-instead: the server drops its frames in runs of 4–5 when its link has the
-radio, and behind a streaming server, with a WROVER and an S3 both playing,
-0.7% of blocks were still holes over 600 s (2026-09-30). That 0.094% was a client with
-Bluetooth off; a Bluetooth-capable client kept scanning for a phone and lost
-4.7% until it learned to switch its controller off. What is left — the
-server's own ~3–9% — is the open problem in `TODO.md`. The PC can drive all
-of it with nobody at the keyboard (`tools/btlisten/`, and `k` to reconnect a
-reflashed server). A phone has not been tried on the new build, and range at
-12 Mbps is untested; see `TODO.md`.
-
-**Every node plays each block at the same moment**, as of 2026-09-30 (D14).
-Before, clicks through the PC put the S3 51 ms and WROVER2 44 ms behind the
-server's own speaker: a clear echo between rooms. Now the server plays
-through the same ring as its clients, every packet says when its block plays
-on the server, and each client starts and steers on that. The same
-microphone now puts the S3 **+0.8 ms** and WROVER2 **+1.5 ms** from the
-server (`tools/btlisten/sync.py`); the telemetry holds both within ±0.55 ms
-of the server's schedule over 600 s behind the PC, with no underruns and no
-jumps (`tools/btlisten/soak.py`).
-
-**Clock drift is corrected**, as of 2026-08-20 (v0.2.0). The clocks do drift —
-measured at −30.5 ppm between the WROOM and the S3, and −57.7 ppm between the
-same WROOM and an ESP32-C3, enough to drain a client's jitter buffer to an
-underrun within a 600 s run. `lib/drift/` holds the buffer at depth by
-duplicating or dropping one sample (a stereo frame since D5 changed) at a time, roughly one edit a second at
-that offset. Measured over 600 s each way on the same boards: zero underruns
-corrected, and the correction rate agrees with the uncorrected drift to within
-1.4 ppm. See `CHANGELOG.md` and D11.
-
-**Meshes are separated by a mesh id**, as of 2026-09-02: every packet carries a
-16-bit id derived from a mesh name, and a client ignores anything that is not
-its own, so two SonoLoco installations in radio range no longer join each
-other's music. Name a mesh with `g<name>` over serial; move a node into one by
-holding BOOT for three seconds at each end, with tones on the node saying what
-happened. See D12 — and note none of it has been measured on hardware yet: two
-meshes in the air, and the button itself, are both still unpressed.
+**The open problem** is the server's own radio. A WROVER streaming Bluetooth
+loses 3–12% of its own mesh frames to it, and the redundancy in every packet
+(D13) leaves about 0.5% of blocks as 2.6 ms holes. On the same recording, the
+XOR scheme already in the firmware halves that, and concealment would stop the
+rest being clicks; both are the next steps in `TODO.md`, along with what is
+not proven at all: a building full of other people's routers, and range.
 
 Where things are written down, so they stay in one place each:
 
@@ -181,21 +140,15 @@ Where things are written down, so they stay in one place each:
 The goal is for every node to be interchangeable. Only the **WROVER** meets that in
 full — it is the only module that can be a server *and* switch to being a client.
 
-**Why a WROOM has to choose.** Running BT Classic and WiFi at the same time on an
-ESP32 needs PSRAM. Without it, WiFi claims ~80 KB of the ~215 KB DRAM heap and the BT
-stack can no longer allocate its L2CAP/AVDTP buffers, so it crashes. `setupESPNow()`
-therefore bails out on a board that has BT compiled in, no PSRAM, and Bluetooth about
-to start.
+**A WROOM has to choose** because BT Classic and WiFi together need PSRAM: without
+it the BT stack runs out of DRAM and crashes, so `setupESPNow()` leaves the mesh off
+on a board about to start Bluetooth with no PSRAM. In **client-only mode** (`c`,
+kept in NVS) it never starts Bluetooth and plays the mesh instead — the WROOM at
+the stereo does. See D3. The S3, C3 and C6 have no BT Classic at all, are built
+without `-DENABLE_BLUETOOTH`, and can only ever be clients.
 
-The escape is to not start Bluetooth: a node in **client-only mode** (`c`) gets the
-radio and joins the mesh, and a WROOM becomes a real node instead of a standalone
-speaker. What it cannot be is a server, which genuinely does need both at once. See D3.
-
-The S3, C3 and C6 have the opposite problem: plenty of RAM, no BT Classic at all. They
-are compiled without `-DENABLE_BLUETOOTH` and can only ever be clients.
-
-Server and clients share one radio between BT and ESP-NOW, so mesh bandwidth is tight —
-see the bandwidth note in `TODO.md`.
+A server shares one radio between Bluetooth and ESP-NOW, and loses some of its own
+mesh frames to its Bluetooth link — see D13 and the gotchas below.
 
 ### Bill of Materials (per node)
 
@@ -236,6 +189,10 @@ see the bandwidth note in `TODO.md`.
 | XSMT | 3.3V | Soft mute OFF |
 | FMT | GND | I2S format |
 | SCK | GND | Clock generated internally |
+
+All five must be tied as shown: with XSMT low the DAC soft-mutes, and with SCK
+floating it never locks. A silent node whose counters look healthy is its DAC
+— the stereo WROOM's was, its header never soldered (2026-10-01).
 
 ### Hardware Tips
 
@@ -320,15 +277,15 @@ name per board that might be plugged in:
 |---------------|--------------|------|-------|------|
 | `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
 | `esp32stereo` | ESP32 WROOM `0A:1B:2C:3D:4E:62` + PCM5102A | COM8, first flash only | `esp32_classic` | Client-only, at the stereo's aux input with no cable to the PC: updated with `./tools/ota.ps1 -Env esp32stereo` (D15) |
-| `esp32wrover` | ESP32 WROVER-E + MAX98357A | COM20 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 (COM12, COM20, COM23 before) |
-| `esp32wrover2` | ESP32 WROVER-E + PCM5102 + TPA3116 | COM22 | `esp32_classic` | Same binary, second name so a phone can tell the two apart. COM13, COM19, COM21, COM11 before: a CH340 is numbered by USB socket, so check the MAC |
-| `esp32s3`     | ESP32-S3 + MAX98357A (since 2026-09-30) | COM9 | `esp32s3_client` | CLIENT only (no BT Classic). Plug its native USB port: on the CH343 port it flashes but prints nothing |
+| `esp32wrover` | ESP32 WROVER-E `0A:1B:2C:3D:4E:60` + MAX98357A | COM20 | `esp32_classic` | SERVER or CLIENT — the reference node |
+| `esp32wrover2` | ESP32 WROVER-E `0A:1B:2C:3D:4E:5F` + PCM5102 + TPA3116 | COM22 | `esp32_classic` | Same binary, second name so a phone can tell the two apart |
+| `esp32s3`     | ESP32-S3 `0A:1B:2C:3D:4E:61` + MAX98357A | COM9 | `esp32s3_client` | CLIENT only (no BT Classic). Plug its native USB port: on the CH343 port it flashes but prints nothing |
 | `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
 
-Ports confirmed with `pio device list` and `esptool chip_id` (2026-08-19; the
-WROVER on 2026-09-14).
-`tools/bench-mesh.ps1` does not depend on them — it discovers ports and
-identifies each chip at run time, so a new board needs no edit here.
+A CH340 is numbered by USB socket, so the WROVERs' ports move with every
+replug: check the MAC (`?`, or `pio device list`). `tools/bench-mesh.ps1` does
+not depend on the ports — it discovers them and identifies each chip at run
+time, so a new board needs no edit here.
 
 `esp32dev` and `esp32wrover` compile **the same binary**; they exist as separate names
 only so each board keeps its port. The Arduino core ships `CONFIG_SPIRAM=y` with
@@ -409,7 +366,8 @@ asked. See D15 in `docs/decisions.md`.
 
 ### Tests
 
-The ring buffer and packet sequence accounting run on the host, no board needed:
+The pure logic in `lib/` — five suites, `test_jitter`, `test_adpcm`,
+`test_mesh`, `test_drift` and `test_sync` — runs on the host, no board needed:
 
 ```bash
 pio test -e native
@@ -417,18 +375,20 @@ pio test -e native
 
 This needs a host compiler (gcc/clang/MSVC), which is *not* currently installed
 on the dev machine — see `TODO.md`. Until it is, the same tests run on a
-connected board with `pio test -e esp32dev`, using the cross-toolchain
-PlatformIO already has.
+connected board with the cross-toolchain PlatformIO already has:
+`pio test -e esp32wrover2 -f test_jitter` (any environment whose board is
+plugged in).
 
-To test the **mesh** — real boards, real radio:
+To test the **mesh** — real boards, real radio, silent:
 
 ```powershell
-./tools/bench-mesh.ps1 -Flash -Duration 600
+./tools/bench-mesh.ps1 -Flash -Duration 600 -Mute
 ```
 
 It discovers every attached ESP32, identifies each by chip, flashes the matching
 firmware, streams a synthetic 44.1 kHz stereo tone between them and reports packet loss
-and clock drift. No board limit. Full detail in `docs/bench-test.md`.
+and clock drift. No board limit. Full detail, and the Bluetooth half, in
+`docs/bench-test.md`.
 
 ### Bench mode
 
@@ -462,6 +422,7 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `e` | BT server: `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
 | `t` | `t<n>` sends each mesh frame n times (1–3) until reboot; `ESPNOW_TX_COPIES` is the default |
 | `D` | `D<n>` each packet carries the block n packets back as well (0–15, 0 = none) until reboot; on the wire, so clients follow. `MESH_REDUNDANCY_DISTANCE` is the default |
+| `X` | `X<n>` each packet carries the XOR of the blocks 1 and n back instead (2–15), and a client holding either rebuilds the other; `D<n>` switches back. Until reboot, on the wire. `MESH_REDUNDANCY_PARITY` is the default |
 | `P` | `P<us>` spaces audio packets at least that far apart (0 = send each as soon as the radio is free) until reboot; `ESPNOW_TX_PACE_US` is the default |
 | `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
 | `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks rebuilt from a later packet or a repeat copy |
@@ -583,14 +544,12 @@ Each of these was a real bug. Don't re-introduce them.
   library remembers having initialised it and skips `esp_bluedroid_init()` on
   the next `start()`, which then loops forever on "Failed to enable bluedroid"
   — the node is wedged and never becomes a speaker again.
-- **Mute by zeroing samples, not by switching an output off.** When the A2DP
-  library still wrote I2S itself, it installed its driver in `start()` and
-  uninstalled it in `end()` only while `set_stream_reader(cb, true)`. `m`
-  once turned that off, so a muted node kept the driver, and its next CLIENT
-  install failed with `ESP_ERR_INVALID_STATE` every 5 s: stuck in DISCOVERY,
-  counting the server's packets and playing none. The library's output is
-  now off for good (D14) and `m` zeroes what the ring hands to I2S, on every
-  node — the ring, the mesh and the schedule never notice.
+- **Mute by zeroing samples, not by switching an output off.** `m` once
+  switched the A2DP library's output off, the library then kept its I2S
+  driver installed, and the node's next CLIENT install failed every 5 s:
+  stuck in DISCOVERY, counting packets and playing none. `m` zeroes what the
+  ring hands to I2S, on every node, and the library's output is off for good
+  (D14).
 - **Every write to the output driver must be counted in `outFrames`, tones
   included.** The output clock (D14) reads the DMA position as that count
   modulo the buffer length; a write that bypasses it puts every later
