@@ -532,6 +532,13 @@
 // charge tens of thousands to the lost counter and inject bogus silence.
 #define SEQ_RESYNC_THRESHOLD  64
 
+// The loss trace (`L1`, lib/jitter/losstrace.h) is printed this often, at most
+// LOSS_TRACE_LINE_PKTS packets to a line. A second at 387 pkt/s is one line of
+// ~120 bytes; the trace holds ~10 s, so loop() can stall for nine before
+// anything is dropped.
+#define LOSS_TRACE_PRINT_MS    1000
+#define LOSS_TRACE_LINE_PKTS   512
+
 // If entering CLIENT mode fails (I2S unavailable), wait this long before trying
 // again. Without it, an incoming stream retriggers the attempt every loop pass
 // and thrashes BT stop/start.

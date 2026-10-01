@@ -17,6 +17,7 @@
 #include "blocks.h"
 #include "holes.h"
 #include "jitter.h"
+#include "losstrace.h"
 #include "seqtracker.h"
 
 // Small on purpose: 64 bytes means the wrap-around paths are reached in a few
@@ -660,6 +661,126 @@ static void test_parity_across_65535(void) {
 }
 
 // ---------------------------------------------------------------------------
+// LossTrace — which packets were missed, for scoring redundancy offline
+// ---------------------------------------------------------------------------
+
+// Static: a LossTrace is half a kilobyte, and the board runs these on loop()'s
+// stack.
+static LossTrace trace;
+
+static void test_trace_records_each_outcome_in_order(void) {
+    trace = LossTrace();
+    trace.add(10, 0);
+    trace.add(11, 0);
+    trace.add(14, 2);   // 12 and 13 never came
+    uint16_t start = 0;
+    uint8_t  bits[2] = {0xFF, 0xFF};
+    TEST_ASSERT_EQUAL_INT(5, trace.take(&start, bits, 64));
+    TEST_ASSERT_EQUAL_UINT16(10, start);
+    TEST_ASSERT_EQUAL_HEX8(0x0C, bits[0]);   // 10 11 12 13 14 = 0 0 1 1 0, LSB first
+    TEST_ASSERT_EQUAL_INT(0, trace.take(&start, bits, 64));
+    TEST_ASSERT_EQUAL_UINT32(0, trace.dropped);
+}
+
+static void test_trace_takes_in_pieces_without_a_seam(void) {
+    trace = LossTrace();
+    trace.add(100, 0);
+    trace.add(103, 2);   // 101, 102 lost
+    trace.add(104, 0);
+    trace.add(106, 1);   // 105 lost
+    uint16_t start = 0;
+    uint8_t  bits[1];
+    TEST_ASSERT_EQUAL_INT(3, trace.take(&start, bits, 3));
+    TEST_ASSERT_EQUAL_UINT16(100, start);
+    TEST_ASSERT_EQUAL_HEX8(0x06, bits[0]);   // 100 101 102 = 0 1 1
+    TEST_ASSERT_EQUAL_INT(4, trace.take(&start, bits, 3 + 5));
+    TEST_ASSERT_EQUAL_UINT16(103, start);
+    TEST_ASSERT_EQUAL_HEX8(0x04, bits[0]);   // 103 104 105 106 = 0 0 1 0
+    // And a new add carries on from 107.
+    trace.add(107, 0);
+    TEST_ASSERT_EQUAL_INT(1, trace.take(&start, bits, 8));
+    TEST_ASSERT_EQUAL_UINT16(107, start);
+}
+
+static void test_trace_wraps_cleanly_at_65535(void) {
+    trace = LossTrace();
+    trace.add(65534, 0);
+    trace.add(1, 2);    // 65535 and 0 lost
+    uint16_t start = 0;
+    uint8_t  bits[1];
+    TEST_ASSERT_EQUAL_INT(4, trace.take(&start, bits, 8));
+    TEST_ASSERT_EQUAL_UINT16(65534, start);
+    TEST_ASSERT_EQUAL_HEX8(0x06, bits[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, trace.dropped);
+}
+
+static void test_trace_a_resync_starts_a_new_numbering(void) {
+    // A packet that does not follow -- the server restarted -- is a break:
+    // what was not taken is dropped, and the reader sees a new first seq.
+    trace = LossTrace();
+    trace.add(10, 0);
+    trace.add(11, 0);
+    trace.add(500, 0);
+    TEST_ASSERT_EQUAL_UINT32(2, trace.dropped);
+    uint16_t start = 0;
+    uint8_t  bits[1];
+    TEST_ASSERT_EQUAL_INT(1, trace.take(&start, bits, 8));
+    TEST_ASSERT_EQUAL_UINT16(500, start);
+    TEST_ASSERT_EQUAL_HEX8(0x00, bits[0]);
+}
+
+static void test_trace_a_reader_that_falls_behind_is_a_break(void) {
+    trace = LossTrace();
+    for (int s = 0; s < LossTrace::BITS; s++) trace.add((uint16_t)s, 0);
+    TEST_ASSERT_EQUAL_INT(LossTrace::BITS, trace.pending());
+    TEST_ASSERT_EQUAL_UINT32(0, trace.dropped);
+    trace.add((uint16_t)(LossTrace::BITS + 1), 1);   // two more do not fit
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)LossTrace::BITS, trace.dropped);
+    uint16_t start = 0;
+    uint8_t  bits[1];
+    TEST_ASSERT_EQUAL_INT(2, trace.take(&start, bits, 8));
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)LossTrace::BITS, start);
+    TEST_ASSERT_EQUAL_HEX8(0x01, bits[0]);
+}
+
+static void test_trace_bits_survive_the_ring_wrapping(void) {
+    // Take most of a ring, then add past its end: every 7th packet lost.
+    trace = LossTrace();
+    uint16_t seq = 1000;
+    for (int i = 0; i < LossTrace::BITS - 10; i++) trace.add(seq++, 0);
+    static uint8_t bits[LossTrace::BITS / 8];
+    uint16_t start = 0;
+    TEST_ASSERT_EQUAL_INT(LossTrace::BITS - 10, trace.take(&start, bits, LossTrace::BITS));
+    const uint16_t first = seq;
+    for (int i = 0; i < 100; i++) {
+        if (i % 7 == 6) { seq++; trace.add(seq++, 1); i++; }
+        else            trace.add(seq++, 0);
+    }
+    const int n = trace.take(&start, bits, LossTrace::BITS);
+    TEST_ASSERT_EQUAL_UINT16(first, start);
+    TEST_ASSERT_EQUAL_INT((int)(uint16_t)(seq - first), n);
+    for (int k = 0; k < n; k++) {
+        const bool lost = (bits[k / 8] >> (k % 8)) & 1;
+        TEST_ASSERT_EQUAL_MESSAGE(k % 7 == 6, lost, "outcome out of place after the wrap");
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, trace.dropped);
+}
+
+static void test_trace_reset_forgets_without_counting(void) {
+    trace = LossTrace();
+    trace.add(10, 0);
+    trace.reset();
+    TEST_ASSERT_EQUAL_INT(0, trace.pending());
+    trace.add(20, 3);   // a first packet with losses before it: they are recorded
+    uint16_t start = 0;
+    uint8_t  bits[1];
+    TEST_ASSERT_EQUAL_INT(4, trace.take(&start, bits, 8));
+    TEST_ASSERT_EQUAL_UINT16(17, start);
+    TEST_ASSERT_EQUAL_HEX8(0x07, bits[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, trace.dropped);
+}
+
+// ---------------------------------------------------------------------------
 
 static int runAllTests(void) {
     UNITY_BEGIN();
@@ -714,6 +835,14 @@ static int runAllTests(void) {
     RUN_TEST(test_parity_needs_exactly_one_missing);
     RUN_TEST(test_parity_at_distance_one_is_nothing);
     RUN_TEST(test_parity_across_65535);
+
+    RUN_TEST(test_trace_records_each_outcome_in_order);
+    RUN_TEST(test_trace_takes_in_pieces_without_a_seam);
+    RUN_TEST(test_trace_wraps_cleanly_at_65535);
+    RUN_TEST(test_trace_a_resync_starts_a_new_numbering);
+    RUN_TEST(test_trace_a_reader_that_falls_behind_is_a_break);
+    RUN_TEST(test_trace_bits_survive_the_ring_wrapping);
+    RUN_TEST(test_trace_reset_forgets_without_counting);
 
     return UNITY_END();
 }

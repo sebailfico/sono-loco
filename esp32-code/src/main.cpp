@@ -42,6 +42,7 @@
 #include "drift.h"
 #include "holes.h"
 #include "jitter.h"
+#include "losstrace.h"
 #include "mesh.h"
 #include "seqtracker.h"
 #include "sync.h"
@@ -723,6 +724,15 @@ static volatile uint32_t rxRecovered = 0;
 // `late=` in `l`, which resets it.
 static volatile uint32_t rxLate = 0;
 
+// The outcome of every packet, lost or heard, for scoring redundancy schemes
+// offline on one recording (lib/jitter/losstrace.h, tools/btlisten/losstrace.py).
+// Off until `L1`; loop() prints what accumulated once a second as `[LT]`
+// lines, about 120 bytes/s at 387 pkt/s. add() runs in the receive callback,
+// take() in loop(), hence the lock.
+static portMUX_TYPE      traceMux = portMUX_INITIALIZER_UNLOCKED;
+static LossTrace         rxTrace;
+static volatile bool     traceOn  = false;
+
 // Lock onto the first node we hear so two simultaneous servers can never
 // interleave their streams into one jitter buffer.
 static uint8_t          lockedSender[6] = {0};
@@ -908,6 +918,11 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     if (repeat) rxRecovered++;   // the original was lost and the copy stood in
     const uint32_t run = seqTracker.lost - lostBefore;
     if (run) rxLossRuns[run < 8 ? run - 1 : 7]++;
+    if (traceOn) {
+        portENTER_CRITICAL(&traceMux);
+        rxTrace.add(seq, run);
+        portEXIT_CRITICAL(&traceMux);
+    }
 
     // What was missed goes in as silence, in playing order, so playback keeps
     // its timing instead of splicing the stream shorter on every loss -- and
@@ -1731,6 +1746,9 @@ static void resetPlayState() {
     rxHoles.clear();
     rxStore.clear();
     seqTracker.reset();
+    portENTER_CRITICAL(&traceMux);
+    rxTrace.reset();
+    portEXIT_CRITICAL(&traceMux);
     driftCtl.reset(millis());
     srvCtl.reset(millis());
     syncCtl.reset(millis());
@@ -2686,6 +2704,39 @@ static void benchIdentify() {
 }
 
 /**
+ * The loss trace accumulated since the last call, once a second while `L1`:
+ * `[LT] t=<ms> s=<seq> n=<count> drop=<total> <hex>`, a bit per packet from
+ * s= on, LSB of each byte first, 1 = lost. A line whose s= does not follow
+ * the last one's s= + n= is a break -- a resync, a new stream, or this falling
+ * behind -- and drop= counts what breaks cost. tools/btlisten/losstrace.py
+ * reads it.
+ */
+static void traceService() {
+    static unsigned long lastMs = 0;
+    if (!traceOn || (long)(millis() - lastMs) < (long)LOSS_TRACE_PRINT_MS) return;
+    lastMs = millis();
+    static const char HEX_DIGITS[] = "0123456789abcdef";
+    uint8_t bits[LOSS_TRACE_LINE_PKTS / 8];
+    char    hex[LOSS_TRACE_LINE_PKTS / 4 + 1];
+    for (int lines = 0; lines < LossTrace::BITS / LOSS_TRACE_LINE_PKTS; lines++) {
+        uint16_t start;
+        portENTER_CRITICAL(&traceMux);
+        const int      n       = rxTrace.take(&start, bits, LOSS_TRACE_LINE_PKTS);
+        const uint32_t dropped = rxTrace.dropped;
+        portEXIT_CRITICAL(&traceMux);
+        if (n == 0) break;
+        const int bytes = (n + 7) / 8;
+        for (int i = 0; i < bytes; i++) {
+            hex[2 * i]     = HEX_DIGITS[bits[i] >> 4];
+            hex[2 * i + 1] = HEX_DIGITS[bits[i] & 0x0F];
+        }
+        hex[2 * bytes] = '\0';
+        DEBUG_SERIAL.printf("[LT] t=%lu s=%u n=%d drop=%lu %s\n", (unsigned long)lastMs,
+                            (unsigned)start, n, (unsigned long)dropped, hex);
+    }
+}
+
+/**
  * Read the rest of a command line, for the one command that takes an argument.
  *
  * Bounded by a short deadline rather than by a newline alone, so a bare `g`
@@ -2723,6 +2774,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   m  mute this node's speaker until reboot (the mesh is untouched)
  *   M  toggle mixing a client's stereo to mono, for one speaker (persists)
  *   l  client: print and reset the lost-run histogram and `rec`
+ *   L  client: `L1` prints which packets were lost, once a second, `L0` stops
  *   t  `t<n>` sends each mesh frame n times, 1..3, until reboot
  *   P  `P<us>` minimum spacing between audio packets, 0 = none, until reboot
  *   D  `D<n>` each packet also carries the block n packets back, until reboot
@@ -2821,6 +2873,21 @@ static void benchServiceSerial() {
                 }
                 DEBUG_SERIAL.println();
                 break;
+            case 'L': {
+                // Explicit on and off, not a toggle: a script that cannot
+                // see the state must not be able to flip it the wrong way.
+                char line[4];
+                benchReadLine(line, sizeof(line));
+                if (line[0] == '0' || line[0] == '1') {
+                    portENTER_CRITICAL(&traceMux);
+                    rxTrace.reset();
+                    portEXIT_CRITICAL(&traceMux);
+                    traceOn = line[0] == '1';
+                }
+                DEBUG_SERIAL.printf("[LT] trace=%d dropped=%lu\n", traceOn ? 1 : 0,
+                                    (unsigned long)rxTrace.dropped);
+                break;
+            }
             case 't': {
                 char line[8];
                 benchReadLine(line, sizeof(line));
@@ -3138,6 +3205,7 @@ void loop() {
     // Always listening for host commands, in every mode — this is how a node is
     // put into bench mode in the first place.
     benchServiceSerial();
+    traceService();
     benchServiceSource();
     meshServiceButton();
     meshServicePairing();
