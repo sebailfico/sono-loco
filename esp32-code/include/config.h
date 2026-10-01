@@ -82,7 +82,14 @@
 // The tones use BT_SAMPLE_RATE directly. Connect/disconnect tones are written
 // into an I2S driver that A2DP configured, so the tone generator cannot pick its
 // own rate — there is deliberately no separate TONE_SAMPLE_RATE to drift from it.
-#define TONE_AMPLITUDE   500     // peak amplitude of a 16-bit tone sample
+//
+// TONE_AMPLITUDE is the peak of a 16-bit tone sample, and it depends on the amp
+// behind the DAC, so a node may set its own in platformio.ini. 500 (-36 dBFS)
+// was chosen for a TPA3116, whose gain is high; into a MAX98357A at its 9 dB
+// default the same tone is under a milliwatt, and those nodes set 4000.
+#ifndef TONE_AMPLITUDE
+#define TONE_AMPLITUDE   500
+#endif
 #define TONE_FADE_MS     5       // ramp in/out, kills the click at tone edges
 
 // ============================================================================

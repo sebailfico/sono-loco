@@ -3132,7 +3132,10 @@ void setup() {
     LOG_INFO("Heap: "    + String(ESP.getFreeHeap()) + " bytes");
     LOG_INFO("PSRAM: "   + String(ESP.getPsramSize()) + " bytes");
 
-    // Startup sound — only on nodes with a DAC connected (BT-capable nodes).
+    // Startup sound, on every node: a client-only speaker is plugged in by
+    // somebody who wants to hear that it is alive as much as a server's is.
+    // (It used to sit under ENABLE_BLUETOOTH, from when only BT nodes had a
+    // DAC.) A node with no DAC drives three idle pins for a second.
     // Skipped in bench mode: it would delay the first telemetry line and it is
     // played through an I2S driver that the client path is about to reconfigure.
     //
@@ -3141,13 +3144,11 @@ void setup() {
     // coming and going -- twice per update, on a node that may be playing into
     // a stereo across the house (D15) -- or `c`, `n`, or the panic before a
     // rollback.
-#ifdef ENABLE_BLUETOOTH
     if (!benchMode && esp_reset_reason() == ESP_RST_POWERON) {
         initI2SForTones();
         playStartupSound();
         deinitI2SForTones();
     }
-#endif
 
     DriftController::Config dcfg;
     dcfg.targetBytes    = DRIFT_TARGET_BYTES;
