@@ -362,11 +362,15 @@ try {
 
     # Answering the second request is what kept the image (otaRebootIntoUpdate),
     # so pending=0 here is expected, not evidence.
+    # The slot as well as the version: an image of the version already running
+    # passes the version check whether or not it was ever booted.
     $fw = Get-Field $after 'fw'
     $rolledBack = Get-Field $after 'rolledback'
-    if ($fw -eq $version) {
-        Write-Host "  PASS $Target runs $fw, and keeps it" -ForegroundColor Green
-    } elseif ($rolledBack -ne '-') {
+    $slotBefore = Get-Field $before 'app'
+    $slotAfter  = Get-Field $after 'app'
+    if ($fw -eq $version -and $slotAfter -ne $slotBefore) {
+        Write-Host "  PASS $Target runs $fw from $slotAfter, and keeps it" -ForegroundColor Green
+    } elseif ($slotAfter -eq $slotBefore -or $rolledBack -ne '-') {
         Write-Host "  FAIL the new image was rolled back ($rolledBack); $Target is back on $fw" -ForegroundColor Red
         exit 1
     } else {
