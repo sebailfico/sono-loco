@@ -381,11 +381,13 @@ request over the mesh:
 ```
 
 `ota.ps1` builds the image, has the relay broadcast `U<room name>`, finds the
-node on the LAN when it reboots into **update mode** (two beeps), checks it is the
-node the image was built for, uploads it (a rising tone when it is written), and
-then asks again to read the new version back. A falling tone means update mode
-gave up — no WiFi stored, a wrong password, or five minutes with no upload — and
-the node is back on the mesh.
+node on the LAN when it reboots into **update mode**, checks it is the node the
+image was built for, uploads it, and then asks again to read the new version
+back. All of it is silent — the node may be playing into a stereo — so the
+script's output is the report. If update mode gives up (no WiFi stored, a wrong
+password, five minutes with no upload) the node goes back on the mesh by itself.
+The startup sound, likewise, plays only on a power-on, not on the restarts an
+update makes.
 
 A new image is on probation until it has run a minute with its radio up; any
 reset before that — a crash, a hang, a power cut — boots the previous one. So an

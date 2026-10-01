@@ -799,6 +799,16 @@ firmware can. A Raspberry Pi next to the node running esptool's RFC 2217
 server — little software, but a Pi 1 has no WiFi. `espota` (ArduinoOTA) — needs
 the board to connect back to the PC, which Windows' firewall blocks by default.
 
+**Amended 2026-10-01 — silent.** Update mode first gave feedback with the
+pairing tones: two beeps entering, rising when written, falling when it gave
+up. With the startup sound on every reboot, one update and its read-back came
+to six or seven tones — through a stereo, in a room somebody may be in, for an
+operation driven from a PC that already reports every step. Update mode now
+makes no sound, and the startup sound plays only on a power-on
+(`ESP_RST_POWERON`, which the EN button and a USB flash also give), never on a
+software restart. Pairing keeps its tones: there a person is standing at the
+node, and the tones are their only console.
+
 **What would change this:** a node out of reach of the home WiFi — then the
 ESP-NOW relay above. A second person on the LAN who should not be able to flash
 a speaker — then a shared secret with the request and the upload. A second

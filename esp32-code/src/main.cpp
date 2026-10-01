@@ -2058,9 +2058,9 @@ static void meshServiceButton() {
 //   1. `U<name>` on any node that is on USB broadcasts an update request for
 //      the node with that ROOM_NAME or MAC, in this mesh only.
 //   2. The named node reboots into update mode: joins the network stored by
-//      `W`, answers GET / with its room name, and plays the two pairing beeps.
-//   3. The PC posts the image to /update. The rising tone means it was
-//      written and verified; the node then boots it.
+//      `W`, and answers GET / with its room name -- in silence, see otaLeave().
+//   3. The PC posts the image to /update. Once it is written and verified
+//      the node boots it.
 //   4. The new image is on probation until it has run OTA_CONFIRM_MS with its
 //      radio up. Until then any reset boots the previous image instead.
 //
@@ -2197,15 +2197,18 @@ static void otaServiceRequest() {
 
 enum OtaOutcome { OTA_UPDATED, OTA_FAILED, OTA_DISMISSED };
 
-/** Leave update mode, saying how it went on the speaker, and boot whatever is due. */
+/**
+ * Leave update mode and boot whatever is due.
+ *
+ * Without a sound, whichever way it went. The node is plugged into somebody's
+ * stereo, and the PC that asked already knows the outcome -- it reads it over
+ * HTTP. The first version played the pairing tones here and on the way in,
+ * which with the startup sound came to six tones into a living room for one
+ * update. Pairing keeps them because there a person is standing at the node.
+ */
 [[noreturn]] static void otaLeave(OtaOutcome how) {
     DEBUG_SERIAL.printf("[OTA] leaving update mode updated=%d\n", how == OTA_UPDATED ? 1 : 0);
     DEBUG_SERIAL.flush();
-    // The pairing sounds, which a user without a console already knows:
-    // rising for done, falling for nothing happened. A PC that only came to
-    // read the version and sent /exit gets no sound: nothing went wrong.
-    if (how == OTA_UPDATED) meshPlayFeedback(MESH_FB_PAIRED);
-    if (how == OTA_FAILED)  meshPlayFeedback(MESH_FB_CLOSED);
     ESP.restart();
     while (true) {}
 }
@@ -2329,7 +2332,6 @@ static esp_err_t otaHttpExit(httpd_req_t *req) {
     char info[256];
     otaDescribe(info, sizeof(info));
     DEBUG_SERIAL.printf("[OTA] update mode %s\n", info);
-    meshPlayFeedback(MESH_FB_OPEN);   // two beeps: listening
 
     wifi_config_t wc = {};
     prefs.begin(PREF_NAMESPACE, true);
@@ -3009,8 +3011,14 @@ void setup() {
     // Startup sound — only on nodes with a DAC connected (BT-capable nodes).
     // Skipped in bench mode: it would delay the first telemetry line and it is
     // played through an I2S driver that the client path is about to reconfigure.
+    //
+    // And only on a power-on (the EN button and a USB flash count as one). A
+    // software restart is not somebody plugging the node in: it is update mode
+    // coming and going -- twice per update, on a node that may be playing into
+    // a stereo across the house (D15) -- or `c`, `n`, or the panic before a
+    // rollback.
 #ifdef ENABLE_BLUETOOTH
-    if (!benchMode) {
+    if (!benchMode && esp_reset_reason() == ESP_RST_POWERON) {
         initI2SForTones();
         playStartupSound();
         deinitI2SForTones();
