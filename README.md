@@ -319,6 +319,7 @@ name per board that might be plugged in:
 | Environment   | Board        | Port | Build | Role |
 |---------------|--------------|------|-------|------|
 | `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
+| `esp32stereo` | ESP32 WROOM `0A:1B:2C:3D:4E:62` + PCM5102A | COM8, first flash only | `esp32_classic` | Client-only, at the stereo's aux input with no cable to the PC: updated with `./tools/ota.ps1 -Env esp32stereo` (D15) |
 | `esp32wrover` | ESP32 WROVER-E + MAX98357A | COM20 | `esp32_classic` | SERVER or CLIENT — the reference node. Attached 2026-09-14 (COM12, COM20, COM23 before) |
 | `esp32wrover2` | ESP32 WROVER-E + PCM5102 + TPA3116 | COM22 | `esp32_classic` | Same binary, second name so a phone can tell the two apart. COM13, COM19, COM21, COM11 before: a CH340 is numbered by USB socket, so check the MAC |
 | `esp32s3`     | ESP32-S3 + MAX98357A (since 2026-09-30) | COM9 | `esp32s3_client` | CLIENT only (no BT Classic). Plug its native USB port: on the CH343 port it flashes but prints nothing |
