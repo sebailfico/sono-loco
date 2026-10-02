@@ -159,7 +159,7 @@ here follows from three measured facts (2026-09-14, `CHANGELOG.md`):
       less — 114-frame blocks could be halved at the cost of twice the
       packets and headers, or a household could choose mono. Measure under
       load before trading audio for it.
-- [ ] **Test in an actual building.** Take the boards and the monitor to the
+- [ ] **Test in an actual building.** Take the boards and the monitor to a
       real flat. Survey first, then a 600 s run on the channel the survey
       picks, with the monitor logging beside it, and keep both logs. Until
       then every number in this file is one room, one router.

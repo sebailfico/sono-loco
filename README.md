@@ -414,7 +414,7 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
 | `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
 | `j` | BT server: play the connect jingle now, the way a connection does — into the server's own output, from `loop()`, so it cannot interleave with the stream; the ring re-arms afterwards and the clients follow |
-| `k` | BT server: `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, the way a headset reconnects to a phone. What lets a reflashed server get its link back with nobody clicking Connect; the PC here is `aa:bb:cc:dd:ee:ff` |
+| `k` | BT server: `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, the way a headset reconnects to a phone. What lets a reflashed server get its link back with nobody clicking Connect; the PC's own Bluetooth address goes here |
 | `V` | BT server: `V<0..127>` sets the A2DP volume, as a phone's slider would. Applied before forwarding, so it moves every room; a server that dialled in with `k` starts at 1 |
 | `m` | mute this node's speaker until reboot — zeroes what its ring hands to I2S, on a server and a client alike; the mesh and every timing are untouched. How a mic hears one node alone, and how `bench-mesh.ps1 -Mute` runs silent |
 | `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS |
