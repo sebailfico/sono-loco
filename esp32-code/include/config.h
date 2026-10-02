@@ -182,6 +182,28 @@
 #define OTA_REQUEST_COPIES       25
 #define OTA_REQUEST_INTERVAL_MS  200
 
+// Commands over the mesh, `@<target> <command>` (D16). Repeated like the
+// update request, but a command is for a node that is up and listening rather
+// than one that may still be booting: fewer copies, closer together. The node
+// named runs the first copy it hears and ignores the rest.
+#define MESH_COMMAND_COPIES       5
+#define MESH_COMMAND_INTERVAL_MS  100
+// A command sent to `*` reaches every node in the same instant, and broadcast
+// is never retried: each node answers after a random part of this, so the
+// house does not answer all at once and drown itself out. Shorter than the
+// copies take to arrive, so that every node has later copies left to answer
+// again for -- the retry an answer otherwise lacks.
+#define MESH_REPLY_SPREAD_MS      300
+// How long the asking node prints replies for, from the moment it asks. Has
+// to cover the copies, the spread, and the command itself running.
+#define MESH_REPLY_WAIT_MS        2500
+// Most a command's answer may be, in bytes: one to four packets. On the
+// running node's stack while the command runs, never kept.
+#define MESH_REPLY_CAPTURE        768
+// Replies heard but not yet printed, on the asking node only: made the first
+// time it asks, about 2 KB, so a node nobody types `@` into never pays for it.
+#define MESH_REPLY_QUEUE_DEPTH    8
+
 // ============================================================================
 // ESP-NOW Mesh
 // ============================================================================
@@ -599,7 +621,9 @@
 // ============================================================================
 // Debug
 // ============================================================================
-#define DEBUG_SERIAL    Serial
+// Not Serial itself: main.cpp's Console, which is the serial port plus a copy
+// of what a command run over the mesh prints, for its reply (D16).
+#define DEBUG_SERIAL    debugOut
 #define DEBUG_BAUD_RATE 115200
 
 // Native USB serial only (S3, C3; main.cpp setup()): transmit buffer bytes,

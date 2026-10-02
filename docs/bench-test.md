@@ -298,14 +298,17 @@ does not exist (`W<name>` and an empty password line), in ~35 s with
 `reason=wifi`. Either way the node is back on the mesh by itself — and the
 dummy SSID stays stored until `ota-wifi.ps1` replaces it.
 
-**A node across the house.** It has no serial port, and a client never
-transmits, so its reception is read with `-Status` while a stream plays at it:
-`./tools/ota.ps1 -Env esp32stereo -Relay COM9 -Status` prints `rssi=` (the home
-WiFi) and `before=CLIENT up= rx= lost= und= ... runs=` (the mesh, up to the
-request). The relay can be any node on USB, a client of the same stream
-included. Behind `bench-mesh.ps1`, keep the relay out of the harness (`-Ports`)
-and ask before the harness stops the source: a node back in DISCOVERY has
-already zeroed its counters.
+**A node across the house.** It has no serial port, but it answers over the
+mesh (D16): `./tools/mesh.ps1` lists every node with what it is receiving, and
+`./tools/mesh.ps1 -Target SonoLoco-Stereo -Command r` prints its full status
+line, without stopping it. Its home WiFi signal still needs `-Status`, which
+reboots it into update mode while a stream plays at it: `./tools/ota.ps1 -Env
+esp32stereo -Relay COM9 -Status` prints `rssi=` (the home WiFi) and
+`before=CLIENT up= rx= lost= und= ... runs=` (the mesh, up to the request). The
+relay can be any node on USB, a client of the same stream included. Behind
+`bench-mesh.ps1`, keep the relay out of the harness (`-Ports`) and ask before
+the harness stops the source: a node back in DISCOVERY has already zeroed its
+counters.
 
 ## By hand, with a phone
 

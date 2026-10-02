@@ -825,3 +825,98 @@ a speaker — then a shared secret with the request and the upload. A second
 household mesh in range whose members matter — the same. Or a build outgrowing
 1.875 MB: the build fails when it does, and the choice is then a smaller
 image or bigger slots on boards with more than 4 MB of flash.
+
+---
+
+## D16 — Every command runs over the mesh, through the same dispatcher
+
+**Decided:** 2026-10-02. **Status:** built; see `CHANGELOG.md` for what it
+was measured against.
+
+A node with no cable could be updated (D15) but not told anything: its volume
+trim, the one setting a speaker in a living room most needs, was reachable only
+over USB, and nothing could say which nodes were in the mesh at all, because a
+client never transmitted.
+
+Now any serial command runs on another node of the same mesh: `@<target>
+<command>` typed on any node on USB, where the target is a room name, a MAC or
+`*` for every node. The command travels in the control group D15 made for the
+update request; the node named runs it through `commandRun()`, the very function
+its own serial port calls; and what it printed comes back as replies, which the
+asking node prints as `[@<name>] <line>`. `N` was added with it: one line per
+node — mode, source, loss — so `@* N` is the mesh's topology, and
+`tools/mesh.ps1` draws it.
+
+**Why one dispatcher, and the output captured.** The alternative was a mesh
+command per setting — a trim packet, a status packet — each with its own
+encoder, handler and reply. Every command would then exist twice, the remote
+half would fall behind the serial half, and a command added later would not be
+reachable until somebody wrote its second half. Instead the serial front end
+reads a letter and its argument and hands both to `commandRun()`; the mesh
+hands it the same. The commands report the way they always have, by printing:
+`DEBUG_SERIAL` is a thin `Console` over `Serial` that, while a remote command
+runs, also copies what *that task* prints into a buffer on its stack. A command
+added to the switch tomorrow works over the mesh with nothing more, and the
+capture costs nothing between commands.
+
+**Why clients transmit now.** Before this a client never sent anything, so that
+audio had the air to itself. Replies are only ever answers: a few packets per
+question, against 387 audio packets a second. Measured with a WROVER client of
+a bench stream, both nodes asking `@* N` 20 times each in 105 s: 40 of 40 asks
+answered by both, and the client received 40,747 packets with none lost and no
+underrun. A question to `*` reaches every node at the same instant, and
+broadcast is never retried, so each node waits a random part of
+`MESH_REPLY_SPREAD_MS` before answering rather than all at once.
+
+**Why an answer is sent again.** A question goes out `MESH_COMMAND_COPIES`
+times; its answer went out once, and 2 single-packet answers in 10 were lost in
+the minute after a reflash, while a phone was paging the asking WROVER to
+reconnect — Bluetooth takes the radio from WiFi on these boards. The node that
+answered now keeps the answer on the heap for as long as copies of the question
+can still arrive, and answers each later copy again; the asking node prints
+each part once (`meshReplyKey`). That is the retry the answer lacked, at no
+static cost, and it needs no acknowledgement: a later copy is itself the sign
+that the asker may not have heard. After it, 20 of 20 named and 10 of 10 `*`
+questions were answered, each line printed once.
+
+**Why the update request keeps its own format.** `@<name> U` does the same
+thing, but the update request is how a node on older firmware gets the firmware
+that understands commands — it cannot itself be a command. `U<name>` therefore
+still sends D15's packet; it shares the outbox (one request at a time, repeated)
+and the receive handler with commands, which also fixed the update request
+being queued as a 248-byte packet into a queue of 252-byte items.
+
+**What a command may not do.** Sent to `*`, nothing that reboots a node or
+takes it off the mesh — `U b n c g p o w`: each would silence the house from
+one keystroke, and only a node named by the person who meant it should do that.
+`W` never travels, to anyone: the password would be broadcast in the clear. `@`
+does not travel either; a node does not relay for another. And `U` sent over
+the mesh is refused by a node serving a phone, as D15's request is.
+
+Control traffic is now heard by a server too: a listing has to hear from the
+node every client is locked to, and a server on USB has to hear the replies to
+its own questions. It is checked before the server's early return in the
+receive callback, and touches nothing the audio path reads.
+
+**Why not Bluetooth Low Energy.** Every board here has BLE, and a phone could
+talk to one node with it — but only to one. It shares the 2.4 GHz radio with
+ESP-NOW, taking airtime from the audio, and costs RAM a streaming Bluetooth
+server does not have (21–23 KB free, D15). If a phone app is ever wanted, BLE
+to one node that is not streaming, which then asks the mesh exactly as a node on
+USB does now, is the shape it would take; the commands would not change.
+
+**Costs.** 288 bytes of static RAM on the classic build and about 4 KB of
+flash. The asking node creates a ~2 KB queue for replies the first time it
+asks; a node nobody types `@` into never does. The answering node holds its
+last answer on the heap for half a second. No signal strength in `N`: the receive
+callback on this core (IDF 4.4) carries none, and loss is what the audio cares
+about.
+
+**What would change this:** a command whose answer outgrows
+`MESH_REPLY_CAPTURE` (768 bytes, four packets). A need to set something on many
+nodes with certainty — today nothing is acknowledged, and a missing answer is
+the only sign a command was not heard; asking again is the remedy, which a
+per-node acknowledgement and retry would replace. A second person on the mesh
+who should not be able to change settings — then a shared secret, as D15 would
+need for the same reason. Or a core on IDF 5, which would put the RSSI of the
+server's packets into `N`.

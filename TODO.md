@@ -212,13 +212,16 @@ polish.
       something. A slow idle beacon — one a second, say, outside pairing too —
       would let a client show that its mesh exists. Weigh it against the radio
       time it costs and against giving a neighbour a constant signal to see.
-- [ ] **Provisioning without a serial console.** `g<name>` needs a USB cable and
-      pairing needs physical access to a button; neither is what somebody with
-      six speakers in four rooms wants. A phone app over BLE, or a temporary
-      SoftAP with a captive page, would set the mesh name (and `ROOM_NAME`,
-      client-only mode and the trim) on a board already on the wall. Note that
-      a BT-capable node running BLE alongside A2DP re-opens the coexistence
-      question D3 is about, so this is not free on a WROVER.
+- [ ] **Provisioning without a PC.** Since D16 every setting of a board already
+      on the wall — the trim, the mesh name (`@<name> g<mesh>`), client-only
+      mode — can be changed from any node on USB, over the mesh. What is left
+      is doing it with no PC at all, which is what somebody with six speakers in
+      four rooms wants. A phone app over BLE to one node, which then asks the
+      mesh exactly as a node on USB does (D16), or a temporary SoftAP with a
+      captive page. `ROOM_NAME` is still a build setting and would have to
+      become an NVS one. Note that a BT-capable node running BLE alongside A2DP
+      re-opens the coexistence question D3 is about, so this is not free on a
+      WROVER.
 - [ ] **Payload encryption, if privacy ever matters.** The mesh id keeps a
       neighbour's player out, not a neighbour's receiver: ESP-NOW encrypts only
       unicast frames (per-peer LMK), and this design is broadcast by

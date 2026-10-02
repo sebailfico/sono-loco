@@ -82,13 +82,8 @@ $projectDir = Join-Path $repoRoot 'esp32-code'
 # Helpers
 # ---------------------------------------------------------------------------
 
-function Get-PioExe {
-    $c = Get-Command pio -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    $p = Join-Path $env:USERPROFILE '.platformio\penv\Scripts\pio.exe'
-    if (Test-Path $p) { return $p }
-    throw "PlatformIO not found on PATH or at $p"
-}
+# Get-PioExe, Open-Port, Close-Port, Wait-ForLine, Get-Field, Find-Relay
+. (Join-Path $PSScriptRoot 'common.ps1')
 
 function Get-RoomName {
     param([string]$EnvName)
@@ -97,73 +92,6 @@ function Get-RoomName {
     foreach ($line in $ini) {
         if ($line -match '^\s*\[(.+)\]') { $inSection = ($matches[1] -eq "env:$EnvName"); continue }
         if ($inSection -and $line -match "ROOM_NAME='`"(.+)`"'") { return $matches[1] }
-    }
-    return $null
-}
-
-function Open-Port {
-    param([string]$Port)
-    $sp = New-Object System.IO.Ports.SerialPort($Port, 115200, 'None', 8, 'One')
-    $sp.ReadTimeout  = 200
-    $sp.WriteTimeout = 500
-    # As in bench-mesh.ps1: on the classic auto-reset circuit DTR drives GPIO0
-    # and RTS drives EN, so asserting either can reset the relay mid-request.
-    $sp.DtrEnable = $false
-    $sp.RtsEnable = $false
-    $sp.Open()
-    return $sp
-}
-
-function Close-Port {
-    param($Sp)
-    if ($null -eq $Sp) { return }
-    try { if ($Sp.IsOpen) { $Sp.Close() } } catch {}
-    try { $Sp.Dispose() } catch {}
-}
-
-function Wait-ForLine {
-    param($Sp, [string]$Pattern, [int]$TimeoutSec = 5)
-    $buf = ''
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        try { $buf += $Sp.ReadExisting() } catch {}
-        foreach ($l in ($buf -split "`n")) {
-            if ($l -match $Pattern) { return $l.Trim() }
-        }
-        Start-Sleep -Milliseconds 50
-    }
-    return $null
-}
-
-function Get-Field {
-    param([string]$Line, [string]$Key)
-    if ($Line -match "(?:^|\s)$Key=(\S+)") { return $matches[1] }
-    return $null
-}
-
-<# A node on USB with ESP-NOW up, that is not the node being updated. #>
-function Find-Relay {
-    param([string]$Want)
-    $pio  = Get-PioExe
-    $json = & $pio device list --json-output 2>$null
-    $ports = @()
-    foreach ($d in ($json | ConvertFrom-Json)) {
-        # The same bridges bench-mesh.ps1 looks for: CP210x, CH34x, FTDI, Espressif native.
-        if ($d.hwid -match 'VID:PID=(10C4|1A86|0403|303A)') { $ports += $d.port }
-    }
-    foreach ($p in ($ports | Sort-Object -Unique)) {
-        $sp = $null
-        try { $sp = Open-Port $p } catch { Write-Host "  $p busy, skipped"; continue }
-        Start-Sleep -Milliseconds 300
-        $null = $sp.ReadExisting()
-        $sp.Write('?')
-        $id = Wait-ForLine -Sp $sp -Pattern '\[BENCH\] id ' -TimeoutSec 3
-        if ($id -and (Get-Field $id 'espnow') -eq '1' -and (Get-Field $id 'name') -ne $Want -and
-            (Get-Field $id 'mac') -ne $Want) {
-            Write-Host ("  relay {0}: {1} mesh={2}" -f $p, (Get-Field $id 'name'), (Get-Field $id 'mesh'))
-            return $sp
-        }
-        Close-Port $sp
     }
     return $null
 }
@@ -303,7 +231,7 @@ try {
         $relaySp = Open-Port $Relay
         Start-Sleep -Milliseconds 300
     } else {
-        $relaySp = Find-Relay -Want $Target
+        $relaySp = Find-Relay -Exclude $Target
         if (-not $relaySp) { throw 'No node on USB with the mesh up to relay the request (or pass -Relay COMx)' }
     }
 

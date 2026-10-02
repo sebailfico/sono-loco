@@ -215,6 +215,167 @@ void test_a_target_is_read_to_its_length_only(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Commands over the mesh
+// ---------------------------------------------------------------------------
+
+static bool split(const char *line, const char *wantTarget, const char *wantText) {
+    const char *t = nullptr, *c = nullptr;
+    size_t tl = 0, cl = 0;
+    if (!meshSplitCommandLine(line, &t, &tl, &c, &cl)) return false;
+    return tl == strlen(wantTarget) && memcmp(t, wantTarget, tl) == 0 &&
+           cl == strlen(wantText) && memcmp(c, wantText, cl) == 0;
+}
+
+/** What follows `@` on the serial line: a target, a space, the command. */
+void test_a_command_line_is_a_target_and_a_command(void) {
+    TEST_ASSERT_TRUE(split("SonoLoco-C3 v-20", "SonoLoco-C3", "v-20"));
+    TEST_ASSERT_TRUE(split("* N", "*", "N"));
+    TEST_ASSERT_TRUE(split("  SonoLoco-C3   v-20  \r", "SonoLoco-C3", "v-20"));
+    // An argument keeps its own spaces: `g` takes a mesh name, and one may have them.
+    TEST_ASSERT_TRUE(split("SonoLoco-C3 gcasa  rossi", "SonoLoco-C3", "gcasa  rossi"));
+}
+
+void test_a_command_line_needs_both_halves(void) {
+    const char *t, *c;
+    size_t tl, cl;
+    TEST_ASSERT_FALSE(meshSplitCommandLine("", &t, &tl, &c, &cl));
+    TEST_ASSERT_FALSE(meshSplitCommandLine("SonoLoco-C3", &t, &tl, &c, &cl));
+    TEST_ASSERT_FALSE(meshSplitCommandLine("SonoLoco-C3   ", &t, &tl, &c, &cl));
+    TEST_ASSERT_FALSE(meshSplitCommandLine(nullptr, &t, &tl, &c, &cl));
+
+    char longTarget[MESH_TARGET_MAX + 8];
+    memset(longTarget, 'a', MESH_TARGET_MAX + 1);
+    strcpy(longTarget + MESH_TARGET_MAX + 1, " ?");
+    TEST_ASSERT_FALSE(meshSplitCommandLine(longTarget, &t, &tl, &c, &cl));
+
+    char longText[MESH_COMMAND_MAX + 8] = "X ";
+    memset(longText + 2, 'v', MESH_COMMAND_MAX + 1);
+    longText[MESH_COMMAND_MAX + 3] = '\0';
+    TEST_ASSERT_FALSE(meshSplitCommandLine(longText, &t, &tl, &c, &cl));
+    longText[MESH_COMMAND_MAX + 2] = '\0';   // exactly the limit
+    TEST_ASSERT_TRUE(meshSplitCommandLine(longText, &t, &tl, &c, &cl));
+}
+
+void test_a_command_survives_the_air(void) {
+    uint8_t wire[128];
+    const size_t n = meshPackCommand(wire, sizeof(wire), 0xBEEF, "SonoLoco-C3", 11, "v-20", 4);
+    TEST_ASSERT_EQUAL(3 + 11 + 4, n);
+
+    MeshCommand cmd;
+    TEST_ASSERT_TRUE(meshUnpackCommand(wire, n, &cmd));
+    TEST_ASSERT_EQUAL_HEX16(0xBEEF, cmd.id);
+    TEST_ASSERT_EQUAL(11, cmd.targetLen);
+    TEST_ASSERT_EQUAL_MEMORY("SonoLoco-C3", cmd.target, 11);
+    TEST_ASSERT_EQUAL(4, cmd.textLen);
+    TEST_ASSERT_EQUAL_MEMORY("v-20", cmd.text, 4);
+}
+
+/** A request that does not fit is not sent cut short: half a command is another command. */
+void test_a_command_that_does_not_fit_is_not_packed(void) {
+    uint8_t wire[16];
+    TEST_ASSERT_EQUAL(0, meshPackCommand(wire, sizeof(wire), 1, "SonoLoco-C3", 11, "v-20", 4));
+    TEST_ASSERT_EQUAL(0, meshPackCommand(wire, sizeof(wire), 1, "", 0, "?", 1));
+    TEST_ASSERT_EQUAL(0, meshPackCommand(wire, sizeof(wire), 1, "*", 1, "", 0));
+}
+
+void test_a_malformed_command_is_refused(void) {
+    MeshCommand cmd;
+    const uint8_t noText[] = {1, 0, 2, 'C', '3'};
+    TEST_ASSERT_FALSE(meshUnpackCommand(noText, sizeof(noText), &cmd));
+    const uint8_t noTarget[] = {1, 0, 0, '?'};
+    TEST_ASSERT_FALSE(meshUnpackCommand(noTarget, sizeof(noTarget), &cmd));
+    const uint8_t targetPastTheEnd[] = {1, 0, 9, 'C', '3', '?'};
+    TEST_ASSERT_FALSE(meshUnpackCommand(targetPastTheEnd, sizeof(targetPastTheEnd), &cmd));
+    TEST_ASSERT_FALSE(meshUnpackCommand(noText, 2, &cmd));
+
+    uint8_t tooLong[3 + 1 + MESH_COMMAND_MAX + 1] = {1, 0, 1, '*'};
+    memset(tooLong + 4, 'v', sizeof(tooLong) - 4);
+    TEST_ASSERT_FALSE(meshUnpackCommand(tooLong, sizeof(tooLong), &cmd));
+    TEST_ASSERT_TRUE(meshUnpackCommand(tooLong, sizeof(tooLong) - 1, &cmd));
+}
+
+void test_a_reply_survives_the_air(void) {
+    uint8_t wire[64];
+    const char text[] = "[OUT] trim=-20dB\n";
+    const size_t n = meshPackReply(wire, sizeof(wire), 0x1234, 2 | MESH_REPLY_CONT, "SonoLoco-C3",
+                                   text, strlen(text));
+    TEST_ASSERT_EQUAL(MESH_REPLY_HEADER(11) + strlen(text), n);
+
+    MeshReply r;
+    TEST_ASSERT_TRUE(meshUnpackReply(wire, n, &r));
+    TEST_ASSERT_EQUAL_HEX16(0x1234, r.id);
+    TEST_ASSERT_EQUAL_HEX8(2 | MESH_REPLY_CONT, r.part);
+    TEST_ASSERT_EQUAL(11, r.nameLen);
+    TEST_ASSERT_EQUAL_MEMORY("SonoLoco-C3", r.name, 11);
+    TEST_ASSERT_EQUAL(strlen(text), r.textLen);
+    TEST_ASSERT_EQUAL_MEMORY(text, r.text, r.textLen);
+}
+
+/** A command that printed nothing still answers, so the asker knows it ran. */
+void test_an_empty_reply_is_still_a_reply(void) {
+    uint8_t wire[32];
+    const size_t n = meshPackReply(wire, sizeof(wire), 7, 0, "S3", "", 0);
+    MeshReply r;
+    TEST_ASSERT_TRUE(meshUnpackReply(wire, n, &r));
+    TEST_ASSERT_EQUAL(0, r.textLen);
+
+    const uint8_t noName[] = {7, 0, 0, 0, 'x'};
+    TEST_ASSERT_FALSE(meshUnpackReply(noName, sizeof(noName), &r));
+    const uint8_t namePastTheEnd[] = {7, 0, 0, 5, 'S', '3'};
+    TEST_ASSERT_FALSE(meshUnpackReply(namePastTheEnd, sizeof(namePastTheEnd), &r));
+}
+
+/** Parts end at a line's end where they can, so a reply reads as whole lines. */
+void test_a_reply_is_cut_at_line_ends(void) {
+    const char *text = "first line\nsecond line\nthird";
+    TEST_ASSERT_EQUAL(strlen(text), meshReplyChunk(text, strlen(text), 100));
+    TEST_ASSERT_EQUAL(23, meshReplyChunk(text, strlen(text), 25));   // after "second line\n"
+    TEST_ASSERT_EQUAL(11, meshReplyChunk(text, strlen(text), 22));   // "second line\n" ends at 23
+    TEST_ASSERT_EQUAL(11, meshReplyChunk(text, strlen(text), 11));   // the newline is the last byte
+}
+
+/** Only a line longer than a whole part is cut in the middle. */
+void test_a_line_longer_than_a_part_is_cut_where_it_must_be(void) {
+    const char *text = "abcdefghijklmnop\nq";
+    TEST_ASSERT_EQUAL(8, meshReplyChunk(text, strlen(text), 8));
+}
+
+/** An answer sent again is the same part of the same node's answer, and printed once. */
+void test_an_answer_sent_again_is_recognised(void) {
+    const uint32_t k = meshReplyKey("SonoLoco-C3", 11, 0);
+    TEST_ASSERT_EQUAL_HEX32(k, meshReplyKey("sonoloco-c3", 11, 0));
+    TEST_ASSERT_NOT_EQUAL(k, meshReplyKey("SonoLoco-C3", 11, 1));
+    TEST_ASSERT_NOT_EQUAL(k, meshReplyKey("SonoLoco-C3", 11, MESH_REPLY_CONT));
+    TEST_ASSERT_NOT_EQUAL(k, meshReplyKey("SonoLoco-S3", 11, 0));
+}
+
+/** The password goes nowhere near the air, and no node relays for another. */
+void test_some_commands_never_leave_the_node(void) {
+    TEST_ASSERT_FALSE(meshCommandAllowedRemote('W'));
+    TEST_ASSERT_FALSE(meshCommandAllowedRemote('@'));
+    TEST_ASSERT_FALSE(meshCommandAllowedRemote('\0'));
+    TEST_ASSERT_TRUE(meshCommandAllowedRemote('v'));
+    TEST_ASSERT_TRUE(meshCommandAllowedRemote('U'));
+}
+
+/** Sent to `*`, anything that reboots a node or takes it off the mesh would take them all. */
+void test_nothing_sent_to_all_can_take_the_house_off_the_air(void) {
+    for (const char *c = "UbncgpowW@"; *c; c++) TEST_ASSERT_FALSE(meshCommandAllowedForAll(*c));
+    for (const char *c = "?NrvmlM"; *c; c++) TEST_ASSERT_TRUE(meshCommandAllowedForAll(*c));
+}
+
+void test_a_command_is_for_its_target_or_for_all(void) {
+    TEST_ASSERT_TRUE(meshCommandAddressed("*", 1, 'N', "SonoLoco-C3", MAC));
+    TEST_ASSERT_FALSE(meshCommandAddressed("*", 1, 'U', "SonoLoco-C3", MAC));
+    TEST_ASSERT_TRUE(meshCommandAddressed("sonoloco-c3", 11, 'U', "SonoLoco-C3", MAC));
+    TEST_ASSERT_TRUE(meshCommandAddressed(MAC, strlen(MAC), 'v', "SonoLoco-C3", MAC));
+    TEST_ASSERT_FALSE(meshCommandAddressed("SonoLoco-S3", 11, 'N', "SonoLoco-C3", MAC));
+    TEST_ASSERT_FALSE(meshCommandAddressed("SonoLoco-C3", 11, 'W', "SonoLoco-C3", MAC));
+    // `*` is a target for commands only: an update request naming it matches nothing.
+    TEST_ASSERT_FALSE(targets("*", "SonoLoco-C3", MAC));
+}
+
+// ---------------------------------------------------------------------------
 
 int runAllTests(void) {
     UNITY_BEGIN();
@@ -240,6 +401,20 @@ int runAllTests(void) {
     RUN_TEST(test_a_target_never_matches_part_of_a_name);
     RUN_TEST(test_an_empty_or_oversized_target_matches_nothing);
     RUN_TEST(test_a_target_is_read_to_its_length_only);
+
+    RUN_TEST(test_a_command_line_is_a_target_and_a_command);
+    RUN_TEST(test_a_command_line_needs_both_halves);
+    RUN_TEST(test_a_command_survives_the_air);
+    RUN_TEST(test_a_command_that_does_not_fit_is_not_packed);
+    RUN_TEST(test_a_malformed_command_is_refused);
+    RUN_TEST(test_a_reply_survives_the_air);
+    RUN_TEST(test_an_empty_reply_is_still_a_reply);
+    RUN_TEST(test_a_reply_is_cut_at_line_ends);
+    RUN_TEST(test_a_line_longer_than_a_part_is_cut_where_it_must_be);
+    RUN_TEST(test_an_answer_sent_again_is_recognised);
+    RUN_TEST(test_some_commands_never_leave_the_node);
+    RUN_TEST(test_nothing_sent_to_all_can_take_the_house_off_the_air);
+    RUN_TEST(test_a_command_is_for_its_target_or_for_all);
 
     return UNITY_END();
 }

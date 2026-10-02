@@ -355,9 +355,10 @@ update makes.
 
 `-Status` uploads nothing. The node reports the home WiFi's signal where it
 stands and the stream counters it had when the request arrived — `rx`, `lost`,
-`und`, the loss-run histogram — and goes back to the mesh. A client never
-transmits, so this is the only way to see how one with no cable is hearing the
-mesh. Ask while a stream is playing: the counters restart with every stream.
+`und`, the loss-run histogram — and goes back to the mesh. The counters can
+also be asked for over the mesh without a reboot (`@<name> r`, below); the
+WiFi signal only this way. Ask while a stream is playing: the counters restart
+with every stream.
 
 A new image is on probation until it has run a minute with its radio up; any
 reset before that — a crash, a hang, a power cut — boots the previous one. So an
@@ -369,6 +370,34 @@ and it needs the WiFi stored. The request is ignored by a node that is serving a
 phone, and only heard inside its own mesh. The endpoint takes an image from
 anyone on the LAN for as long as update mode lasts — five minutes, and only when
 asked. See D15 in `docs/decisions.md`.
+
+### Talking to a node without a cable
+
+Every serial command also runs on another node of the mesh. Type it on any node
+on USB with a target in front — a room name, a MAC, or `*` for every node — and
+the answers come back over the mesh, one `[@<name>]` line each:
+
+```
+@SonoLoco-Stereo v-20     the stereo's volume trim, from the desk
+@* N                      every node: its mode, its source, what hearing it costs
+@SonoLoco-C3 r            one node's full status line
+```
+
+`tools/mesh.ps1` does the same from the PC, and with no arguments draws the
+mesh: each source — a server's phone, or a bench tone — with the clients locked
+to it, and for each client the packets it received and lost in this stream.
+
+```powershell
+./tools/mesh.ps1
+./tools/mesh.ps1 -Target SonoLoco-Stereo -Command v-20
+```
+
+Three limits, all on purpose. `*` takes nothing that reboots a node or takes it
+off the mesh (`U b n c g p o w`): that would be one character away from
+silencing the house. `W` never travels at all, because the password would go
+out in the clear. And only nodes in the asking node's own mesh, on firmware from
+D16 onwards, hear the question — an older one is simply missing from the list,
+and `ota.ps1` still reaches it. See D16 in `docs/decisions.md`.
 
 ### Tests
 
@@ -398,11 +427,14 @@ and clock drift. No board limit. Full detail, and the Bluetooth half, in
 
 ### Bench mode
 
-Any node can be driven by hand over the serial monitor, in any build:
+Any node can be driven by hand over the serial monitor, in any build — and,
+with `@<target>` in front, any other node of the mesh, `W` alone excepted:
 
 | Key | Effect |
 |-----|--------|
 | `?` | identify — firmware version, chip, PSRAM, MAC, whether BT and ESP-NOW are active |
+| `N` | where this node sits in the mesh: its mode, its source (`phone`, `bench`, or the MAC of the server it is locked to), and `rx`/`lost`/`und` in this stream. One line, so `@* N` lists the mesh; `tools/mesh.ps1` draws it |
+| `@` | `@<name\|mac\|*> <command>`: run the command on that node, or on every node of this mesh, and print the answers as `[@<name>] <line>`, then `[CMD] done` with how many answered. `*` refuses `U b n c g p o w`. See D16 |
 | `b` | reboot into bench mode (Bluetooth stays off) |
 | `n` | reboot into normal mode |
 | `s` | start generating the synthetic test stream |
@@ -414,7 +446,7 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `p` | listen for 60 s and join the mesh that offers itself — the speaker half of pairing. Same as a three-second BOOT hold on a node that cannot be a server |
 | `o` | offer this mesh for 60 s, so a listening node can join it — the server half. Same as a three-second BOOT hold on a server-capable node |
 | `U` | bare: reboot into update mode. `U<name>` asks the node with that room name or MAC, over the mesh, to do so — what `tools/ota.ps1` sends |
-| `W` | `W<ssid>`, then the password on the next line: the home WiFi update mode joins. Kept in NVS. Bare `W` prints the SSID and whether a password is stored, never the password. `tools/ota-wifi.ps1` asks for both |
+| `W` | `W<ssid>`, then the password on the next line: the home WiFi update mode joins. Kept in NVS. Bare `W` prints the SSID and whether a password is stored, never the password. `tools/ota-wifi.ps1` asks for both. This node's port only: over the mesh the password would be broadcast |
 | `a` | BT server: print and reset the A2DP window — packets/s, packet size, a histogram of the gaps between packets from the Bluetooth stack, and the server's own ring (`jit`, `und`, `ovf`, `dry`). A gap longer than the ring holds is a hole in every room |
 | `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
 | `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
@@ -462,7 +494,8 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   hashes to produces silence with nothing in the log — the one failure mode
   worth pinning on the host rather than chasing on a bench. See D12. Also which
   node an update request names (D15): a match too loose reboots the wrong
-  speaker off the mesh.
+  speaker off the mesh. And the commands that travel the mesh (D16): their
+  packets, which node one is for, and which may never go to every node.
 - `esp32-code/lib/adpcm/` — the mesh codec: IMA ADPCM, stereo, in blocks that
   each carry their decoder state, so any block decodes alone. Pinned to the
   Python reference in `tools/codec/abtest.py` by golden vectors: two nodes built
@@ -508,6 +541,10 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   `-Status` reads a node's WiFi signal and reception without uploading.
 - `tools/ota-wifi.ps1` — stores the home WiFi on a node, once, over USB. The
   password is typed at a masked prompt and never passes through anything else.
+- `tools/mesh.ps1` — runs any command on any node over the mesh, relayed by a
+  node on USB; with no arguments, lists the mesh and draws who hears whom. D16.
+- `tools/common.ps1` — what `ota.ps1` and `mesh.ps1` share: finding a relay,
+  opening its port without resetting it, reading its lines.
 - `tools/codec/abtest.py` — hear what a client plays before it is firmware: a
   WAV in, the original, the old 22.05 kHz mono path and the ADPCM path out, at
   the same rate and level. It decided D5, and its encoder is the reference

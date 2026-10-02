@@ -125,8 +125,130 @@ bool meshIsUpdateRequest(uint16_t seq, uint16_t len);
  *
  * `target` comes off the air, so it is `len` bytes with no terminator. There is
  * deliberately no wildcard: rebooting every speaker in the house off the mesh
- * at once is not something to be one character away from.
+ * at once is not something to be one character away from. A command may be
+ * addressed to every node (meshCommandAddressed), but only one that cannot
+ * reboot a node or take it off the mesh.
  */
 bool meshTargetMatches(const char *target, size_t len, const char *roomName, const char *mac);
+
+// ---------------------------------------------------------------------------
+// Commands over the mesh (D16)
+// ---------------------------------------------------------------------------
+//
+// Any serial command can run on another node of the same mesh: `@<target>
+// <command>` typed on a node on USB, e.g. `@SonoLoco-Stereo v-20`, or `@* N`
+// for every node. The node named runs it exactly as if it had been typed on
+// its own port, and what it printed comes back as replies, printed by the
+// asking node as `[@<name>] <line>`.
+//
+// Both travel in the control group, like an update request. A request:
+//
+//   id (2, little-endian) | target length (1) | target | command text
+//
+// and a reply, one or more per request and node:
+//
+//   id (2, little-endian) | part (1) | name length (1) | name | text
+//
+// `id` is the asking node's, so it can tell its own replies from another
+// node's conversation. `part` counts from 0; MESH_REPLY_CONT marks a part whose
+// text continues the previous part's last line, which happens only to a line
+// longer than one packet holds.
+
+/** The sequence numbers that mark a command and a reply in the control group. */
+static const uint16_t MESH_COMMAND_SEQ = 0xC0DE;
+static const uint16_t MESH_REPLY_SEQ   = 0xA45E;
+
+/** Longest command text, excluding the terminator: a letter and its argument. */
+#define MESH_COMMAND_MAX 63
+
+/** Every node of the mesh, as a target. Commands only, see meshCommandAddressed. */
+#define MESH_TARGET_ALL "*"
+
+/** In a reply's `part` byte: this part continues the previous part's last line. */
+#define MESH_REPLY_CONT 0x80
+
+/** Bytes before a reply's text: id, part, name length, and the name. */
+#define MESH_REPLY_HEADER(nameLen) (4 + (nameLen))
+
+/** A request off the air. The pointers point into the payload; nothing is terminated. */
+struct MeshCommand {
+    uint16_t    id;
+    const char *target;
+    size_t      targetLen;
+    const char *text;
+    size_t      textLen;
+};
+
+/** A reply off the air, likewise. */
+struct MeshReply {
+    uint16_t    id;
+    uint8_t     part;   // with MESH_REPLY_CONT
+    const char *name;
+    size_t      nameLen;
+    const char *text;
+    size_t      textLen;
+};
+
+/**
+ * Split what follows `@` into a target and a command: `SonoLoco-C3 v-20` is
+ * the target `SonoLoco-C3` and the command `v-20`. Spaces around either are
+ * dropped; the command keeps those inside it (an argument may contain them).
+ * Nothing is copied: both are pointers into `line`, with their lengths.
+ *
+ * @return false unless there is a target of 1..MESH_TARGET_MAX characters and
+ *         a command of 1..MESH_COMMAND_MAX.
+ */
+bool meshSplitCommandLine(const char *line, const char **target, size_t *targetLen,
+                          const char **text, size_t *textLen);
+
+/** @return the payload's length, or 0 if it does not fit `cap` or is malformed. */
+size_t meshPackCommand(uint8_t *out, size_t cap, uint16_t id, const char *target,
+                       size_t targetLen, const char *text, size_t textLen);
+
+/** @return false for anything that is not a well-formed request. */
+bool meshUnpackCommand(const uint8_t *in, size_t len, MeshCommand *out);
+
+/** @return the payload's length, or 0 if the header alone does not fit `cap`. */
+size_t meshPackReply(uint8_t *out, size_t cap, uint16_t id, uint8_t part, const char *name,
+                     const char *text, size_t textLen);
+
+/** @return false for anything that is not a well-formed reply. */
+bool meshUnpackReply(const uint8_t *in, size_t len, MeshReply *out);
+
+/**
+ * Which part of whose answer a reply is, as one number: a node answers again
+ * for every later copy of a request it hears, and the asking node prints each
+ * part once. The part's continuation bit is part of it.
+ */
+uint32_t meshReplyKey(const char *name, size_t nameLen, uint8_t part);
+
+/**
+ * How much of `text` goes into the next reply part, given room for `cap`
+ * bytes: all of it if it fits, otherwise up to and including the last newline
+ * that fits, and only a line longer than a whole part is cut mid-line.
+ */
+size_t meshReplyChunk(const char *text, size_t len, size_t cap);
+
+/**
+ * May this command travel the mesh at all? Not `W`, which carries the home
+ * network's password and would broadcast it in the clear, and not `@` itself:
+ * a node does not relay for another.
+ */
+bool meshCommandAllowedRemote(char cmd);
+
+/**
+ * May this command be sent to every node at once? Not one that reboots a node
+ * (U b n c), moves it to another mesh or opens pairing (g p o), or stops its
+ * radio (w): each of those, sent to `*`, takes the whole house off the air,
+ * and only a node named by the person who meant it should do that.
+ */
+bool meshCommandAllowedForAll(char cmd);
+
+/**
+ * Is a command with this target, beginning with `cmd`, for this node? Its room
+ * name or MAC as for an update request, or `*` for a command allowed for all.
+ */
+bool meshCommandAddressed(const char *target, size_t len, char cmd, const char *roomName,
+                          const char *mac);
 
 #endif  // MESH_H

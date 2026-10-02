@@ -57,6 +57,66 @@
 #endif
 
 // ============================================================================
+// Console
+// ============================================================================
+//
+// DEBUG_SERIAL is this: the serial port, plus -- while a command another node
+// sent over the mesh is running -- a copy of what that command prints, which
+// goes back to the asking node as its reply (D16). Capturing what a command
+// printed, rather than giving each command a second way to report, is what
+// lets every command work over the mesh without being written twice, and any
+// command added later with it.
+//
+// Only the task that runs the command is captured: a log line the Bluetooth
+// or WiFi task prints in the meantime is not part of the answer. The buffer is
+// the caller's, on its stack, so capturing costs nothing between commands.
+class Console : public Print {
+public:
+    void begin(unsigned long baud) { Serial.begin(baud); }
+    int  available() { return Serial.available(); }
+    int  read() { return Serial.read(); }
+    void flush() override { Serial.flush(); }
+
+    using Print::write;
+    size_t write(uint8_t c) override { return write(&c, 1); }
+    size_t write(const uint8_t *buf, size_t n) override {
+        if (capBuf != nullptr && xTaskGetCurrentTaskHandle() == capTask) {
+            const size_t room = capSize - 1 - capLen;
+            const size_t k    = n < room ? n : room;
+            memcpy(capBuf + capLen, buf, k);
+            capLen += k;
+            capBuf[capLen] = '\0';
+            if (capQuiet) return n;
+        }
+        return Serial.write(buf, n);
+    }
+
+    /** Copy what this task prints into `buf` from now on; `quiet` keeps it off the port. */
+    void capture(char *buf, size_t size, bool quiet) {
+        buf[0]   = '\0';
+        capLen   = 0;
+        capSize  = size;
+        capQuiet = quiet;
+        capTask  = xTaskGetCurrentTaskHandle();
+        capBuf   = buf;
+    }
+
+    /** Stop capturing. @return the bytes captured, terminated in the buffer. */
+    size_t endCapture() {
+        capBuf = nullptr;
+        return capLen;
+    }
+
+private:
+    char *volatile capBuf  = nullptr;
+    TaskHandle_t   capTask = nullptr;
+    size_t         capSize = 0;
+    size_t         capLen  = 0;
+    bool           capQuiet = false;
+};
+static Console debugOut;
+
+// ============================================================================
 // State Machine
 // ============================================================================
 
@@ -521,6 +581,7 @@ typedef struct {
     uint32_t    first;
 } TxItem;
 
+static bool              espnowActive = false;
 static QueueHandle_t     txQueue      = nullptr;
 static SemaphoreHandle_t txDone       = nullptr;   // radio is free for the next frame
 static uint16_t          txSeq        = 0;
@@ -818,6 +879,159 @@ static void onEspNowSent(const uint8_t *, esp_now_send_status_t status) {
     if (txDone) xSemaphoreGive(txDone);
 }
 
+// ============================================================================
+// Control traffic: update requests, commands and their replies
+// ============================================================================
+//
+// Everything in the control group (MESH_CONTROL_FORMAT): the update request of
+// D15 and the commands of D16, which are any serial command addressed to
+// another node. One way out and one way in for all of it.
+//
+// Out: a request goes as broadcast, which nothing acknowledges, so it is
+// repeated. One at a time per node -- a new one replaces whatever is still
+// repeating -- through the same queue as audio, so a server can send while it
+// plays.
+static struct {
+    uint16_t      seq;
+    uint8_t       payload[3 + MESH_TARGET_MAX + MESH_COMMAND_MAX];
+    uint8_t       len;
+    uint8_t       left;
+    uint16_t      intervalMs;
+    unsigned long lastMs;
+} ctrlOut = {};
+
+static void ctrlSend(uint16_t seq, const uint8_t *payload, size_t len, uint8_t copies,
+                     uint16_t intervalMs) {
+    ctrlOut.seq        = seq;
+    ctrlOut.len        = (uint8_t)len;
+    ctrlOut.left       = copies;
+    ctrlOut.intervalMs = intervalMs;
+    ctrlOut.lastMs     = 0;
+    memcpy(ctrlOut.payload, payload, len);
+}
+
+/** One control packet into the transmit queue. Never waits: a full queue is a server mid-stream. */
+static bool ctrlQueue(uint16_t seq, const uint8_t *payload, size_t len) {
+    if (!espnowActive || txQueue == nullptr) return false;
+    TxItem item;
+    item.first     = 0;
+    item.pkt.group = (uint16_t)(meshId ^ MESH_CONTROL_FORMAT);
+    item.pkt.seq   = seq;
+    item.pkt.len   = (uint16_t)len;
+    item.pkt.due   = MESH_DUE_NONE;
+    memcpy(item.pkt.data, payload, len);
+    if (xQueueSend(txQueue, &item, 0) != pdTRUE) {
+        txQueueFull++;
+        return false;
+    }
+    return true;
+}
+
+// In: the receive callback only records, as it does for pairing -- loop()
+// runs the command, which may print, write NVS or reboot.
+//
+// A command addressed to this node, waiting for loop(). One slot: while it is
+// full, more commands are dropped, and the asking node's next copy tries again.
+static struct {
+    volatile bool ready;
+    uint16_t      id;
+    uint8_t       from[6];
+    unsigned long runAtMs;
+    char          text[MESH_COMMAND_MAX + 1];
+} ctrlIn = {};
+// The last command taken, so the other copies of it are not run again: `m`
+// toggles, and five copies of it would leave the speaker muted.
+static uint16_t ctrlLastId      = 0;
+static uint8_t  ctrlLastFrom[6] = {0};
+
+// Its answer, kept while the asking node's copies of that command are still
+// arriving: each later copy says the answer may not have got through, and it
+// goes again. An answer sent once was lost 2 times in 10 while a phone was
+// paging the asking WROVER (2026-10-02), and the asking node is often the one
+// a phone streams to. On the heap, for half a second, after a command only.
+static struct {
+    char                   *text;
+    size_t                  len;
+    volatile uint16_t       id;
+    unsigned long           untilMs;
+    volatile bool           resend;
+    volatile unsigned long  resendAtMs;
+} ctrlLast = {};
+
+// The asking side. The replies to this node's own command, heard in the
+// callback and printed by loop(): a reply is up to a packet of text, and the
+// callback must not print. The queue is made the first time this node asks,
+// so a node nobody types `@` into never pays for it.
+typedef struct {
+    uint8_t len;
+    uint8_t data[ESPNOW_PAYLOAD_SIZE];
+} ReplyItem;
+static QueueHandle_t          replyQueue    = nullptr;
+static volatile uint16_t      cmdAskId      = 0;   // 0: not waiting for any
+static volatile unsigned long cmdAskUntilMs = 0;
+static uint16_t               cmdAskReplies = 0;
+// The parts already printed, by name and part number, so an answer sent again
+// (ctrlLast) is printed once.
+static uint32_t               cmdAskSeen[16];
+static uint8_t                cmdAskSeenCount = 0;
+
+/** A packet in this mesh's control group. Called from the receive callback, in every mode. */
+static void ctrlReceive(const uint8_t *srcMac, const uint8_t *data, int len) {
+    uint16_t seq, plen;
+    memcpy(&seq,  data + 2, 2);
+    memcpy(&plen, data + 4, 2);
+    const bool repeat = (plen & ESPNOW_LEN_REPEAT) != 0;
+    plen &= ESPNOW_LEN_BYTES;
+    if ((int)plen > len - ESPNOW_HEADER_SIZE) return;
+    const uint8_t *payload = data + ESPNOW_HEADER_SIZE;
+
+    if (seq == MESH_UPDATE_SEQ) {
+        // Ignored while serving a phone: every room's stream would stop.
+        if (currentMode != MODE_SERVER && meshIsUpdateRequest(seq, plen) &&
+            meshTargetMatches((const char *)payload, plen, ROOM_NAME, ownMac)) {
+            otaRequested = true;
+        }
+        return;
+    }
+
+    if (seq == MESH_COMMAND_SEQ) {
+        MeshCommand cmd;
+        if (ctrlIn.ready || !meshUnpackCommand(payload, plen, &cmd)) return;
+        if (!meshCommandAddressed(cmd.target, cmd.targetLen, cmd.text[0], ROOM_NAME, ownMac)) return;
+        // A command for everyone gets everyone's answer at once, and
+        // broadcasts are not retried: each node waits its own random while,
+        // to answer and to answer again.
+        const bool all = cmd.targetLen == 1 && cmd.target[0] == MESH_TARGET_ALL[0];
+        if (cmd.id == ctrlLastId && memcmp(srcMac, ctrlLastFrom, 6) == 0) {
+            if (ctrlLast.text != nullptr && ctrlLast.id == cmd.id) {
+                ctrlLast.resendAtMs = millis() + (all ? esp_random() % (MESH_COMMAND_INTERVAL_MS / 2) : 0);
+                ctrlLast.resend     = true;
+            }
+            return;
+        }
+        ctrlLastId = cmd.id;
+        memcpy(ctrlLastFrom, srcMac, 6);
+
+        ctrlIn.id = cmd.id;
+        memcpy(ctrlIn.from, srcMac, 6);
+        memcpy(ctrlIn.text, cmd.text, cmd.textLen);
+        ctrlIn.text[cmd.textLen] = '\0';
+        ctrlIn.runAtMs = millis() + (all ? esp_random() % MESH_REPLY_SPREAD_MS : 0);
+        ctrlIn.ready   = true;
+        return;
+    }
+
+    if (seq == MESH_REPLY_SEQ) {
+        // A repeat copy (`t2`, `t3`) adds nothing to text already printed.
+        if (repeat || replyQueue == nullptr || cmdAskId == 0 || plen < 2) return;
+        if ((uint16_t)(payload[0] | (payload[1] << 8)) != cmdAskId) return;
+        ReplyItem item;
+        item.len = (uint8_t)plen;
+        memcpy(item.data, payload, plen);
+        xQueueSend(replyQueue, &item, 0);
+    }
+}
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     const uint8_t *srcMac = info->src_addr;
@@ -829,15 +1043,27 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     const uint32_t rxUs = micros();
     if (len < ESPNOW_HEADER_SIZE) return;
 
+    // The received buffer has no alignment guarantee; copy the header out
+    // instead of casting to a struct pointer.
+    uint16_t group;
+    memcpy(&group, data, 2);
+
+    // This mesh's control traffic: update requests, commands, replies. Heard in
+    // every mode -- a server is a node like any other to a command, and the one
+    // a listing most needs to hear from -- so before the server's return below.
+    // Before the foreign test, which would count it, and before the sender
+    // lock, which it must never take.
+    if ((uint16_t)(group ^ MESH_CONTROL_FORMAT) == meshId) {
+        ctrlReceive(srcMac, data, len);
+        return;
+    }
+
     // A SERVER is the source, not a listener. Bailing before the lock below
     // matters: locking here would pin lockedSender to whatever stray node we
     // happened to hear while serving, and that lock outlives SERVER mode.
     if (currentMode == MODE_SERVER) return;
 
-    // The received buffer has no alignment guarantee; copy the header out
-    // instead of casting to a struct pointer.
-    uint16_t group, seq, plen, due;
-    memcpy(&group, data,     2);
+    uint16_t seq, plen, due;
     memcpy(&seq,   data + 2, 2);
     memcpy(&plen,  data + 4, 2);
     memcpy(&due,   data + 6, 2);
@@ -845,17 +1071,6 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     const bool     parity = (plen & ESPNOW_LEN_XOR) != 0;
     const uint16_t dist   = (plen >> ESPNOW_LEN_DIST_SHIFT) & ESPNOW_LEN_DIST_MAX;
     plen &= ESPNOW_LEN_BYTES;
-
-    // An update request for this mesh. Before the foreign test, which would
-    // count it, and before the sender lock, which it must never take; loop()
-    // does the rebooting.
-    if ((uint16_t)(group ^ MESH_CONTROL_FORMAT) == meshId) {
-        if (meshIsUpdateRequest(seq, plen) && (int)plen <= len - ESPNOW_HEADER_SIZE &&
-            meshTargetMatches((const char *)data + ESPNOW_HEADER_SIZE, plen, ROOM_NAME, ownMac)) {
-            otaRequested = true;
-        }
-        return;
-    }
 
     const bool beacon = meshIsBeacon(seq, plen);
     const uint16_t id = wireGroup(group);   // a node on another format lands elsewhere
@@ -1027,7 +1242,6 @@ static void onEspNowRecv(const uint8_t *srcMac, const uint8_t *data, int len) {
     }
 }
 
-static bool espnowActive = false;
 // Whether this boot meant to run the mesh. False only on a node that skipped it
 // on purpose (a WROOM with Bluetooth); with it true and espnowActive false the
 // radio failed, which is what keeps a fresh update from being kept (otaServiceConfirm).
@@ -2121,10 +2335,11 @@ static void meshServiceButton() {
 RTC_NOINIT_ATTR static uint32_t otaMagic;   // RTC_NOINIT for bench mode's reason
 
 // What the node was receiving when the request reached it, carried across the
-// restart for GET / to report. A node with no cable has no other way to say
-// how the mesh reaches it -- a client never transmits -- so this is how a
-// speaker across the house is measured: stream at it, ask, read. The counters
-// are the current session's, the ones the status line prints; they restart
+// restart for GET / to report. Before D16 a client transmitted nothing at all,
+// so this was the only way to measure a speaker across the house: stream at
+// it, ask, read. `@<name> r` now asks without a reboot; this stays because it
+// also reads the home WiFi's signal where the node stands. The counters are
+// the current session's, the ones the status line prints; they restart
 // whenever the node enters CLIENT, so ask while the stream is still playing.
 #define OTA_SNAP_MAGIC 0x0DA75AA5
 struct OtaSnapshot {
@@ -2133,11 +2348,6 @@ struct OtaSnapshot {
     uint8_t  mode;
 };
 RTC_NOINIT_ATTR static OtaSnapshot otaSnap;
-
-// The request this node is broadcasting on somebody else's behalf.
-static char          otaReqTarget[MESH_TARGET_MAX + 1] = {0};
-static uint8_t       otaReqLeft   = 0;
-static unsigned long otaReqLastMs = 0;
 
 /**
  * Keep the rollback decision for ourselves.
@@ -2227,7 +2437,14 @@ static void otaRebootIntoUpdate() {
     ESP.restart();
 }
 
-/** `U<name>`: ask the node with that ROOM_NAME or MAC to reboot into update mode. */
+/**
+ * `U<name>`: ask the node with that ROOM_NAME or MAC to reboot into update mode.
+ *
+ * `@<name> U` does the same as a command (D16), but this keeps the update
+ * request's own wire format, the one every node since D15 understands: an
+ * update is how a node gets the firmware that understands commands, so the
+ * request for it cannot be one. Sent by meshServiceControl().
+ */
 static void otaStartRequest(const char *target) {
     const size_t n = strlen(target);
     if (!espnowActive || txQueue == nullptr) {
@@ -2238,41 +2455,10 @@ static void otaStartRequest(const char *target) {
         DEBUG_SERIAL.println("[OTA] error reason=target_length");
         return;
     }
-    memcpy(otaReqTarget, target, n + 1);
-    otaReqLeft   = OTA_REQUEST_COPIES;
-    otaReqLastMs = 0;
+    ctrlSend(MESH_UPDATE_SEQ, (const uint8_t *)target, n, OTA_REQUEST_COPIES,
+             OTA_REQUEST_INTERVAL_MS);
     DEBUG_SERIAL.printf("[OTA] request target=%s mesh=%04X copies=%d\n",
-                        otaReqTarget, meshId, OTA_REQUEST_COPIES);
-}
-
-/**
- * Both ends of a request. Called from loop() in every mode.
- *
- * Sending goes through the same queue as audio and beacons, one copy per
- * OTA_REQUEST_INTERVAL_MS, so a server can send while it plays. Receiving only
- * ever sets a flag in the callback; the reboot happens here.
- */
-static void otaServiceRequest() {
-    if (otaRequested) {
-        otaRequested = false;
-        DEBUG_SERIAL.println("[OTA] update requested over the mesh");
-        otaRebootIntoUpdate();
-    }
-
-    if (otaReqLeft == 0) return;
-    if (otaReqLastMs != 0 &&
-        (long)(millis() - otaReqLastMs) < (long)OTA_REQUEST_INTERVAL_MS) return;
-    otaReqLastMs = millis();
-
-    AudioPacket pkt;
-    const size_t n = strlen(otaReqTarget);
-    pkt.group = (uint16_t)(meshId ^ MESH_CONTROL_FORMAT);
-    pkt.seq   = MESH_UPDATE_SEQ;
-    pkt.len   = (uint16_t)n;
-    memcpy(pkt.data, otaReqTarget, n);
-    if (xQueueSend(txQueue, &pkt, 0) != pdTRUE) txQueueFull++;
-
-    if (--otaReqLeft == 0) DEBUG_SERIAL.println("[OTA] request sent");
+                        target, meshId, OTA_REQUEST_COPIES);
 }
 
 enum OtaOutcome { OTA_UPDATED, OTA_FAILED, OTA_DISMISSED };
@@ -2737,6 +2923,239 @@ static void benchIdentify() {
 }
 
 /**
+ * `N`: where this node sits in the mesh, on one line that fits one reply
+ * packet. `@* N` asks every node at once, and tools/mesh.ps1 draws the answers
+ * as the star the mesh is: `src=` is a server's source (phone, bench) and a
+ * client's server, by MAC, and rx/lost/und are what hearing it costs in the
+ * current stream. No signal strength: the receive callback on this core (IDF
+ * 4.4) has none, and loss is the measure the audio cares about anyway.
+ */
+static void benchNode() {
+    const char *modeStr = currentMode == MODE_DISCOVERY ? "DISCOVERY"
+                        : currentMode == MODE_SERVER    ? "SERVER"
+                                                        : "CLIENT";
+    char src[18] = "-";
+    if (benchSource) {
+        strcpy(src, "bench");
+    } else if (currentMode == MODE_SERVER) {
+        strcpy(src, "phone");
+    } else if (currentMode == MODE_CLIENT && senderLocked) {
+        snprintf(src, sizeof(src), "%02X:%02X:%02X:%02X:%02X:%02X", lockedSender[0],
+                 lockedSender[1], lockedSender[2], lockedSender[3], lockedSender[4],
+                 lockedSender[5]);
+    }
+    DEBUG_SERIAL.printf("[NODE] name=%s mac=%s fw=%s mode=%s src=%s rx=%lu lost=%lu und=%lu "
+                        "up=%lus trim=%d mute=%d\n",
+                        ROOM_NAME, ownMac, FW_VERSION, modeStr, src, (unsigned long)rxCount,
+                        (unsigned long)seqTracker.lost, (unsigned long)rxUnderrun,
+                        (unsigned long)(millis() / 1000), outTrimDb, outputMuted ? 1 : 0);
+}
+
+// ============================================================================
+// Commands over the mesh (D16)
+// ============================================================================
+//
+// `@<target> <command>` runs any serial command on another node of this mesh,
+// or on all of them with `*`: the same dispatcher, commandRun(), whether the
+// command came from this node's port or off the air, so a command added there
+// works over the mesh with nothing more. What the command printed comes back
+// (Console) and the asking node prints it as `[@<name>] <line>`. The packets
+// are in lib/mesh, the transport in the control traffic section above.
+
+static_assert(sizeof(ROOM_NAME) - 1 <= MESH_TARGET_MAX,
+              "a room name longer than a target could never be asked for, or answer");
+
+static void commandRun(char c, const char *arg, bool remote);
+
+/**
+ * Run a command with what it prints captured into `out`. `quiet` keeps the
+ * output off this node's own port -- for the asking node's own share of an
+ * `@*`, which it prints as a reply like everyone else's instead.
+ */
+static size_t commandCapture(const char *text, bool remote, bool quiet, char *out, size_t size) {
+    debugOut.capture(out, size, quiet);
+    commandRun(text[0], text + 1, remote);
+    return debugOut.endCapture();
+}
+
+/** A reply's text as `[@name] line`, a line at a time; `[@name]+` continues a line cut short. */
+static void meshPrintReply(const char *name, size_t nameLen, bool cont, const char *text,
+                           size_t len) {
+    if (len == 0) {
+        DEBUG_SERIAL.printf("[@%.*s] (done)\n", (int)nameLen, name);
+        return;
+    }
+    for (size_t i = 0; i < len;) {
+        size_t end = i;
+        while (end < len && text[end] != '\n') end++;
+        const size_t next = end + 1;
+        if (end > i && text[end - 1] == '\r') end--;
+        DEBUG_SERIAL.printf("[@%.*s]%s %.*s\n", (int)nameLen, name, (i == 0 && cont) ? "+" : "",
+                            (int)(end - i), text + i);
+        i = next;
+    }
+}
+
+/** What a command printed, back to the node that asked: as many parts as it takes. */
+static void ctrlReply(uint16_t id, const char *text, size_t len) {
+    const size_t room = ESPNOW_PAYLOAD_SIZE - MESH_REPLY_HEADER(strlen(ROOM_NAME));
+    uint8_t payload[ESPNOW_PAYLOAD_SIZE];
+    size_t  off  = 0;
+    uint8_t part = 0;
+    bool    cont = false;
+    do {
+        const size_t n    = meshReplyChunk(text + off, len - off, room);
+        const size_t plen = meshPackReply(payload, sizeof(payload), id,
+                                          (uint8_t)(part | (cont ? MESH_REPLY_CONT : 0)),
+                                          ROOM_NAME, text + off, n);
+        if (plen == 0 || !ctrlQueue(MESH_REPLY_SEQ, payload, plen)) break;
+        cont = n > 0 && text[off + n - 1] != '\n';
+        off += n;
+        part++;
+    } while (off < len);
+}
+
+/**
+ * `@<target> <command>`. The command goes out MESH_COMMAND_COPIES times, and
+ * this node prints the answers for MESH_REPLY_WAIT_MS, then `[CMD] done` with
+ * how many nodes answered. When this node is one of those asked -- `*`, or its
+ * own name -- it runs the command too and prints its answer the same way.
+ */
+static void commandAsk(const char *line) {
+    const char *target, *text;
+    size_t      tlen, clen;
+    if (!meshSplitCommandLine(line, &target, &tlen, &text, &clen)) {
+        DEBUG_SERIAL.println("[CMD] error reason=usage (@<name|mac|*> <command>)");
+        return;
+    }
+    char cmd[MESH_COMMAND_MAX + 1];
+    memcpy(cmd, text, clen);
+    cmd[clen] = '\0';
+
+    const bool all = tlen == 1 && target[0] == MESH_TARGET_ALL[0];
+    if (!meshCommandAllowedRemote(cmd[0])) {
+        DEBUG_SERIAL.printf("[CMD] error reason=local_only cmd=%c\n", cmd[0]);
+        return;
+    }
+    if (all && !meshCommandAllowedForAll(cmd[0])) {
+        DEBUG_SERIAL.printf("[CMD] error reason=not_for_all cmd=%c\n", cmd[0]);
+        return;
+    }
+
+    const bool self = all || meshTargetMatches(target, tlen, ROOM_NAME, ownMac);
+    if (all || !self) {
+        if (!espnowActive || txQueue == nullptr) {
+            DEBUG_SERIAL.println("[CMD] error reason=no_mesh");
+            return;
+        }
+        if (replyQueue == nullptr) replyQueue = xQueueCreate(MESH_REPLY_QUEUE_DEPTH, sizeof(ReplyItem));
+        if (replyQueue == nullptr) {
+            DEBUG_SERIAL.println("[CMD] error reason=no_memory");
+            return;
+        }
+        uint16_t id;
+        do { id = (uint16_t)esp_random(); } while (id == 0);
+        uint8_t      payload[sizeof(ctrlOut.payload)];
+        const size_t n = meshPackCommand(payload, sizeof(payload), id, target, tlen, cmd, clen);
+
+        cmdAskId = 0;                 // stop the callback queueing the last ask's
+        xQueueReset(replyQueue);
+        cmdAskReplies   = 0;
+        cmdAskSeenCount = 0;
+        cmdAskUntilMs = millis() + MESH_REPLY_WAIT_MS;
+        cmdAskId      = id;
+        ctrlSend(MESH_COMMAND_SEQ, payload, n, MESH_COMMAND_COPIES, MESH_COMMAND_INTERVAL_MS);
+        DEBUG_SERIAL.printf("[CMD] ask id=%04X target=%.*s cmd=%s mesh=%04X\n", id, (int)tlen,
+                            target, cmd, meshId);
+    }
+
+    if (self) {
+        char         out[MESH_REPLY_CAPTURE];
+        const size_t n = commandCapture(cmd, false, true, out, sizeof(out));
+        meshPrintReply(ROOM_NAME, strlen(ROOM_NAME), false, out, n);
+        if (all) cmdAskReplies++;
+        else     DEBUG_SERIAL.println("[CMD] done replies=1");
+    }
+}
+
+/**
+ * Every side of the control traffic, from loop() in every mode: the request
+ * this node is repeating, the command waiting for it, the replies to its own,
+ * and an update request that named it.
+ */
+static void meshServiceControl() {
+    if (otaRequested) {
+        otaRequested = false;
+        DEBUG_SERIAL.println("[OTA] update requested over the mesh");
+        otaRebootIntoUpdate();
+    }
+
+    if (ctrlOut.left != 0 &&
+        (ctrlOut.lastMs == 0 || (long)(millis() - ctrlOut.lastMs) >= (long)ctrlOut.intervalMs)) {
+        ctrlOut.lastMs = millis();
+        ctrlQueue(ctrlOut.seq, ctrlOut.payload, ctrlOut.len);
+        if (--ctrlOut.left == 0 && ctrlOut.seq == MESH_UPDATE_SEQ) {
+            DEBUG_SERIAL.println("[OTA] request sent");
+        }
+    }
+
+    if (ctrlIn.ready && (long)(millis() - ctrlIn.runAtMs) >= 0) {
+        char text[MESH_COMMAND_MAX + 1];
+        memcpy(text, ctrlIn.text, sizeof(text));
+        const uint16_t id = ctrlIn.id;
+        DEBUG_SERIAL.printf("[CMD] from %02X:%02X:%02X:%02X:%02X:%02X id=%04X: %s\n",
+                            ctrlIn.from[0], ctrlIn.from[1], ctrlIn.from[2], ctrlIn.from[3],
+                            ctrlIn.from[4], ctrlIn.from[5], id, text);
+        ctrlIn.ready = false;
+
+        char         out[MESH_REPLY_CAPTURE];
+        const size_t n = commandCapture(text, true, false, out, sizeof(out));
+        ctrlReply(id, out, n);
+
+        // Kept for the copies still on their way (ctrlLast).
+        free(ctrlLast.text);
+        ctrlLast.text   = (char *)malloc(n > 0 ? n : 1);
+        ctrlLast.len    = n;
+        ctrlLast.resend = false;
+        ctrlLast.untilMs = millis() + MESH_COMMAND_COPIES * MESH_COMMAND_INTERVAL_MS;
+        if (ctrlLast.text != nullptr) memcpy(ctrlLast.text, out, n);
+        ctrlLast.id = id;
+    }
+
+    if (ctrlLast.text != nullptr) {
+        if (ctrlLast.resend && (long)(millis() - ctrlLast.resendAtMs) >= 0) {
+            ctrlLast.resend = false;
+            ctrlReply(ctrlLast.id, ctrlLast.text, ctrlLast.len);
+        } else if (!ctrlLast.resend && (long)(millis() - ctrlLast.untilMs) >= 0) {
+            ctrlLast.id = 0;
+            free(ctrlLast.text);
+            ctrlLast.text = nullptr;
+        }
+    }
+
+    if (replyQueue != nullptr) {
+        ReplyItem item;
+        while (xQueueReceive(replyQueue, &item, 0) == pdTRUE) {
+            MeshReply r;
+            if (!meshUnpackReply(item.data, item.len, &r)) continue;
+            const uint32_t key  = meshReplyKey(r.name, r.nameLen, r.part);
+            bool           seen = false;
+            for (uint8_t i = 0; i < cmdAskSeenCount; i++) seen |= cmdAskSeen[i] == key;
+            if (seen) continue;
+            if (cmdAskSeenCount < sizeof(cmdAskSeen) / sizeof(cmdAskSeen[0])) {
+                cmdAskSeen[cmdAskSeenCount++] = key;
+            }
+            if ((r.part & ~MESH_REPLY_CONT) == 0) cmdAskReplies++;
+            meshPrintReply(r.name, r.nameLen, (r.part & MESH_REPLY_CONT) != 0, r.text, r.textLen);
+        }
+    }
+    if (cmdAskId != 0 && (long)(millis() - cmdAskUntilMs) >= 0) {
+        DEBUG_SERIAL.printf("[CMD] done id=%04X replies=%u\n", cmdAskId, cmdAskReplies);
+        cmdAskId = 0;
+    }
+}
+
+/**
  * The loss trace accumulated since the last call, once a second while `L1`:
  * `[LT] t=<ms> s=<seq> n=<count> drop=<total> <hex>`, a bit per packet from
  * s= on, LSB of each byte first, 1 = lost. A line whose s= does not follow
@@ -2774,7 +3193,7 @@ static void traceService() {
 }
 
 /**
- * Read the rest of a command line, for the one command that takes an argument.
+ * Read the rest of a command line, for a command that takes an argument.
  *
  * Bounded by a short deadline rather than by a newline alone, so a bare `g`
  * typed into a serial monitor that sends no line ending still answers instead
@@ -2799,9 +3218,14 @@ static size_t benchReadLine(char *out, size_t outSize) {
 }
 
 /**
- * Single-character commands, so the host side needs no protocol.
+ * Commands: a letter, and for some an argument on the rest of the line
+ * (commandTakesArg), so the host side needs no protocol. Every one of them
+ * also runs on another node with `@<target>` in front (D16), except `W`.
  *
  *   ?  identify          b  reboot into bench mode     n  reboot into normal mode
+ *   N  where this node sits in the mesh: mode, its source, what hearing it costs
+ *   @  `@<name|mac|*> <command>` runs the command on that node, or on every
+ *      node of the mesh, and prints their answers as `[@<name>] <line>`
  *   s  start sourcing    x  stop sourcing              r  report now
  *   d  toggle clock-drift correction
  *   c  toggle client-only mode and reboot (persists across power cuts)
@@ -2822,7 +3246,8 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   U  bare: reboot into update mode. `U<name>`: ask the node with that
  *      ROOM_NAME or MAC to, over the mesh (see tools/ota.ps1)
  *   W  `W<ssid>` then the password on the next line: the home network update
- *      mode joins (persists). Bare `W` prints the SSID, never the password
+ *      mode joins (persists). Bare `W` prints the SSID, never the password.
+ *      This node's port only: over the mesh the password would be broadcast
  *
  * Bluetooth server diagnostics, for telling the A2DP side from the mesh side:
  *   k  `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, as a headset would
@@ -2833,15 +3258,23 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   w  stop WiFi altogether, until the next reboot -- what a WROOM server is
  *   j  play the connect jingle as a connection does -- during a stream too
  */
+
+/**
+ * Which commands take the rest of their line as an argument. The others are
+ * one keystroke, and must stay one: reading a line blocks loop() for up to a
+ * quarter second (benchReadLine), and bench-mesh.ps1 sends `?` mid-stream.
+ */
+static bool commandTakesArg(char c) {
+    return c != '\0' && strchr("gzLtDXPRvUVek@", c) != nullptr;
+}
+
 /**
  * `D<n>`: each packet carries the block n packets back; `X<n>`: the XOR of
  * blocks 1 and n back (n >= 2). Until reboot; 0 = none. Clients read both
  * off the wire, so this moves the whole mesh.
  */
-static void benchSetRedundancy(bool parity) {
-    char line[8];
-    benchReadLine(line, sizeof(line));
-    const int n = atoi(line);
+static void benchSetRedundancy(bool parity, const char *arg) {
+    const int n = atoi(arg);
     if (n >= 0 && n < MESH_TX_HISTORY && !(parity && n == 1)) {
         txDistance = (uint8_t)n;
         txParity   = parity;
@@ -2849,265 +3282,274 @@ static void benchSetRedundancy(bool parity) {
     DEBUG_SERIAL.printf("[MESH] distance=%u parity=%d\n", txDistance, txParity ? 1 : 0);
 }
 
+/**
+ * `W<ssid>`, then the password on the next line. Two lines, so an SSID may
+ * contain spaces; and on this node's port only, never over the mesh -- which
+ * is why it is not in commandRun. The password is never printed back, only
+ * whether there is one.
+ */
+static void benchSetWifi() {
+    char ssid[33];
+    benchReadLine(ssid, sizeof(ssid));
+    prefs.begin(PREF_NAMESPACE, ssid[0] == '\0');
+    if (ssid[0] != '\0') {
+        char pass[65];
+        benchReadLine(pass, sizeof(pass));
+        prefs.putString(PREF_WIFI_SSID, ssid);
+        prefs.putString(PREF_WIFI_PASS, pass);
+        memset(pass, 0, sizeof(pass));
+    }
+    const String storedSsid = prefs.getString(PREF_WIFI_SSID, "");
+    const bool   hasPass    = prefs.getString(PREF_WIFI_PASS, "").length() > 0;
+    prefs.end();
+    DEBUG_SERIAL.printf("[OTA] wifi ssid=%s pass=%s\n",
+                        storedSsid.length() ? storedSsid.c_str() : "-",
+                        hasPass ? "set" : "none");
+}
+
+/** Commands typed on this node's own port. */
 static void benchServiceSerial() {
     while (DEBUG_SERIAL.available()) {
-        switch (DEBUG_SERIAL.read()) {
-            case '?': benchIdentify(); break;
-            case 'r': benchReport();   break;
-            case 'd':
-                // No restart needed: the controller is re-armed rather than
-                // reconfigured, so one run can measure the same boards with
-                // correction off and on without reflashing between them.
-                driftEnabled = !driftEnabled;
-                driftCtl.reset(millis());
-                srvCtl.reset(millis());
-                DEBUG_SERIAL.printf("[BENCH] drift=%d\n", driftEnabled ? 1 : 0);
-                break;
-            case 's': benchStartSource(); break;
-            case 'x': benchStopSource();  break;
-            case 'c': {
-                // Persisted, then restarted: whether Bluetooth starts is decided
-                // in setup(), so like bench mode this only takes effect on the
-                // next boot. Unlike bench mode it is written to NVS, because a
-                // node wired into a room should come back as what it was after
-                // the power blinks.
-                const bool next = !clientOnly;
-                prefs.begin(PREF_NAMESPACE, false);
-                prefs.putBool(PREF_CLIENT_ONLY, next);
-                prefs.end();
-                DEBUG_SERIAL.printf("[BENCH] clientonly=%d rebooting\n", next ? 1 : 0);
-                DEBUG_SERIAL.flush();
-                delay(50);
-                ESP.restart();
-                break;
-            }
-            case 'g': {
-                // The only command with an argument, hence the line read. No
-                // reboot, unlike client-only mode: nothing about the mesh id is
-                // decided in setup() -- a transmitter stamps it per packet and a
-                // receiver compares it per packet.
-                char line[MESH_NAME_MAX * 2 + 2];
-                benchReadLine(line, sizeof(line));
-                if (line[0] != '\0') {
-                    if (meshSetName(line)) {
-                        // Whatever this node was receiving, it was receiving it
-                        // from a mesh it no longer belongs to.
-                        if (!benchSource) enterDiscovery();
-                    } else {
-                        DEBUG_SERIAL.println("[MESH] error reason=empty_name");
-                    }
-                }
-                DEBUG_SERIAL.printf("[MESH] mesh=%04X name=%s\n",
-                                    meshId, meshNameForLog());
-                break;
-            }
-            case 'l':
-                DEBUG_SERIAL.printf("[LOSS] rx=%lu lost=%lu rec=%lu late=%lu runs=",
-                                    (unsigned long)rxCount, (unsigned long)seqTracker.lost,
-                                    (unsigned long)rxRecovered, (unsigned long)rxLate);
-                rxLate = 0;
-                for (int i = 0; i < 8; i++) {
-                    DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)rxLossRuns[i]);
-                    rxLossRuns[i] = 0;
-                }
-                DEBUG_SERIAL.println();
-                break;
-            case 'z': {
-                // Explicit, like L: `z1` conceals, `z0` plays silence, bare
-                // reports. Takes effect at the next lost block.
-                char line[4];
-                benchReadLine(line, sizeof(line));
-                if (line[0] == '0' || line[0] == '1') rxConceal = line[0] == '1';
-                DEBUG_SERIAL.printf("[RX] conceal=%d\n", rxConceal ? 1 : 0);
-                break;
-            }
-            case 'L': {
-                // Explicit on and off, not a toggle: a script that cannot
-                // see the state must not be able to flip it the wrong way.
-                char line[4];
-                benchReadLine(line, sizeof(line));
-                if (line[0] == '0' || line[0] == '1') {
-                    portENTER_CRITICAL(&traceMux);
-                    rxTrace.reset();
-                    portEXIT_CRITICAL(&traceMux);
-                    traceOn = line[0] == '1';
-                }
-                DEBUG_SERIAL.printf("[LT] trace=%d dropped=%lu\n", traceOn ? 1 : 0,
-                                    (unsigned long)rxTrace.dropped);
-                break;
-            }
-            case 't': {
-                char line[8];
-                benchReadLine(line, sizeof(line));
-                const int n = atoi(line);
-                if (n >= 1 && n <= 3) txRepeat = (uint8_t)n;
-                DEBUG_SERIAL.printf("[MESH] repeat=%u\n", txRepeat);
-                break;
-            }
-            case 'D': benchSetRedundancy(false); break;
-            case 'X': benchSetRedundancy(true);  break;
-            case 'P': {
-                // `P<us>`: minimum spacing between audio packets from this
-                // node, until reboot; 0 = unpaced. See ESPNOW_TX_PACE_US.
-                char line[8];
-                benchReadLine(line, sizeof(line));
-                const long us = atol(line);
-                if (us >= 0 && us <= 10000) txPaceUs = (uint32_t)us;
-                DEBUG_SERIAL.printf("[MESH] pace=%luus\n", (unsigned long)txPaceUs);
-                break;
-            }
-            case 'R': {
-                // `R<Mbps>`: the ESP-NOW PHY rate this node sends at, until
-                // reboot. 1, 2 (DSSS) or 6..54 (OFDM). See ESPNOW_PHY_RATE.
-                char line[8];
-                benchReadLine(line, sizeof(line));
-                static const struct { int mbps; wifi_phy_rate_t r; } rates[] = {
-                    {1, WIFI_PHY_RATE_1M_L}, {2, WIFI_PHY_RATE_2M_L},
-                    {6, WIFI_PHY_RATE_6M}, {9, WIFI_PHY_RATE_9M}, {12, WIFI_PHY_RATE_12M},
-                    {18, WIFI_PHY_RATE_18M}, {24, WIFI_PHY_RATE_24M}, {36, WIFI_PHY_RATE_36M},
-                    {48, WIFI_PHY_RATE_48M}, {54, WIFI_PHY_RATE_54M}};
-                const int want = atoi(line);
-                esp_err_t err = ESP_ERR_INVALID_ARG;
-                for (const auto &e : rates)
-                    if (e.mbps == want) err = esp_wifi_config_espnow_rate(WIFI_IF_STA, e.r);
-                DEBUG_SERIAL.printf("[MESH] rate=%dM -> %s\n", want, esp_err_to_name(err));
-                break;
-            }
-            case 'm':
-                outputMuted = !outputMuted;
-                DEBUG_SERIAL.printf("[OUT] mute=%d\n", outputMuted ? 1 : 0);
-                break;
-            case 'M':
-                clientMonoOut = !clientMonoOut;
-                prefs.begin(PREF_NAMESPACE, false);
-                prefs.putBool(PREF_MONO_OUT, clientMonoOut);
-                prefs.end();
-                DEBUG_SERIAL.printf("[OUT] mono=%d\n", clientMonoOut ? 1 : 0);
-                break;
-            case 'v': {
-                // `v<dB>`, e.g. v-6: this node's trim, kept in NVS. Bare `v`
-                // reports. Out-of-range values are clamped, not refused, so
-                // the reply always says what is in effect.
-                char line[8];
-                benchReadLine(line, sizeof(line));
-                if (line[0] != '\0') {
-                    int db = atoi(line);
-                    if (db < OUT_TRIM_MIN_DB) db = OUT_TRIM_MIN_DB;
-                    if (db > OUT_TRIM_MAX_DB) db = OUT_TRIM_MAX_DB;
-                    outTrimDb  = (int8_t)db;
-                    outTrimQ12 = gainQ12FromDb(db);
-                    prefs.begin(PREF_NAMESPACE, false);
-                    prefs.putChar(PREF_TRIM_DB, outTrimDb);
-                    prefs.end();
-                }
-                DEBUG_SERIAL.printf("[OUT] trim=%ddB\n", outTrimDb);
-                break;
-            }
-            case 'p': meshStartPairing();  break;
-            case 'o': meshStartOffering(); break;
-            case 'U': {
-                char line[MESH_TARGET_MAX + 2];
-                benchReadLine(line, sizeof(line));
-                if (line[0] == '\0') otaRebootIntoUpdate();
-                else                 otaStartRequest(line);
-                break;
-            }
-            case 'W': {
-                // Two lines, so an SSID may contain spaces. The password is
-                // never printed back, only whether there is one.
-                char ssid[33];
-                benchReadLine(ssid, sizeof(ssid));
-                prefs.begin(PREF_NAMESPACE, ssid[0] == '\0');
-                if (ssid[0] != '\0') {
-                    char pass[65];
-                    benchReadLine(pass, sizeof(pass));
-                    prefs.putString(PREF_WIFI_SSID, ssid);
-                    prefs.putString(PREF_WIFI_PASS, pass);
-                    memset(pass, 0, sizeof(pass));
-                }
-                const String storedSsid = prefs.getString(PREF_WIFI_SSID, "");
-                const bool   hasPass    = prefs.getString(PREF_WIFI_PASS, "").length() > 0;
-                prefs.end();
-                DEBUG_SERIAL.printf("[OTA] wifi ssid=%s pass=%s\n",
-                                    storedSsid.length() ? storedSsid.c_str() : "-",
-                                    hasPass ? "set" : "none");
-                break;
-            }
-#ifdef ENABLE_BLUETOOTH
-            case 'a': a2dpStatsPrint(); a2dpStatsReset(); break;
-            case 'f':
-                a2dpForward = !a2dpForward;
-                DEBUG_SERIAL.printf("[A2DP] fwd=%d\n", a2dpForward ? 1 : 0);
-                break;
-            case 'w':
-                // One way only: bringing ESP-NOW back after esp_wifi_stop()
-                // means redoing channel and PHY rate, and a reboot does that.
-                a2dpForward  = false;
-                espnowActive = false;
-                DEBUG_SERIAL.printf("[A2DP] wifi stop -> %s\n", esp_err_to_name(esp_wifi_stop()));
-                break;
-            case 'j':
-                if (currentMode != MODE_SERVER || !outI2SActive) break;
-                DEBUG_SERIAL.printf("[A2DP] jingle streaming=%d\n", txReady ? 1 : 0);
-                playJingle(playConnectedSound);
-                break;
-            case 'V': {
-                // `V<0..127>`: the A2DP volume, as a phone's slider would set
-                // it -- applied before forwarding, so it moves every room. A
-                // node that dialled the PC with `k` starts at VOLUME_DEFAULT.
-                char line[8];
-                benchReadLine(line, sizeof(line));
-                if (line[0] != '\0') a2dpSink.set_volume((uint8_t)constrain(atoi(line), 0, 127));
-                DEBUG_SERIAL.printf("[A2DP] volume=%d\n", a2dpSink.get_volume());
-                break;
-            }
-            case 'e': {
-                // Coexistence preference, at runtime, so one Bluetooth session
-                // can compare them: 0 WiFi, 1 Bluetooth, 2 balance (the default).
-                char line[8];
-                benchReadLine(line, sizeof(line));
-                if (line[0] != '\0') {
-                    const int p = atoi(line);
-                    DEBUG_SERIAL.printf("[A2DP] coex prefer=%d -> %s\n", p,
-                        esp_err_to_name(esp_coex_preference_set((esp_coex_prefer_t)p)));
-                }
-                break;
-            }
-            case 'k': {
-                // `k<aa:bb:cc:dd:ee:ff>`: dial an A2DP source that is already
-                // bonded, the way a headset reconnects to a phone. What lets a
-                // bench reflash a server without a person clicking Connect.
-                char line[24];
-                benchReadLine(line, sizeof(line));
-                unsigned b[6];
-                if (sscanf(line, "%x:%x:%x:%x:%x:%x",
-                           &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
-                    esp_bd_addr_t addr;
-                    for (int i = 0; i < 6; i++) addr[i] = (uint8_t)b[i];
-                    DEBUG_SERIAL.printf("[A2DP] connect %s -> %d\n", line,
-                                        a2dpSink.connect_to(addr) ? 1 : 0);
-                } else {
-                    DEBUG_SERIAL.println("[A2DP] error reason=address (k aa:bb:cc:dd:ee:ff)");
-                }
-                break;
-            }
-#endif
-            case 'b':
-                benchMagic = BENCH_MAGIC;
-                DEBUG_SERIAL.println("[BENCH] rebooting into bench mode");
-                DEBUG_SERIAL.flush();
-                delay(50);
-                ESP.restart();
-                break;
-            case 'n':
-                benchMagic = 0;
-                DEBUG_SERIAL.println("[BENCH] rebooting into normal mode");
-                DEBUG_SERIAL.flush();
-                delay(50);
-                ESP.restart();
-                break;
-            default: break;   // ignore newlines and anything unrecognised
+        const char c = (char)DEBUG_SERIAL.read();
+        if (c == 'W') {
+            benchSetWifi();
+            continue;
         }
+        char arg[3 + MESH_TARGET_MAX + MESH_COMMAND_MAX];   // `@`'s is the longest
+        arg[0] = '\0';
+        if (commandTakesArg(c)) benchReadLine(arg, sizeof(arg));
+        commandRun(c, arg, false);
+    }
+}
+
+/**
+ * Run one command: typed on this node's port, or (`remote`) sent by another
+ * node over the mesh -- the same code either way, which is what makes every
+ * command work over the mesh (D16). `arg` is the rest of the command's line,
+ * empty for one that takes none.
+ */
+static void commandRun(char c, const char *arg, bool remote) {
+    switch (c) {
+        case '?': benchIdentify(); break;
+        case 'N': benchNode();     break;
+        case 'r': benchReport();   break;
+        case 'd':
+            // No restart needed: the controller is re-armed rather than
+            // reconfigured, so one run can measure the same boards with
+            // correction off and on without reflashing between them.
+            driftEnabled = !driftEnabled;
+            driftCtl.reset(millis());
+            srvCtl.reset(millis());
+            DEBUG_SERIAL.printf("[BENCH] drift=%d\n", driftEnabled ? 1 : 0);
+            break;
+        case 's': benchStartSource(); break;
+        case 'x': benchStopSource();  break;
+        case 'c': {
+            // Persisted, then restarted: whether Bluetooth starts is decided
+            // in setup(), so like bench mode this only takes effect on the
+            // next boot. Unlike bench mode it is written to NVS, because a
+            // node wired into a room should come back as what it was after
+            // the power blinks.
+            const bool next = !clientOnly;
+            prefs.begin(PREF_NAMESPACE, false);
+            prefs.putBool(PREF_CLIENT_ONLY, next);
+            prefs.end();
+            DEBUG_SERIAL.printf("[BENCH] clientonly=%d rebooting\n", next ? 1 : 0);
+            DEBUG_SERIAL.flush();
+            delay(50);
+            ESP.restart();
+            break;
+        }
+        case 'g': {
+            // No reboot, unlike client-only mode: nothing about the mesh id is
+            // decided in setup() -- a transmitter stamps it per packet and a
+            // receiver compares it per packet.
+            if (arg[0] != '\0') {
+                if (meshSetName(arg)) {
+                    // Whatever this node was receiving, it was receiving it
+                    // from a mesh it no longer belongs to.
+                    if (!benchSource) enterDiscovery();
+                } else {
+                    DEBUG_SERIAL.println("[MESH] error reason=empty_name");
+                }
+            }
+            DEBUG_SERIAL.printf("[MESH] mesh=%04X name=%s\n",
+                                meshId, meshNameForLog());
+            break;
+        }
+        case 'l':
+            DEBUG_SERIAL.printf("[LOSS] rx=%lu lost=%lu rec=%lu late=%lu runs=",
+                                (unsigned long)rxCount, (unsigned long)seqTracker.lost,
+                                (unsigned long)rxRecovered, (unsigned long)rxLate);
+            rxLate = 0;
+            for (int i = 0; i < 8; i++) {
+                DEBUG_SERIAL.printf(i ? ",%lu" : "%lu", (unsigned long)rxLossRuns[i]);
+                rxLossRuns[i] = 0;
+            }
+            DEBUG_SERIAL.println();
+            break;
+        case 'z': {
+            // Explicit, like L: `z1` conceals, `z0` plays silence, bare
+            // reports. Takes effect at the next lost block.
+            if (arg[0] == '0' || arg[0] == '1') rxConceal = arg[0] == '1';
+            DEBUG_SERIAL.printf("[RX] conceal=%d\n", rxConceal ? 1 : 0);
+            break;
+        }
+        case 'L': {
+            // Explicit on and off, not a toggle: a script that cannot
+            // see the state must not be able to flip it the wrong way.
+            if (arg[0] == '0' || arg[0] == '1') {
+                portENTER_CRITICAL(&traceMux);
+                rxTrace.reset();
+                portEXIT_CRITICAL(&traceMux);
+                traceOn = arg[0] == '1';
+            }
+            DEBUG_SERIAL.printf("[LT] trace=%d dropped=%lu\n", traceOn ? 1 : 0,
+                                (unsigned long)rxTrace.dropped);
+            break;
+        }
+        case 't': {
+            const int n = atoi(arg);
+            if (n >= 1 && n <= 3) txRepeat = (uint8_t)n;
+            DEBUG_SERIAL.printf("[MESH] repeat=%u\n", txRepeat);
+            break;
+        }
+        case 'D': benchSetRedundancy(false, arg); break;
+        case 'X': benchSetRedundancy(true, arg);  break;
+        case 'P': {
+            // `P<us>`: minimum spacing between audio packets from this
+            // node, until reboot; 0 = unpaced. See ESPNOW_TX_PACE_US.
+            const long us = atol(arg);
+            if (us >= 0 && us <= 10000) txPaceUs = (uint32_t)us;
+            DEBUG_SERIAL.printf("[MESH] pace=%luus\n", (unsigned long)txPaceUs);
+            break;
+        }
+        case 'R': {
+            // `R<Mbps>`: the ESP-NOW PHY rate this node sends at, until
+            // reboot. 1, 2 (DSSS) or 6..54 (OFDM). See ESPNOW_PHY_RATE.
+            static const struct { int mbps; wifi_phy_rate_t r; } rates[] = {
+                {1, WIFI_PHY_RATE_1M_L}, {2, WIFI_PHY_RATE_2M_L},
+                {6, WIFI_PHY_RATE_6M}, {9, WIFI_PHY_RATE_9M}, {12, WIFI_PHY_RATE_12M},
+                {18, WIFI_PHY_RATE_18M}, {24, WIFI_PHY_RATE_24M}, {36, WIFI_PHY_RATE_36M},
+                {48, WIFI_PHY_RATE_48M}, {54, WIFI_PHY_RATE_54M}};
+            const int want = atoi(arg);
+            esp_err_t err = ESP_ERR_INVALID_ARG;
+            for (const auto &e : rates)
+                if (e.mbps == want) err = esp_wifi_config_espnow_rate(WIFI_IF_STA, e.r);
+            DEBUG_SERIAL.printf("[MESH] rate=%dM -> %s\n", want, esp_err_to_name(err));
+            break;
+        }
+        case 'm':
+            outputMuted = !outputMuted;
+            DEBUG_SERIAL.printf("[OUT] mute=%d\n", outputMuted ? 1 : 0);
+            break;
+        case 'M':
+            clientMonoOut = !clientMonoOut;
+            prefs.begin(PREF_NAMESPACE, false);
+            prefs.putBool(PREF_MONO_OUT, clientMonoOut);
+            prefs.end();
+            DEBUG_SERIAL.printf("[OUT] mono=%d\n", clientMonoOut ? 1 : 0);
+            break;
+        case 'v': {
+            // `v<dB>`, e.g. v-6: this node's trim, kept in NVS. Bare `v`
+            // reports. Out-of-range values are clamped, not refused, so
+            // the reply always says what is in effect.
+            if (arg[0] != '\0') {
+                int db = atoi(arg);
+                if (db < OUT_TRIM_MIN_DB) db = OUT_TRIM_MIN_DB;
+                if (db > OUT_TRIM_MAX_DB) db = OUT_TRIM_MAX_DB;
+                outTrimDb  = (int8_t)db;
+                outTrimQ12 = gainQ12FromDb(db);
+                prefs.begin(PREF_NAMESPACE, false);
+                prefs.putChar(PREF_TRIM_DB, outTrimDb);
+                prefs.end();
+            }
+            DEBUG_SERIAL.printf("[OUT] trim=%ddB\n", outTrimDb);
+            break;
+        }
+        case 'p': meshStartPairing();  break;
+        case 'o': meshStartOffering(); break;
+        case 'U':
+            if (arg[0] != '\0') {
+                otaStartRequest(arg);
+            } else if (remote && currentMode == MODE_SERVER) {
+                // As the update request's own format is ignored by a server:
+                // every room's stream would stop. Typed on its own port, it
+                // is somebody standing at the node, and it goes.
+                DEBUG_SERIAL.println("[OTA] error reason=serving");
+            } else {
+                otaRebootIntoUpdate();
+            }
+            break;
+        case '@': commandAsk(arg); break;
+#ifdef ENABLE_BLUETOOTH
+        case 'a': a2dpStatsPrint(); a2dpStatsReset(); break;
+        case 'f':
+            a2dpForward = !a2dpForward;
+            DEBUG_SERIAL.printf("[A2DP] fwd=%d\n", a2dpForward ? 1 : 0);
+            break;
+        case 'w':
+            // One way only: bringing ESP-NOW back after esp_wifi_stop()
+            // means redoing channel and PHY rate, and a reboot does that.
+            a2dpForward  = false;
+            espnowActive = false;
+            DEBUG_SERIAL.printf("[A2DP] wifi stop -> %s\n", esp_err_to_name(esp_wifi_stop()));
+            break;
+        case 'j':
+            if (currentMode != MODE_SERVER || !outI2SActive) break;
+            DEBUG_SERIAL.printf("[A2DP] jingle streaming=%d\n", txReady ? 1 : 0);
+            playJingle(playConnectedSound);
+            break;
+        case 'V': {
+            // `V<0..127>`: the A2DP volume, as a phone's slider would set
+            // it -- applied before forwarding, so it moves every room. A
+            // node that dialled the PC with `k` starts at VOLUME_DEFAULT.
+            if (arg[0] != '\0') a2dpSink.set_volume((uint8_t)constrain(atoi(arg), 0, 127));
+            DEBUG_SERIAL.printf("[A2DP] volume=%d\n", a2dpSink.get_volume());
+            break;
+        }
+        case 'e': {
+            // Coexistence preference, at runtime, so one Bluetooth session
+            // can compare them: 0 WiFi, 1 Bluetooth, 2 balance (the default).
+            if (arg[0] != '\0') {
+                const int p = atoi(arg);
+                DEBUG_SERIAL.printf("[A2DP] coex prefer=%d -> %s\n", p,
+                    esp_err_to_name(esp_coex_preference_set((esp_coex_prefer_t)p)));
+            }
+            break;
+        }
+        case 'k': {
+            // `k<aa:bb:cc:dd:ee:ff>`: dial an A2DP source that is already
+            // bonded, the way a headset reconnects to a phone. What lets a
+            // bench reflash a server without a person clicking Connect.
+            unsigned b[6];
+            if (sscanf(arg, "%x:%x:%x:%x:%x:%x",
+                       &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+                esp_bd_addr_t addr;
+                for (int i = 0; i < 6; i++) addr[i] = (uint8_t)b[i];
+                DEBUG_SERIAL.printf("[A2DP] connect %s -> %d\n", arg,
+                                    a2dpSink.connect_to(addr) ? 1 : 0);
+            } else {
+                DEBUG_SERIAL.println("[A2DP] error reason=address (k aa:bb:cc:dd:ee:ff)");
+            }
+            break;
+        }
+#endif
+        case 'b':
+            benchMagic = BENCH_MAGIC;
+            DEBUG_SERIAL.println("[BENCH] rebooting into bench mode");
+            DEBUG_SERIAL.flush();
+            delay(50);
+            ESP.restart();
+            break;
+        case 'n':
+            benchMagic = 0;
+            DEBUG_SERIAL.println("[BENCH] rebooting into normal mode");
+            DEBUG_SERIAL.flush();
+            delay(50);
+            ESP.restart();
+            break;
+        default: break;   // ignore newlines and anything unrecognised
     }
 }
 
@@ -3281,7 +3723,7 @@ void loop() {
     meshServiceButton();
     meshServicePairing();
     meshServiceOffer();
-    otaServiceRequest();
+    meshServiceControl();
     otaServiceConfirm();
 
     switch (currentMode) {
