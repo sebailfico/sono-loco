@@ -37,6 +37,15 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **The C3's tones play as written** (2026-10-03, `v0.2.0-91-g315f341`).
+  Its startup beeps were "really weird": timed by sending `p` and then `?`,
+  which waits for them, they took 1,410 ms for 330 ms of sound. Each sample
+  was a `sinf()` on a chip with no FPU, at about a sixth of the speed it plays,
+  and the tone driver's DMA filled the gaps with silence. `playTone()` now
+  steps a sine by recurrence — a multiply and a subtraction a sample — and
+  the same beeps take 330 ms. The FPU boards were never affected; they pick
+  it up with their next update.
+
 - **The README is about using SonoLoco** (2026-10-02). The code layout and the
   gotchas moved to `docs/code-layout.md` and `docs/gotchas.md`, the gotchas
   grouped by the part of the code they are in. The commands are in three

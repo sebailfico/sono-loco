@@ -151,6 +151,14 @@ carrying it out.
   feeds I2S: an S3 on a PC with its port closed overflowed 9 times a minute.
   `setup()` gives it a 4 KB buffer and a 5 ms timeout — never 0, which the core
   turns into forever.
+- **No `sinf()` and no `double` per sample: the C3 has no FPU.** On the
+  classic ESP32 and the S3 single-precision float is hardware; on the C3 every
+  float operation is a library call, and `double` is that on all of them —
+  `M_PI` is a double, and one in an expression promotes the rest. The bench
+  tone ran at a sixth of real time on a C3 until it became a table, and the
+  startup beeps stuttered — 1,410 ms for 330 ms of sound, the DMA playing the
+  gaps as silence — until they became a recurrence (2026-10-03). Anything a
+  C3 computes per sample has to be measured on a C3.
 - **`pio test` must not end on `Serial.end()` on a C3 or an S3.** PlatformIO's
   generated Unity glue does, and on these chips `Serial` is the chip's own
   USB port: a C3 dropped off USB the moment its tests had passed, and again
