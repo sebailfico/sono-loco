@@ -608,6 +608,11 @@ Each of these was a real bug. Don't re-introduce them.
   BOOT is a strapping pin: held low across a reset it puts the chip into the ROM
   download mode, where no firmware runs at all and nothing can react to the
   button. (It is GPIO 9 on a C3 devkit and GPIO 0 on the others.)
+- **On a C3, GPIO 9 is not a ground.** It is BOOT. A DAC grounded on it held
+  the board in download mode through every reset and replug: flashing worked,
+  then nothing ran and the port stayed silent. Ground the DAC on a G pin. Once
+  the pin is free, an RTS reset still came back in download mode; esptool's
+  `--after watchdog_reset` booted it (2026-10-02).
 - **Never put two `build_flags` keys in one `platformio.ini` section.** Duplicate keys
   in a single INI section are a hard `DuplicateOptionError` — the whole project stops
   loading, not just that environment. Extend a base section instead.
