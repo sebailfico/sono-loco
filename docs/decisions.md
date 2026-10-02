@@ -738,7 +738,8 @@ changes every conversion in `lib/sync` along with everything else (`TODO.md`).
 **Decided:** 2026-09-30. **Status:** proven 2026-10-01 — on the bench
 (`v0.2.0-64-g19f3314`: an update, a rollback, both ways of giving up) and on
 the stereo node across the room (`v0.2.0-68-g5f444ca`: updated in 60 s at
-−52 dBm, 240,425 packets received with none lost). `CHANGELOG.md`.
+−52 dBm, 240,425 packets received with none lost); 2026-10-02 on a C3, the
+RISC-V build (`v0.2.0-85-gf1958d0`, 10 s at −64 dBm). `CHANGELOG.md`.
 
 A node plugged into a stereo across the house has power and no cable to the
 PC, so a new image has to arrive by radio. It arrives over the home network:

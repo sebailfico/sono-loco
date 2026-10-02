@@ -37,6 +37,14 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **Update mode works on the C3 too** (2026-10-02, `v0.2.0-85-gf1958d0`).
+  The first update over the air on a RISC-V build: `ota.ps1 -Env esp32c3
+  -Relay COM11`, WROVER relaying, from `app0` into `app1` in 10.0 s at
+  −64 dBm, then read back and kept. Nothing needed changing — the C3's
+  bootloader has rollback enabled like the classic one, and its 798 KB image
+  is under half a slot. Before that it would not boot at all: the DAC's
+  ground was on GPIO 9, which is BOOT (README, gotchas).
+
 - **By ear, through a stereo** (2026-10-01, `v0.2.0-78-g718591d` on the
   WROVERs and the S3, `v0.2.0-68-g5f444ca` on the WROOM). Streaming into
   WROVER2, with the stereo WROOM across the room as a client: "works
