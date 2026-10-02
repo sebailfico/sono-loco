@@ -37,6 +37,43 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **Every command runs on any node over the mesh, and `N` lists the mesh**
+  (2026-10-02, `v0.2.0-87-g3c2a833`, D16). `@<name|mac|*> <command>` on any
+  node on USB runs the command there and prints each node's answer as
+  `[@<name>] <line>`; `tools/mesh.ps1` does it from the PC and draws `@* N`
+  as the star the mesh is. One dispatcher for the port and the air, and the
+  answer is what the command printed, so no command is written twice. The
+  first listing of the house: WROVER, WROVER2 and the stereo WROOM, all
+  three trims read from the desk.
+  - *Over the air, two WROVERs*: each command ran once on the node asked,
+    though its question went out five times; an `r` line too long for one
+    packet arrived in two
+    and was joined; `@* U` and `W` refused at the asking node, and `U` to a
+    serving node refused by it, over the mesh. Answers were lost 2 times in
+    10 while a phone was paging the asking WROVER, which is why an answer now
+    goes again for each later copy of its question: after that 20 of 20
+    named and 10 of 10 `*` questions answered, each line printed once.
+  - *While a stream plays*: a muted WROVER1 client of a WROVER2 bench source,
+    both asking `@* N` 20 times each over 105 s — 40 of 40 answered by both,
+    40,747 packets received, none lost, no underrun, `qfull=0`.
+  - *Bench regression*, 600 s, `-Mute`, WROVER2 sourcing to WROVER1, on a
+    mesh of their own (`logs/bench-20261002-232623.log`): 386.8 pkt/s,
+    `qfull=0`; 231,931 blocks, **zero lost/ovf/und/dup/rsy**, `sjmp=0 dry=0`,
+    `se` +248 µs; correction 7.5 ppm (198 drops) — `v0.2.0-76`'s 7.6 ppm
+    (201) and +250 µs. Two boards only: the S3 and the C3 were not on USB.
+    `test_mesh`: 30 of 30 on the C3, then 31 of 31 on WROVER1 with the
+    resend's `meshReplyKey` test.
+  - *The stereo WROOM, from `v0.2.0-68`* over WiFi with the new firmware
+    relaying D15's request: 16.2 s at −62 dBm, kept. It had counted
+    `fgn=293760` — the bench run's packets, heard and ignored, the other
+    mesh doing its job: the run's tone never reached the stereo.
+  - *Fixed on the way*: the update request was queued as a 248-byte packet
+    into a queue of 252-byte items, reading four bytes past it. And the
+    `Wait-ForLine` that `ota.ps1` shares with `mesh.ps1` (`tools/common.ps1`)
+    matched a half-received line, as `bench-mesh.ps1`'s once did — it named a
+    relay with no name.
+  - Cost: 288 bytes of static RAM on the classic build, about 4 KB of flash.
+
 - **Update mode works on the C3 too** (2026-10-02, `v0.2.0-85-gf1958d0`).
   The first update over the air on a RISC-V build: `ota.ps1 -Env esp32c3
   -Relay COM11`, WROVER relaying, from `app0` into `app1` in 10.0 s at
