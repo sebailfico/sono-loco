@@ -4,8 +4,8 @@ What has actually changed, newest first. This used to live in `TODO.md`, where a
 growing list of completed work crowded out the open one.
 
 Entries here are the *record*; the reasoning behind the standing design choices
-is in `docs/decisions.md`, and the traps worth not re-introducing are in the
-README's gotcha list.
+is in `docs/decisions.md`, and the traps worth not re-introducing are in
+`docs/gotchas.md`.
 
 ## Versions
 
@@ -36,6 +36,21 @@ hash until it is reflashed.
 ---
 
 ## Unreleased
+
+- **The README is about using SonoLoco** (2026-10-02). The code layout and the
+  gotchas moved to `docs/code-layout.md` and `docs/gotchas.md`, the gotchas
+  grouped by the part of the code they are in. The commands are in three
+  tables — everyday, measuring, Bluetooth server — with the mesh ones (`@`,
+  `N`) beside the rest, and the two "without a cable" sections became one.
+  Gone: quoted measurements that `CHANGELOG.md` already holds, and a "use the
+  full path" note that no longer showed a path.
+
+- **`pio test` no longer takes a C3 or an S3 off USB** (2026-10-02).
+  PlatformIO's generated Unity glue ends a run on `Serial.end()`, and on these
+  chips `Serial` is the chip's own USB port: the C3 dropped off USB as its
+  tests passed, and on every power-up after, until held in download mode with
+  BOOT. `test/unity_config.h` and `.cpp` replace the glue for every suite.
+  Proven on the S3: 31 of 31 `test_mesh`, and COM9 still there afterwards.
 
 - **Every command runs on any node over the mesh, and `N` lists the mesh**
   (2026-10-02, `v0.2.0-87-g3c2a833`, D16). `@<name|mac|*> <command>` on any
@@ -80,7 +95,7 @@ hash until it is reflashed.
   −64 dBm, then read back and kept. Nothing needed changing — the C3's
   bootloader has rollback enabled like the classic one, and its 798 KB image
   is under half a slot. Before that it would not boot at all: the DAC's
-  ground was on GPIO 9, which is BOOT (README, gotchas).
+  ground was on GPIO 9, which is BOOT (`docs/gotchas.md`).
 
 - **By ear, through a stereo** (2026-10-01, `v0.2.0-78-g718591d` on the
   WROVERs and the S3, `v0.2.0-68-g5f444ca` on the WROOM). Streaming into

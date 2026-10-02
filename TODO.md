@@ -2,13 +2,13 @@
 
 What is **open**. Completed work is in `CHANGELOG.md`, standing design choices
 and their reasoning are in `docs/decisions.md`, and what works today is the
-README's "Current Status". Keep them separate — this file once carried all of
+README's "Status". Keep them separate — this file once carried all of
 it, and the open list got lost inside the done one.
 
-**On the bench (2026-10-01):** WROVER1 (MAX98357A, COM20) and WROVER2 (PCM5102
-+ TPA3116, COM22) — the two that can be a server — and the S3 (MAX98357A,
-COM9). The C3 (COM10) is off the bench. The WROOM is `esp32stereo`, a client
-at the stereo across the room with no cable, updated over WiFi (D15). The
+**On the bench (2026-10-02):** WROVER1 (MAX98357A, COM20) and WROVER2 (PCM5102
++ TPA3116, COM22) — the two that can be a server — the S3 (MAX98357A, COM9)
+and the C3 (COM10). The WROOM is `esp32stereo`, a client at the stereo across
+the room with no cable, updated over WiFi (D15) and asked over the mesh (D16). The
 WROVERs' ports move with every replug: check the MAC (`?`) against
 `boards.local.md`.
 

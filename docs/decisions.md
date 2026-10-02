@@ -113,7 +113,7 @@ WiFi together" heap question and it is smaller than the ~80 KB reasoning above
 implies for a board with PSRAM: PSRAM absorbs large allocations, but the WiFi
 static RX buffers, the BT controller and every allocation below the
 always-internal threshold still come out of DRAM. Also learned the hard way:
-coexistence forbids `WIFI_PS_NONE` on a BT node (README gotcha), so a BT node
+coexistence forbids `WIFI_PS_NONE` on a BT node (`docs/gotchas.md`), so a BT node
 runs WiFi with modem sleep on, while a BT-free node still turns it off — which,
 measured 2026-10-01, costs a client no packets.
 

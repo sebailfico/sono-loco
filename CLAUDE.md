@@ -5,8 +5,11 @@ Each file owns one thing; that separation is the point, so don't duplicate conte
 between them.
 
 - **`README.md`** — what the project is, the state machine, hardware and wiring,
-  the build/flash/test commands, the code layout, and the list of gotchas that
-  have already bitten this code. Read it before changing anything.
+  the build/flash/test commands, and the commands a node takes, on its port or
+  over the mesh. Read it before changing anything.
+- **`docs/code-layout.md`** — where each part of the code lives, and why there.
+- **`docs/gotchas.md`** — the bugs that have already bitten this code, grouped
+  by the part of it they are in. Read the section for what you are changing.
 - **`TODO.md`** — what is still open. Only open items.
 - **`CHANGELOG.md`** — what has been done, newest first. Completed work moves
   here out of `TODO.md`.

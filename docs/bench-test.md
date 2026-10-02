@@ -33,6 +33,12 @@ what it hands to I2S and nothing else: the stream is received, buffered,
 drift-corrected and consumed as always. The harness reads each client's `mute=`
 before toggling it. Run unmuted only to hear it, and say so before starting one.
 
+**`-Mute` reaches the boards on USB, and nothing else.** A node in the same
+mesh with no cable — the stereo WROOM — plays the bench tone into its room for
+the whole run. Give the bench a mesh of its own first, `g<name>` on each board
+on USB, and put them back afterwards: the run of 2026-10-02 did, and the
+stereo's `fgn=293760` was the bench stream, heard and ignored.
+
 **`-Flash` names every classic board `SonoLoco-WROOM`**, because it flashes them
 all as `esp32dev`. Before a Bluetooth test, flash the WROVERs by name
 (`pio run -e esp32wrover -t upload`) and run the harness without `-Flash`

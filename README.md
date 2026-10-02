@@ -1,6 +1,6 @@
 # SonoLoco
 
-DIY multi-room audio system using ESP32 microcontrollers. No WiFi router, no central server, no configuration.
+DIY multi-room audio with ESP32 boards. No WiFi router, no central server, no configuration.
 
 ## The Core Idea
 
@@ -78,77 +78,65 @@ ESP-NOW RX ──► ring ──► I2S DMA ──► PCM5102 ──► TPA3116 
 ```
 
 **Every node plays each block at the same moment**, the server included
-(D14, `lib/sync`). The server plays its own stream through its own ring and
-DMA, exactly as a client does, about 136 ms after the A2DP packet reached it
-(`JITTER_PREFILL`). Each packet says when its block plays on the server's
-speaker, and a client starts, then steers, onto that schedule rather than
-onto a depth of its own. The ring holds 32 KB ≈ 185 ms, which is its
-capacity, not its latency.
+(D14). The server plays its own stream through its own ring and DMA, exactly
+as a client does, about 136 ms after the A2DP packet reached it. Each packet
+says when its block plays on the server's speaker, and a client starts, then
+steers, onto that schedule.
 
-Clients get what the server plays: 44.1 kHz stereo, in a quarter of the
-bytes, through IMA ADPCM (D5). A client with one speaker mixes the two
-channels (`M`).
+Clients get what the server plays: 44.1 kHz stereo, in a quarter of the bytes,
+through IMA ADPCM (D5). A client with one speaker mixes the two channels (`M`).
 
-## Current Status
+## Status
 
 **It works, by ear and by counter.** A phone or the PC streams into a WROVER,
-which plays and forwards; any number of other nodes play the mesh — WROVERs,
-the S3, the C3, and a WROOM in client-only mode. On 2026-10-01, streaming
-into WROVER2 with the WROOM playing through a stereo across the room, it
-"works incredibly well". What stands behind that:
+which plays and forwards; every other node plays the mesh — WROVERs, the S3,
+the C3, and a WROOM in client-only mode at a stereo across the room.
 
-- **In time:** every room within 1.5 ms of the server by microphone, where
-  they were 44–51 ms apart before D14.
-- **Clock drift corrected** (D11): −30 to −58 ppm between these boards, held
-  flat by duplicating or dropping one frame at a time.
-- **The bench mesh is clean:** 600 s, zero lost, overflowed or underrun on
-  every client (`./tools/bench-mesh.ps1 -Mute`); four clients at once on
-  channel 11 with the house router busy on channel 1.
-- **Updates without a cable** (D15): the stereo node across the room takes a
-  new image over the home WiFi in about a minute.
-- **Households apart** (D12): every packet carries a mesh id. Two meshes in
-  the air, and the pairing button, have not been tested on hardware.
+- **In time:** every room within 1.5 ms of the server, by microphone (D14).
+- **Clock drift corrected** (D11), by duplicating or dropping one frame at a time.
+- **A clean mesh:** 600 s with nothing lost, overflowed or underrun
+  (`./tools/bench-mesh.ps1 -Mute`).
+- **No cable after the first flash:** updates come over the home WiFi (D15),
+  and every command reaches every node over the mesh (D16).
+- **Households apart** (D12): every packet carries a mesh id.
 
-**The open problem** is the server's own radio. A WROVER streaming Bluetooth
-loses 3–12% of its own mesh frames to it, and the redundancy in every packet
-(D13) leaves about 0.5% of blocks as 2.6 ms holes. On the same recording, the
-XOR scheme already in the firmware halves that, and concealment would stop the
-rest being clicks; both are the next steps in `TODO.md`, along with what is
-not proven at all: a building full of other people's routers, and range.
+What is still open — the server's own radio losing mesh frames to Bluetooth,
+two meshes side by side, range — is in `TODO.md`.
 
-Where things are written down, so they stay in one place each:
+Where things are written down, one place each:
 
 | File | Owns |
 |------|------|
-| `TODO.md` | everything still open, including the known timing and bandwidth problems |
-| `CHANGELOG.md` | what has already been done and when |
+| `README.md` | what SonoLoco is, its hardware, and how to build, flash and drive it |
 | `docs/decisions.md` | why the architecture is what it is, and what would change it |
-| `docs/bench-test.md` | how to test on hardware — the automated harness, and the manual walkthrough for the Bluetooth path |
+| `docs/code-layout.md` | where each part of the code lives, and why there |
+| `docs/gotchas.md` | bugs that already happened once — read before changing the firmware |
+| `docs/bench-test.md` | testing on hardware: the automated harness, then the Bluetooth path by hand |
+| `TODO.md` | everything still open |
+| `CHANGELOG.md` | what has been done, newest first, with what it measured |
+| `boards.local.md` | gitignored: this bench's MACs, Bluetooth addresses and volume trims |
 
 ## Hardware
 
-### ESP32 Module Compatibility
+### ESP32 Modules
 
 | Module | BT Classic | PSRAM | Role | Notes |
 |--------|-----------|-------|------|-------|
-| ESP32 WROOM 32 | Yes | No | BT speaker **or** client | One or the other, chosen with `c` (client-only mode). BT + WiFi together exhausts the heap; with BT never started it runs the mesh fine — 12,870 packets in 60 s, no underruns |
-| ESP32 WROVER | Yes | Yes (4MB) | **Universal** | Recommended — runs full firmware, can be server or client, both at once |
-| ESP32-S3 | No | Yes | Client only | Good CPU/RAM but no BT Classic; receives audio via ESP-NOW |
-| ESP32-C3 | No (LE only) | No | Client only | RISC-V, so its own build. Works as a client and as a bench source; measured -57.7 ppm against a WROOM |
-| ESP32-C6 | No (LE only) | No | Client only | WiFi 6 + Thread, but no BT Classic; untried here |
+| ESP32 WROVER | Yes | Yes (4 MB) | **Universal** | Recommended — server or client, and switches between them |
+| ESP32 WROOM 32 | Yes | No | BT speaker **or** client | One or the other, chosen with `c` (client-only mode) |
+| ESP32-S3 | No | Yes | Client only | No BT Classic; receives the mesh |
+| ESP32-C3 | No (LE only) | No | Client only | RISC-V, so its own build |
+| ESP32-C6 | No (LE only) | No | Client only | Untried |
 
-The goal is for every node to be interchangeable. Only the **WROVER** meets that in
-full — it is the only module that can be a server *and* switch to being a client.
+Only the **WROVER** makes every node interchangeable: it is the one module that
+can be a server *and* switch to being a client.
 
-**A WROOM has to choose** because BT Classic and WiFi together need PSRAM: without
-it the BT stack runs out of DRAM and crashes, so `setupESPNow()` leaves the mesh off
-on a board about to start Bluetooth with no PSRAM. In **client-only mode** (`c`,
-kept in NVS) it never starts Bluetooth and plays the mesh instead — the WROOM at
-the stereo does. See D3. The S3, C3 and C6 have no BT Classic at all, are built
-without `-DENABLE_BLUETOOTH`, and can only ever be clients.
-
-A server shares one radio between Bluetooth and ESP-NOW, and loses some of its own
-mesh frames to its Bluetooth link — see D13 and the gotchas below.
+**A WROOM has to choose.** Bluetooth Classic and WiFi together need PSRAM;
+without it the Bluetooth stack runs out of RAM, so a WROOM about to start
+Bluetooth leaves the mesh off. In **client-only mode** (`c`, kept in NVS) it
+never starts Bluetooth and plays the mesh instead — the WROOM at the stereo
+does. See D3. The S3, C3 and C6 have no Bluetooth Classic at all and can only
+ever be clients.
 
 ### Bill of Materials (per node)
 
@@ -180,6 +168,11 @@ mesh frames to its Bluetooth link — see D13 and the gotchas below.
                                                   └─────────────────┘
 ```
 
+Those are the classic ESP32's pins. The **S3 and C3** use GPIO 4 (BCK), 5 (WS)
+and 6 (DATA), clear of their strapping pins (`config.h`). On a C3, ground the
+DAC on a **G** pin, never on GPIO 9: that is BOOT, and held low it keeps the
+board in download mode with no firmware running.
+
 ### PCM5102 Pin Configuration
 
 | Pin | Connection | Function |
@@ -191,8 +184,7 @@ mesh frames to its Bluetooth link — see D13 and the gotchas below.
 | SCK | GND | Clock generated internally |
 
 All five must be tied as shown: with XSMT low the DAC soft-mutes, and with SCK
-floating it never locks. A silent node whose counters look healthy is its DAC
-— the stereo WROOM's was, its header never soldered (2026-10-01).
+floating it never locks. A silent node whose counters look healthy is its DAC.
 
 ### Hardware Tips
 
@@ -212,11 +204,15 @@ floating it never locks. A silent node whose counters look healthy is its DAC
 - Or the module's gain setting (the chip offers 20/26/32/36 dB), if your board
   exposes it — the blue 2×50 W board has no jumper for it
 
-## Software Setup
+A MAX98357A is the other way round: at its 9 dB default gain it is quiet, so
+start its trim at `v0`.
+
+## Software
 
 ### Prerequisites
 
-- [PlatformIO](https://platformio.org/) (VS Code extension or CLI)
+- [PlatformIO](https://platformio.org/) (VS Code extension or CLI). On the dev
+  machine it is not on `PATH`: run it as `~/.platformio/penv/Scripts/pio.exe`.
 
 ### Configuration
 
@@ -228,28 +224,21 @@ port — so the source tree is identical for every board and you flash an
 [env:esp32wrover]
 extends = esp32_classic
 build_flags =
-    ${esp32_classic.build_flags}      ; extend, never replace — see the gotchas
+    ${esp32_classic.build_flags}      ; extend, never replace — see docs/gotchas.md
     -DROOM_NAME='"LivingRoom"'        ; also the Bluetooth name, keep them distinct
 ```
 
 Everything else is in `esp32-code/include/config.h` and is the same on every
 node — most importantly `ESPNOW_CHANNEL`, which **must** match across the mesh.
 
-The **mesh name** is the exception to both: it is per household rather than per
-node or per build, so it lives in NVS on the board and `config.h` only supplies
-the factory default (`MESH_NAME`). Every packet carries the 16-bit id it hashes
-to, and a client ignores every packet that is not its own — which is what keeps
-your neighbour's three speakers out of your stream.
-
-Naming a mesh needs a console, so it is what the first server gets set up with:
-
-```
-g Casa Rossi     # over serial: name this mesh, stored in NVS
-```
+The **mesh name** is per household, so it lives in NVS on the board, and
+`config.h` only supplies the factory default (`MESH_NAME`). Every packet carries
+the 16-bit id it hashes to, and a client ignores every packet that is not its
+own — which is what keeps your neighbour's three speakers out of your stream.
+Name it with `g Casa Rossi` on the first node.
 
 Moving a node into a mesh afterwards needs no console and no typing — it is a
-**three-second hold of the BOOT button at each end**, and a node on a wall is
-exactly the case that has to work:
+**three-second hold of the BOOT button at each end**:
 
 1. Hold BOOT on the server whose mesh you are joining. It beeps twice and
    *offers* its mesh for 60 s.
@@ -257,17 +246,11 @@ exactly the case that has to work:
    plays the rising three-note tone when it has joined. A falling tone means the
    window closed with no offer heard — press again.
 
-Both presses are required. A node that adopted whatever stream it happened to
-hear could be captured by a neighbour who simply played music during the window;
-an offer has to be made by somebody standing at the other mesh. The same two
-halves are on the serial console as `o` (offer) and `p` (listen), which is how
-you move a *server* into somebody else's mesh — the button on a server-capable
-node always offers.
-
-Nodes only hear each other if their ids match, and a mismatch looks exactly like
-being out of range — `mesh=` on the identify line and `fgn=` (foreign packets
-dropped) in the status line are how you tell the two apart. See D12 in
-`docs/decisions.md`.
+Both presses are required, so a neighbour playing music during the window
+cannot capture the node. On the console the two halves are `o` (offer) and `p`
+(listen). Nodes only hear each other if their ids match, and a mismatch looks
+exactly like being out of range — `mesh=` on the identify line and `fgn=`
+(foreign packets dropped) in the status line tell the two apart. See D12.
 
 ### Build & Upload
 
@@ -276,128 +259,38 @@ name per board that might be plugged in:
 
 | Environment   | Board        | Port | Build | Role |
 |---------------|--------------|------|-------|------|
-| `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
-| `esp32stereo` | ESP32 WROOM + PCM5102A | COM8, first flash only | `esp32_classic` | Client-only, at the stereo's aux input with no cable to the PC: updated with `./tools/ota.ps1 -Env esp32stereo` (D15) |
+| `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`) |
+| `esp32stereo` | ESP32 WROOM + PCM5102A | first flash only | `esp32_classic` | Client-only, at the stereo with no cable: updated over WiFi (`ota.ps1 -Env esp32stereo`) |
 | `esp32wrover` | ESP32 WROVER-E + MAX98357A | COM20 | `esp32_classic` | SERVER or CLIENT — the reference node |
 | `esp32wrover2` | ESP32 WROVER-E + PCM5102 + TPA3116 | COM22 | `esp32_classic` | Same binary, second name so a phone can tell the two apart |
-| `esp32s3`     | ESP32-S3 + MAX98357A | COM9 | `esp32s3_client` | CLIENT only (no BT Classic). Plug its native USB port: on the CH343 port it flashes but prints nothing |
-| `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
-
-A CH340 is numbered by USB socket, so the WROVERs' ports move with every
-replug: check the MAC that `?` prints. `tools/bench-mesh.ps1` does not depend
-on the ports — it discovers them and identifies each chip at run time, so a new
-board needs no edit here.
-
-Each board's MAC, and the PC's Bluetooth address that `k` dials, are in
-`boards.local.md` at the repo root. It is gitignored: the repo is public, and
-those addresses name this particular hardware on the air. Anywhere else, the
-placeholder is `aa:bb:cc:dd:ee:ff`.
-
-`esp32dev` and `esp32wrover` compile **the same binary**; they exist as separate names
-only so each board keeps its port. The Arduino core ships `CONFIG_SPIRAM=y` with
-`CONFIG_SPIRAM_BOOT_INIT` unset, so `psramInit()` probes for PSRAM at boot and only
-logs a warning when there is none — one image boots on both modules and
-`setupESPNow()` picks the role at runtime. That is the project premise, so resist
-adding a build config for anything but a new instruction set; if a board needs
-different *behaviour*, detect it at runtime or make it a setting, the way
-client-only mode is.
-
-The S3 and C3 must stay separate: different architectures — Xtensa and RISC-V —
-no BT Classic on either, and the A2DP library will not compile for them.
+| `esp32s3`     | ESP32-S3 + MAX98357A | COM9 | `esp32s3_client` | CLIENT only. Plug its native USB port: on the CH343 one it flashes but prints nothing |
+| `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only. RISC-V, hence its own build |
 
 ```bash
 cd esp32-code
-
-pio run -e esp32dev --target upload
-pio device monitor -e esp32dev
+pio run -e esp32wrover --target upload
+pio device monitor -p COM20 --dtr 0 --rts 0 --eol LF --echo
 pio device list                      # re-check the ports after plugging a board in
 ```
 
-PlatformIO is not on `PATH` on the dev machine; use the full path:
+A CH340 is numbered by USB socket, so the WROVERs' ports move with every
+replug: check the MAC that `?` prints. The harness and the tools discover the
+ports themselves. Each board's MAC is in `boards.local.md`; anywhere tracked,
+the placeholder is `aa:bb:cc:dd:ee:ff`, because the repo is public.
 
-```bash
-pio run -e esp32dev --target upload
-```
+`--dtr 0 --rts 0` on the monitor matters: on a classic board those lines are
+wired to reset and BOOT, and the C3's and S3's own USB port drives the same two
+from them.
 
-Every build stamps itself with `git describe --tags --always --dirty=*`, printed
-by the build, in the boot banner and in the node's `?` identify line:
+`esp32dev` and `esp32wrover` compile **the same binary**; one image boots on a
+WROOM and a WROVER alike and picks its role at runtime. That is the project
+premise, so add a build config only for a new instruction set; a board that
+needs different *behaviour* gets a runtime check or a setting (D4).
 
-```
-  SonoLoco — Multi-Room Audio
-  Firmware: v0.1.0-3-gabc1234
-```
-
-A trailing `*` means the build came from a tree with uncommitted changes, so its
-sha does not describe what is on the board. `tools/bench-mesh.ps1` warns about
-that, and about a board running anything other than the tree you are reading —
-which is the usual cause of a bench result that will not reproduce. See D10.
-
-### Updating a node without a cable
-
-A node plugged into a stereo across the house has power and nothing else. It
-can be updated over the home WiFi, with any other node on USB relaying the
-request over the mesh:
-
-```powershell
-./tools/ota-wifi.ps1 -Port COM22     # once per node, over USB: you type the WiFi password
-./tools/ota.ps1 -Env esp32wrover2    # from then on, from anywhere on the LAN
-./tools/ota.ps1 -Env esp32stereo -Status   # no upload: how is it receiving, over there?
-```
-
-`ota.ps1` builds the image, has the relay broadcast `U<room name>`, finds the
-node on the LAN when it reboots into **update mode**, checks it is the node the
-image was built for, uploads it, and then asks again to read the new version
-back. All of it is silent — the node may be playing into a stereo — so the
-script's output is the report. If update mode gives up (no WiFi stored, a wrong
-password, five minutes with no upload) the node goes back on the mesh by itself.
-The startup sound, likewise, plays only on a power-on, not on the restarts an
-update makes.
-
-`-Status` uploads nothing. The node reports the home WiFi's signal where it
-stands and the stream counters it had when the request arrived — `rx`, `lost`,
-`und`, the loss-run histogram — and goes back to the mesh. The counters can
-also be asked for over the mesh without a reboot (`@<name> r`, below); the
-WiFi signal only this way. Ask while a stream is playing: the counters restart
-with every stream.
-
-A new image is on probation until it has run a minute with its radio up; any
-reset before that — a crash, a hang, a power cut — boots the previous one. So an
-update that breaks the mesh undoes itself instead of needing the cable.
-
-Two prerequisites, both over USB, once: the node needs the two-slot partition
-table (`min_spiffs.csv`), which any USB flash of a build from D15 onwards writes,
-and it needs the WiFi stored. The request is ignored by a node that is serving a
-phone, and only heard inside its own mesh. The endpoint takes an image from
-anyone on the LAN for as long as update mode lasts — five minutes, and only when
-asked. See D15 in `docs/decisions.md`.
-
-### Talking to a node without a cable
-
-Every serial command also runs on another node of the mesh. Type it on any node
-on USB with a target in front — a room name, a MAC, or `*` for every node — and
-the answers come back over the mesh, one `[@<name>]` line each:
-
-```
-@SonoLoco-Stereo v-20     the stereo's volume trim, from the desk
-@* N                      every node: its mode, its source, what hearing it costs
-@SonoLoco-C3 r            one node's full status line
-```
-
-`tools/mesh.ps1` does the same from the PC, and with no arguments draws the
-mesh: each source — a server's phone, or a bench tone — with the clients locked
-to it, and for each client the packets it received and lost in this stream.
-
-```powershell
-./tools/mesh.ps1
-./tools/mesh.ps1 -Target SonoLoco-Stereo -Command v-20
-```
-
-Three limits, all on purpose. `*` takes nothing that reboots a node or takes it
-off the mesh (`U b n c g p o w`): that would be one character away from
-silencing the house. `W` never travels at all, because the password would go
-out in the clear. And only nodes in the asking node's own mesh, on firmware from
-D16 onwards, hear the question — an older one is simply missing from the list,
-and `ota.ps1` still reaches it. See D16 in `docs/decisions.md`.
+Every build is stamped with `git describe --tags --always --dirty=*`, printed
+in the boot banner and on the `?` line. A trailing `*` means uncommitted changes:
+its sha does not describe what is on the board, and a bench result from it will
+not reproduce. See D10.
 
 ### Tests
 
@@ -408,11 +301,10 @@ The pure logic in `lib/` — five suites, `test_jitter`, `test_adpcm`,
 pio test -e native
 ```
 
-This needs a host compiler (gcc/clang/MSVC), which is *not* currently installed
-on the dev machine — see `TODO.md`. Until it is, the same tests run on a
-connected board with the cross-toolchain PlatformIO already has:
-`pio test -e esp32wrover2 -f test_jitter` (any environment whose board is
-plugged in).
+That needs a host compiler, which is *not* installed on the dev machine yet
+(`TODO.md`). Until it is, the same tests run on any board that is plugged in:
+`pio test -e esp32wrover2 -f test_jitter`. The board is left running the test
+image, so reflash it afterwards.
 
 To test the **mesh** — real boards, real radio, silent:
 
@@ -420,293 +312,127 @@ To test the **mesh** — real boards, real radio, silent:
 ./tools/bench-mesh.ps1 -Flash -Duration 600 -Mute
 ```
 
-It discovers every attached ESP32, identifies each by chip, flashes the matching
-firmware, streams a synthetic 44.1 kHz stereo tone between them and reports packet loss
-and clock drift. No board limit. Full detail, and the Bluetooth half, in
-`docs/bench-test.md`.
+It discovers every attached ESP32, flashes the matching firmware, streams a
+synthetic 44.1 kHz stereo tone between them and reports packet loss and clock
+drift. `-Mute` silences the boards on USB, not a node elsewhere in the same
+mesh: give the bench a mesh of its own (`g`) when one is playing into a room.
+Full detail, and the Bluetooth half, in `docs/bench-test.md`.
 
-### Bench mode
+## Driving the Nodes
 
-Any node can be driven by hand over the serial monitor, in any build — and,
-with `@<target>` in front, any other node of the mesh, `W` alone excepted:
+Every node takes commands: a letter, sometimes with an argument, typed on its
+serial port. The same command runs on **any other node of the mesh** with
+`@<target>` in front, typed on whichever node is on USB — so after the first
+flash, a node needs no cable at all.
+
+### Over the mesh
+
+```
+@SonoLoco-Stereo v-20     set the stereo's volume trim, from the desk
+@* N                      every node: its mode, its source, what hearing it costs
+@* v                      every node's trim
+@SonoLoco-C3 r            one node's full status line
+```
+
+The target is a room name, a MAC, or `*` for every node. Each answer comes back
+as `[@<name>] <line>`, then `[CMD] done replies=<n>`. A node that does not
+answer is not on the mesh, not in this one, or on firmware from before D16.
+
+`tools/mesh.ps1` does the same from the PC, through whichever node is on USB.
+With no arguments it draws the mesh — each source, a server's phone or a bench
+tone, with the clients locked to it and what each one loses:
+
+```powershell
+./tools/mesh.ps1
+./tools/mesh.ps1 -Command v
+./tools/mesh.ps1 -Target SonoLoco-Stereo -Command v-20
+```
+
+Three limits, on purpose. `*` refuses anything that reboots a node or takes it
+off the mesh — `U b n c g p o w` — which would silence the house from one
+keystroke. `W` never travels, because the password would be broadcast. A node
+serving a phone refuses a remote `U`. See D16.
+
+### Updates over WiFi
+
+A node at a stereo across the house has power and nothing else. It takes a new
+image over the home WiFi, with any node on USB relaying the request:
+
+```powershell
+./tools/ota-wifi.ps1 -Port COM22           # once per node, over USB: you type the WiFi password
+./tools/ota.ps1 -Env esp32stereo           # from then on, from anywhere on the LAN
+./tools/ota.ps1 -Env esp32stereo -Status   # no upload: its WiFi signal, and its stream counters
+```
+
+`ota.ps1` builds the image, has the relay broadcast `U<room name>`, finds the
+node on the LAN when it reboots into **update mode**, uploads, and reads the new
+version back. All of it is silent, and the script's output is the report. If
+update mode gives up — no WiFi stored, a wrong password, five minutes with no
+upload — the node goes back on the mesh by itself.
+
+A new image is on probation until it has run a minute with its radio up; any
+reset before that boots the previous one, so an update that breaks the mesh
+undoes itself. A node needs one USB flash of a build from D15 onwards, for the
+two-slot partition table, and its WiFi stored. The request is heard only inside
+its own mesh. See D15.
+
+### Commands
+
+The same on every node and in every build; a few only mean something on a
+Bluetooth server. `?` prints the node's state, so read it before toggling
+anything (`m`, `M`, `c` are toggles).
+
+**Everyday**
 
 | Key | Effect |
 |-----|--------|
-| `?` | identify — firmware version, chip, PSRAM, MAC, whether BT and ESP-NOW are active |
-| `N` | where this node sits in the mesh: its mode, its source (`phone`, `bench`, or the MAC of the server it is locked to), and `rx`/`lost`/`und` in this stream. One line, so `@* N` lists the mesh; `tools/mesh.ps1` draws it |
-| `@` | `@<name\|mac\|*> <command>`: run the command on that node, or on every node of this mesh, and print the answers as `[@<name>] <line>`, then `[CMD] done` with how many answered. `*` refuses `U b n c g p o w`. See D16 |
+| `?` | identify — firmware version, chip, PSRAM, MAC, mesh, mute, trim, whether BT and ESP-NOW are up |
+| `N` | where this node sits in the mesh: its mode, its source (`phone`, `bench`, or the MAC of the server it is locked to), and `rx`/`lost`/`und` in this stream. One line, so `@* N` lists the mesh |
+| `@` | `@<name\|mac\|*> <command>`: run the command on that node, or on every node of this mesh, and print the answers. See above |
+| `v` | `v<dB>` this node's own volume trim, −40…+12; bare `v` reports. Applied at this node's output, after the mesh has its copy, so the phone's slider still moves every room and the trim sets where this room sits among them. Kept in NVS |
+| `m` | mute this node's speaker until reboot — the mesh and every timing are untouched. A toggle |
+| `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS. A toggle |
+| `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once |
+| `p` | listen for 60 s and join the mesh that offers itself — the node half of pairing |
+| `o` | offer this mesh for 60 s — the server half |
+| `c` | toggle client-only mode and reboot: the node never starts Bluetooth, which is what lets a WROOM be a mesh client. Kept in NVS |
+| `U` | bare: reboot into update mode. `U<name>` asks that node over the mesh — what `ota.ps1` sends |
+| `W` | `W<ssid>`, then the password on the next line: the home WiFi update mode joins. Bare `W` prints the SSID and whether a password is stored, never the password. This node's port only |
+
+**Measuring** — what `bench-mesh.ps1` and the tools in `tools/btlisten/` drive
+
+| Key | Effect |
+|-----|--------|
 | `b` | reboot into bench mode (Bluetooth stays off) |
 | `n` | reboot into normal mode |
 | `s` | start generating the synthetic test stream |
 | `x` | stop generating it |
 | `r` | print a telemetry line now |
 | `d` | toggle clock-drift correction (on by default) |
-| `c` | toggle client-only mode and reboot — the node then never starts Bluetooth, which is what lets a WROOM be a mesh client. Kept in NVS, so it survives a power cut |
-| `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once — no reboot, because nothing about the id is decided at boot |
-| `p` | listen for 60 s and join the mesh that offers itself — the speaker half of pairing. Same as a three-second BOOT hold on a node that cannot be a server |
-| `o` | offer this mesh for 60 s, so a listening node can join it — the server half. Same as a three-second BOOT hold on a server-capable node |
-| `U` | bare: reboot into update mode. `U<name>` asks the node with that room name or MAC, over the mesh, to do so — what `tools/ota.ps1` sends |
-| `W` | `W<ssid>`, then the password on the next line: the home WiFi update mode joins. Kept in NVS. Bare `W` prints the SSID and whether a password is stored, never the password. `tools/ota-wifi.ps1` asks for both. This node's port only: over the mesh the password would be broadcast |
-| `a` | BT server: print and reset the A2DP window — packets/s, packet size, a histogram of the gaps between packets from the Bluetooth stack, and the server's own ring (`jit`, `und`, `ovf`, `dry`). A gap longer than the ring holds is a hole in every room |
-| `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
-| `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
-| `j` | BT server: play the connect jingle now, the way a connection does — into the server's own output, from `loop()`, so it cannot interleave with the stream; the ring re-arms afterwards and the clients follow |
-| `k` | BT server: `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, the way a headset reconnects to a phone. What lets a reflashed server get its link back with nobody clicking Connect; the PC's own Bluetooth address goes here (`boards.local.md`) |
-| `V` | BT server: `V<0..127>` sets the A2DP volume, as a phone's slider would. Applied before forwarding, so it moves every room; a server that dialled in with `k` starts at 1 |
-| `m` | mute this node's speaker until reboot — zeroes what its ring hands to I2S, on a server and a client alike; the mesh and every timing are untouched. How a mic hears one node alone, and how `bench-mesh.ps1 -Mute` runs silent |
-| `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS |
-| `v` | `v<dB>` this node's own volume trim, −40…+12, e.g. `v-6`; bare `v` reports. Applied at this node's output, after the mesh has its copy, so the phone's slider still moves every room and the trim sets where this room sits among them. Kept in NVS; `trim=` on the identify line |
-| `z` | client: `z1` fills a lost block that was not rebuilt from its two neighbours, each played backwards from the edge it shares, so there is no step and no click; `z0` plays zeroes. `MESH_CONCEAL` is the default (off until measured by microphone) |
-| `e` | BT server: `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
-| `t` | `t<n>` sends each mesh frame n times (1–3) until reboot; `ESPNOW_TX_COPIES` is the default |
-| `D` | `D<n>` each packet carries the block n packets back as well (0–15, 0 = none) until reboot; on the wire, so clients follow. `MESH_REDUNDANCY_DISTANCE` is the default |
-| `X` | `X<n>` each packet carries the XOR of the blocks 1 and n back instead (2–15), and a client holding either rebuilds the other; `D<n>` switches back. Until reboot, on the wire. `MESH_REDUNDANCY_PARITY` is the default |
-| `P` | `P<us>` spaces audio packets at least that far apart (0 = send each as soon as the radio is free) until reboot; `ESPNOW_TX_PACE_US` is the default |
-| `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
 | `l` | client: print and reset the histogram of lost-run lengths (1..7, 8+) and `rec`, the blocks rebuilt from a later packet or a repeat copy |
-| `L` | client: `L1` prints which packets were lost, a bit each, once a second as `[LT]` lines (~120 bytes/s); `L0` stops. What `tools/btlisten/losstrace.py` scores every redundancy scheme on. Off at boot |
+| `L` | client: `L1` prints which packets were lost, a bit each, once a second as `[LT]` lines; `L0` stops. What `tools/btlisten/losstrace.py` scores redundancy schemes on |
+| `z` | client: `z1` fills a block that was lost and not rebuilt from its neighbours, `z0` plays zeroes. `MESH_CONCEAL` is the default |
+| `t` | `t<n>` sends each mesh frame n times (1–3) until reboot |
+| `D` | `D<n>` each packet carries the block n packets back as well (0–15) until reboot; on the wire, so clients follow |
+| `X` | `X<n>` each packet carries the XOR of the blocks 1 and n back instead (2–15) until reboot |
+| `P` | `P<us>` spaces audio packets at least that far apart, until reboot |
+| `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
 
-Bench mode exists because the normal SERVER role needs a phone to connect over
-A2DP, which cannot be automated. Because it never starts Bluetooth, it also runs
-on a board with no PSRAM — which is how a WROOM can be tested on the mesh at all.
-See D9 in `docs/decisions.md`.
+**Bluetooth server**
 
-## Code Layout
+| Key | Effect |
+|-----|--------|
+| `a` | print and reset the A2DP window — packets/s, a histogram of the gaps between packets from the Bluetooth stack, and the server's own ring. A gap longer than the ring holds is a hole in every room |
+| `f` | toggle forwarding to the mesh; local playback carries on |
+| `w` | stop WiFi until the next reboot — the WROOM case, on a WROVER |
+| `j` | play the connect jingle now, as a connection does, into the server's own output |
+| `k` | `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, as a headset reconnects to a phone; the PC's address is in `boards.local.md` |
+| `V` | `V<0..127>` the A2DP volume, as a phone's slider would set it: it moves every room |
+| `e` | `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
 
-Deliberately small. `main.cpp` is one file on purpose — resist splitting it
-further; the exception below is argued in `docs/decisions.md` (D7).
-
-- `esp32-code/src/main.cpp` — the state machine, tones, ESP-NOW TX/RX, A2DP
-  callbacks and I2S setup. Everything that needs real hardware.
-- `esp32-code/include/config.h` — every tuneable number. New constants go here,
-  never inline in `main.cpp`. Per-node values go in `platformio.ini` instead.
-- `esp32-code/lib/jitter/` — the client's ring buffer (`jitter.h`), packet
-  sequence accounting (`seqtracker.h`), where each lost block's silence
-  went so a later packet can patch it (`holes.h`), the blocks held for undoing
-  a parity (`blocks.h`), which packets were missed, one bit each, for
-  scoring redundancy offline (`losstrace.h`), what a lost block plays
-  instead of silence (`conceal.h`), and a node's own volume trim
-  (`gain.h`). Pure logic, no Arduino or
-  ESP-IDF, so it can be tested on a PC. This is where both of the worst bugs in this project
-  lived.
-- `esp32-code/lib/mesh/` — the mesh name to mesh id derivation. Pure arithmetic
-  on a string, and in a library because two nodes disagreeing about what a name
-  hashes to produces silence with nothing in the log — the one failure mode
-  worth pinning on the host rather than chasing on a bench. See D12. Also which
-  node an update request names (D15): a match too loose reboots the wrong
-  speaker off the mesh. And the commands that travel the mesh (D16): their
-  packets, which node one is for, and which may never go to every node.
-- `esp32-code/lib/adpcm/` — the mesh codec: IMA ADPCM, stereo, in blocks that
-  each carry their decoder state, so any block decodes alone. Pinned to the
-  Python reference in `tools/codec/abtest.py` by golden vectors: two nodes built
-  from codecs that disagree decode each other into noise. See D5.
-- `esp32-code/lib/drift/` — the clock-drift controller. Decides when a client
-  should duplicate or drop a sample to hold its buffer at depth; it never touches
-  I2S or the ring buffer itself, which is what makes the closed loop simulable on
-  a PC. See D11.
-- `esp32-code/lib/sync/` — playing in time: a node's output clock, read from
-  its own blocking DMA writes, and the server's schedule as a client sees it
-  through the packets' `due` stamps, earliest of each window. The arithmetic
-  behind D14, where an error is a node playing cleanly a few ms away from the
-  others — which nothing but a microphone would notice.
-- `esp32-code/test/test_jitter/` — host tests for the ring buffer and sequence
-  accounting. Each one corresponds to a real bug or a real invariant.
-- `esp32-code/test/test_adpcm/` — the codec against the reference's own output,
-  byte for byte, including the block layout that is the wire format.
-- `esp32-code/test/test_mesh/` — host tests for mesh identity, including known
-  names pinned to known ids: changing the hash would split every deployed mesh
-  silently, so it should take a failing test to do it.
-- `esp32-code/test/test_drift/` — host tests for the controller, including
-  hour-long closed-loop simulations at the drift measured on these boards. The
-  model is checked against the recorded 1.34 B/s slope before anything built on
-  it is believed.
-- `esp32-code/test/test_sync/` — host tests for `lib/sync`: wake latency, an
-  output slower than nominal, a window of slow packets, a server clock with
-  its own slope, a schedule that moves, and the 32-bit wrap in every one.
-- `esp32-code/scripts/version.py` — a PlatformIO pre-build step that defines
-  `FW_VERSION` from `git describe`. There is no version constant to bump by hand;
-  see D10.
-- `tools/airmon/` — a standalone sniffer for a spare classic ESP32: what is on
-  the channel, second by second, and a 13-channel survey. `capture.py` logs it,
-  `correlate.py` lines it up with a bench log.
-- `tools/bench-mesh.ps1` — the automated multi-board mesh test: discover, flash,
-  stream, measure drift, report. Scales to any number of boards.
-- `tools/test-client-only.ps1` — checks that a BT-capable board really works as a
-  mesh client on a *normal* boot. `bench-mesh.ps1` cannot cover this, because it
-  puts every node into bench mode by design.
-- `tools/capture-serial.ps1` — timestamped serial capture of a single node, so
-  two manual runs can be compared.
-- `tools/ota.ps1` — updates a node over the home WiFi, relayed by any node on
-  USB: build, request, find on the LAN, upload, read the version back. D15.
-  `-Status` reads a node's WiFi signal and reception without uploading.
-- `tools/ota-wifi.ps1` — stores the home WiFi on a node, once, over USB. The
-  password is typed at a masked prompt and never passes through anything else.
-- `tools/mesh.ps1` — runs any command on any node over the mesh, relayed by a
-  node on USB; with no arguments, lists the mesh and draws who hears whom. D16.
-- `tools/common.ps1` — what `ota.ps1` and `mesh.ps1` share: finding a relay,
-  opening its port without resetting it, reading its lines.
-- `tools/codec/abtest.py` — hear what a client plays before it is firmware: a
-  WAV in, the original, the old 22.05 kHz mono path and the ADPCM path out, at
-  the same rate and level. It decided D5, and its encoder is the reference
-  `lib/adpcm` is tested against.
-- `tools/btlisten/` — the Bluetooth half's test signal. The PC streams a 997 Hz
-  tone to a server and records it with its own microphone, then counts holes,
-  clicks and pitch error; with `--serial` the board's `a` window for the same
-  seconds is printed beside it. `mon.py` logs that window every 2 s during
-  ordinary use. `sync.py` measures how far apart the nodes play: clicks
-  through the server, one node unmuted at a time. `soak.py` is the long
-  silent run behind the server, and with `--trace` records which packets
-  each client missed; `losstrace.py` then replays the firmware's rebuild
-  rules on that record for every redundancy scheme a server can send, so
-  schemes are compared on the same losses rather than in different minutes.
-
-Comments in the code explain *why*, particularly where a line looks wrong but isn't.
-
-## Gotchas That Have Already Bitten This Code
-
-Each of these was a real bug. Don't re-introduce them.
-
-- **`i2s_write()` may accept fewer bytes than requested.** Always use `i2sWriteAll()`,
-  or advance by the returned `bytes_written`. Ignoring it silently discards audio.
-- **The jitter buffer must be pushed whole blocks or not at all, and moved in
-  whole stereo frames.** Dropping an odd number of bytes shifts every later 16-bit
-  sample by one byte and never re-aligns — a permanent noise stream, not a glitch.
-  Moving by two bytes instead of four swaps left and right for the rest of the
-  stream. Every push, advance and drift correction is a multiple of
-  `CLIENT_FRAME_BYTES`. `JITTER_BUF_SIZE` must stay a power of two (a
-  `static_assert` enforces it).
-- **`a2dpSink.end(true)` frees the BT controller permanently.** The node can then never
-  be a SERVER again until it is power-cycled. Use `end(false)`.
-- **…but `end(false)` alone leaves Bluetooth running.** It deinitialises A2DP and
-  AVRCP only: Bluedroid and the controller stay up, still page- and
-  inquiry-scanning like a speaker waiting for a phone, and coexistence hands
-  those scans the radio. A WROVER client lost 4.7% of the mesh, in runs of 8+,
-  next to an S3 losing 2.0%. `stopBluetooth()` disables Bluedroid and the
-  controller after it, keeping the controller's memory.
-- **Disable Bluedroid, never deinit it, behind the A2DP library's back.** The
-  library remembers having initialised it and skips `esp_bluedroid_init()` on
-  the next `start()`, which then loops forever on "Failed to enable bluedroid"
-  — the node is wedged and never becomes a speaker again.
-- **Mute by zeroing samples, not by switching an output off.** `m` once
-  switched the A2DP library's output off, the library then kept its I2S
-  driver installed, and the node's next CLIENT install failed every 5 s:
-  stuck in DISCOVERY, counting packets and playing none. `m` zeroes what the
-  ring hands to I2S, on every node, and the library's output is off for good
-  (D14).
-- **Every write to the output driver must be counted in `outFrames`, tones
-  included.** The output clock (D14) reads the DMA position as that count
-  modulo the buffer length; a write that bypasses it puts every later
-  reading off by up to a buffer (5.8 ms), in a way no counter shows.
-  `outWrite()` and `i2sWriteAll()` both count.
-- **The ring's frame numbering must advance for every frame that enters the
-  ring, silence included, and for nothing else.** `ringPushed` is what a
-  packet's `due` and a client's timeline are expressed in. A push that fails,
-  or a gap longer than the silence it was given, leaves the numbering behind
-  the stream, and the timeline is flushed (`timelineFlush`) rather than
-  steered by.
-- **Never `Serial.print` from the ESP-NOW send/recv callbacks.** They fire ~390×/s and a
-  blocking UART write there causes the very dropouts it would be reporting. Bump a
-  counter, print from `loop()`.
-- **`esp_now_send()` back-to-back** without waiting for the send callback returns
-  `ESP_ERR_ESPNOW_NO_MEM` and drops silently. TX is gated on a semaphore.
-- **A node on an older firmware must not hear the new stream.** Before ADPCM a
-  client pushed any payload straight into its buffer as PCM; fed ADPCM, that is
-  full-scale noise through the amp. The mesh id on the wire is XORed with
-  `MESH_WIRE_FORMAT`, so a node on the other format drops these packets as a
-  foreign mesh (`fgn=` climbing). Change it whenever the payload changes
-  meaning. (The old path's own trap — decimation that skips the FIR folds
-  11–22 kHz into the audible band — went with the decimation.)
-- **Sequence-gap arithmetic is unsigned.** A duplicate or reordered packet computes as
-  a gap of ~65535; it has to be treated as a resync, not as 65535 lost packets.
-- **Elapsed-time comparisons against a timestamp another task writes must be signed.**
-  `millis() - lastRxMs` is unsigned, so a timestamp written one millisecond *after*
-  this task read `millis()` wraps the difference to ~4.29 billion and every threshold
-  test passes. That is not hypothetical: a client dropped to DISCOVERY announcing five
-  seconds of ESP-NOW silence while its own receive counter was advancing by 221 packets
-  a second (`silence now=13822 last=13823 age=4294967295`). Cast to `long` —
-  `(long)(millis() - then) > TIMEOUT` — as `clientRetryAfterMs` already does.
-  Comparisons against `loop()`'s own bookkeeping are safe, because only one task
-  writes them.
-- **Don't name a global `btStarted`.** Arduino's `esp32-hal-bt.h` already declares
-  `bool btStarted()` at global scope and the collision is a hard compile error.
-- **Role state must be cleared on every entry to DISCOVERY,** not just when leaving
-  CLIENT. A stale `senderLocked` makes a node ignore every future server forever.
-- **The mesh id must be checked before the sender lock, not after.** A client
-  locks onto the first node it hears; if a neighbour's packet reaches that lock
-  before the id comparison, the node pins itself to a mesh it will then ignore
-  every packet from, and stays deaf to its own household until it next falls
-  back to DISCOVERY. Same shape as the stale-`senderLocked` bug above.
-- **A pairing beacon must be filtered out before the sequence tracker.** A
-  beacon is an audio packet with no payload and `MESH_BEACON_SEQ` in the
-  sequence field; let one reach `SeqTracker` and it computes a gap of tens of
-  thousands, charges a resync and re-arms the jitter buffer — an audible
-  interruption caused by a node that was only saying hello.
-- **Pairing is a long press while running, never a press held through a reset.**
-  BOOT is a strapping pin: held low across a reset it puts the chip into the ROM
-  download mode, where no firmware runs at all and nothing can react to the
-  button. (It is GPIO 9 on a C3 devkit and GPIO 0 on the others.)
-- **On a C3, GPIO 9 is not a ground.** It is BOOT. A DAC grounded on it held
-  the board in download mode through every reset and replug: flashing worked,
-  then nothing ran and the port stayed silent. Ground the DAC on a G pin. Once
-  the pin is free, an RTS reset still came back in download mode; esptool's
-  `--after watchdog_reset` booted it (2026-10-02).
-- **Never put two `build_flags` keys in one `platformio.ini` section.** Duplicate keys
-  in a single INI section are a hard `DuplicateOptionError` — the whole project stops
-  loading, not just that environment. Extend a base section instead.
-- **`JITTER_PREFILL` must exceed what the I2S DMA ring can swallow in one pass.**
-  At 2000 bytes against a 4096-byte DMA ring, every arming of the jitter buffer
-  was drained instantly and the client underran 24 times a second forever, while
-  the audio limped along on DMA buffering alone. `static_assert`s tie the two
-  constants together now.
-- **The ESP32-S3 needs `-DARDUINO_USB_CDC_ON_BOOT=1`.** Its board definition sets
-  `ARDUINO_USB_MODE=1` but leaves CDC off, so `Serial` goes to GPIO43/44 while
-  the board enumerates on native USB — completely silent over the cable you are
-  plugged into.
-- **…and then `Serial` can stall the audio.** Native USB serial waits up to
-  100 ms per write for a host that is plugged in but not reading, and `loop()`
-  feeds I2S: an S3 on a PC with its port closed overflowed 9 times a minute.
-  `setup()` gives it a 4 KB buffer and a 5 ms timeout — never 0, which the core
-  turns into forever.
-- **Bench mode's flag must be `RTC_NOINIT_ATTR`, not `RTC_DATA_ATTR`.**
-  `.rtc.data` is re-initialised from the image on every boot that runs the
-  bootloader, so the flag reads back as zero and the node reboots into normal
-  mode instead.
-- **ESP-NOW broadcasts at 1 Mbps unless told otherwise, and at 220 packets/s
-  that is half the channel.** The default rate for ESP-NOW frames is 1 Mbps
-  DSSS with a long preamble; a 206-byte frame is ~2.2 ms of air. With
-  anything else on channel 1 the weakest receiver loses one packet in ten and
-  the strongest loses none, in bursts every board sees at the same moment,
-  which looks exactly like "clients degrade each other" until you check the
-  timestamps. `ESPNOW_PHY_RATE` sets 12 Mbps; measured, see D13.
-- **A node streaming Bluetooth loses mesh frames to its own radio, and the
-  send callback calls every one a success.** 12–24% of broadcasts, one frame at
-  a time, with `senderr=0 radiofail=0` on the server and nothing else on the
-  channel. Only a receiver's `lost` shows it, and every client loses the same
-  packets. That is why every block goes out twice, the second time 11 packets
-  later (D13), past the 4–5-packet runs the server drops — and why "the server
-  reports it sent them" proves nothing.
-- **`len` is three fields: mask it with `ESPNOW_LEN_BYTES` before using it as
-  a length.** The low byte is the payload length, bits 8–14 the redundancy
-  distance, bit 15 the repeat flag. The first build that set the repeat bit
-  also sent it: `ESPNOW_HEADER_SIZE + pkt.len` asked the radio for a 33 KB
-  frame. The receiver splits it as it reads the header, before anything else
-  looks.
-- **A node that runs Bluetooth cannot turn WiFi power save off.** The IDF
-  coexistence layer requires modem sleep while the BT controller is enabled and
-  enforces it with `abort()`: `esp_wifi_set_ps(WIFI_PS_NONE)` before BT starts
-  dies in `coex_core_enable`, after BT starts it dies in `pm_set_sleep_type`
-  from the WiFi task. Either way a boot loop with no message but a backtrace.
-  Found on the first boot of the first WROVER — the WROOM never reached this
-  code because it bails before WiFi, and the S3/C3 have no BT. `setupESPNow()`
-  now only sets `WIFI_PS_NONE` on a boot that will never start Bluetooth. The
-  modem sleep a BT node keeps instead costs it no packets (measured
-  2026-10-01): it engages only while associated with an AP.
-- **A `build_flags` in an `[env:...]` section replaces the parent's, it does not
-  add to it.** Writing `build_flags = -DROOM_NAME='"Kitchen"'` under
-  `extends = esp32_classic` silently drops `-DENABLE_BLUETOOTH` and the node
-  quietly builds as a client. Always start the list with
-  `${esp32_classic.build_flags}`. This one fails silently, unlike the duplicate
-  key above — which makes it worse.
+Bench mode exists because the server role needs a phone to connect, which
+cannot be automated. It never starts Bluetooth, so it also runs on a board with
+no PSRAM — which is how a WROOM is tested on the mesh at all (D9).
 
 ## Libraries
 
