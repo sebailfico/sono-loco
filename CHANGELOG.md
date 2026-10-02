@@ -26,12 +26,19 @@ Tag when a claim becomes true on hardware, not on a calendar. `v0.1.0` is the
 mesh working on real boards; the next tag will be whatever makes the next claim
 in `TODO.md` false.
 
+**The hashes changed on 2026-10-02.** The history was rewritten to take
+personal data out of it (an email, Bluetooth addresses, a local path, the
+boards' MACs), which gave the commits new hashes. Every version quoted here has
+been moved to the new hash of the same commit; the `v0.2.0-N` part did not
+change and still counts to it. A board flashed before then reports its old
+hash until it is reflashed.
+
 ---
 
 ## Unreleased
 
-- **By ear, through a stereo** (2026-10-01, `v0.2.0-78-geb8fff0` on the
-  WROVERs and the S3, `v0.2.0-68-g66327e2` on the WROOM). Streaming into
+- **By ear, through a stereo** (2026-10-01, `v0.2.0-78-g718591d` on the
+  WROVERs and the S3, `v0.2.0-68-g5f444ca` on the WROOM). Streaming into
   WROVER2, with the stereo WROOM across the room as a client: "works
   incredibly well" — the first real listening to the ADPCM mesh (D5) on a
   proper speaker, and the WROOM's first sound at all. It played nothing at
@@ -58,7 +65,7 @@ in `TODO.md` false.
     48; 69, 254; 123, 271), and copy at 11 rebuilt all of it, as `lost=0`
     said. Aligning two clients by PC time works: on the bench almost none
     of the loss is shared (5 of 69 and 254), so it is each receiver's own.
-  - *Behind the streaming server*, 600 s, `v0.2.0-76-g15b730e`, every node
+  - *Behind the streaming server*, 600 s, `v0.2.0-76-g52b1711`, every node
     muted (`logs/soak-20261001-190328.log`): the server lost 6.4% of its
     frames, 96–98% of them missed by both clients. Holes left, S3 / WROVER2:
     none 6.42 / 6.31%; copy 1 1.76 / 1.60%; **copy 11, today's default, 0.50
@@ -69,7 +76,7 @@ in `TODO.md` false.
     was clean: no `und`, `dry` or `sjmp`, `late=0`.
 
 - **Modem sleep costs a Bluetooth node nothing** (2026-10-01,
-  `v0.2.0-72-gbb7ca7e`). A node that runs Bluetooth keeps `WIFI_PS_MIN_MODEM`
+  `v0.2.0-72-gdce5402`). A node that runs Bluetooth keeps `WIFI_PS_MIN_MODEM`
   because `WIFI_PS_NONE` aborts the coexistence layer, and the code said
   that made reception miss packets, unmeasured. WROVER1 as a CLIENT of
   WROVER2's bench stream, the S3 beside it as the control, 600 s each, all
@@ -102,7 +109,7 @@ in `TODO.md` false.
     at `TONE_AMPLITUDE` 4000 on the two MAX98357A nodes (500, for the
     TPA3116's gain, was under a milliwatt there). Not yet confirmed by ear;
     an S3 or C3 plays it only when plugged in, not when flashed.
-  - *Bench regression, `v0.2.0-76-g15b730e`, concealment on in both
+  - *Bench regression, `v0.2.0-76-g52b1711`, concealment on in both
     clients*, 600 s, `-Mute`, WROVER2 sourcing to WROVER1 and the S3
     (`logs/bench-20261001-185056.log`): 386.8 pkt/s, `qfull=0`; 231,931 and
     231,916 blocks, **zero lost/ovf/und/dup/rsy**, `sjmp=0 dry=0`, `se`
@@ -130,7 +137,7 @@ in `TODO.md` false.
     request arrived, carried across the restart in RTC memory.
     `ota.ps1 -Status` asks, prints and sends it back, uploading nothing. A
     client never transmits; this is the only way to read one with no cable.
-  - *Updated across the room* to `v0.2.0-68-g66327e2` through WROVER1 as the
+  - *Updated across the room* to `v0.2.0-68-g5f444ca` through WROVER1 as the
     relay: 60 s end to end, 1,608,080 bytes in 16.1 s, `app1` → `app0`,
     PASS. The home WiFi there: **−52 dBm** (−66 on the bench), and the router
     had moved itself to channel 2 since yesterday — still far from the
@@ -160,7 +167,7 @@ in `TODO.md` false.
   streaming Bluetooth server has left. Rewritten on ESP-IDF directly it costs
   **80**. Classic image 1.60 of 1.875 MB.
 
-  **On hardware, `v0.2.0-64-ga6816cd`.** The WROOM, now `esp32stereo` /
+  **On hardware, `v0.2.0-64-g19f3314`.** The WROOM, now `esp32stereo` /
   `SonoLoco-Stereo`, updated through WROVER1 as the relay:
   - *An update*, 54 s end to end: the request heard at once, the home WiFi
     joined in 7 s (channel 1, RSSI −66 on the bench), the node found by the
@@ -190,7 +197,7 @@ in `TODO.md` false.
   (2026-09-30, `38a7532`, `cb355de`, D14). Reported by ear first: with
   WROVER2 muted, WROVER1 and the S3 were "a clear echo". Measured with the new
   `tools/btlisten/sync.py` (clicks into WROVER1 from the PC, one node unmuted
-  at a time, every board on `v0.2.0-51-g8183ddc`): the S3 **51.0 ms** and
+  at a time, every board on `v0.2.0-51-g8dced93`): the S3 **51.0 ms** and
   WROVER2 **43.8 ms** behind WROVER1's own speaker, the server's reference
   steady to 0.4 ms across the run. Two causes. The server played through the
   A2DP library's 46 ms I2S ring, and a client through its 91 ms prefill. On
@@ -217,7 +224,7 @@ in `TODO.md` false.
   the clients jump to the schedule that follows it. Telemetry gains `sync=`,
   `se=` (µs, + = late), `sjmp=` and `dry=`.
 
-  **First on hardware, silent, 90 s, `v0.2.0-55-gcca76e5` on all three**
+  **First on hardware, silent, 90 s, `v0.2.0-55-gff1392a` on all three**
   (`bench-mesh.ps1 -Duration 90 -Mute -Source COM22`,
   `logs/bench-20260930-155847.log`). WROVER2 sourced, WROVER1 and the S3
   were clients, and nothing was lost, overflowed, underrun, duplicated or
@@ -257,7 +264,7 @@ in `TODO.md` false.
     a floor a packet lower (`SERVER_TARGET_BYTES`), and clients may steer at
     20/s.
 
-  **Final, `v0.2.0-59-g2fe7791` on all three:**
+  **Final, `v0.2.0-59-g712e685` on all three:**
   - *Microphone* (`logs/sync-20260930-175830-synced-136ms`): S3 **+0.82 ms**,
     WROVER2 **+1.48 ms** from the server, the reference steady to 0.42 ms.
     The S3's click-to-click spread fell from ~3 ms to 0.07.
@@ -325,7 +332,7 @@ in `TODO.md` false.
   5–9 ms burst; 2 ms spacing doubled the single losses and thinned the runs,
   holes 379/376 and 214/211 against 410/340 and 336/338 unpaced — noise.
 
-  **600 s behind the streaming server, `v0.2.0-45-g26691a0`, silent** (every
+  **600 s behind the streaming server, `v0.2.0-45-gdfa4df9`, silent** (every
   node muted, 30 loops of a 20 s music clip): 231,962 packets; S3 **1,699
   holes (0.73%)**, 14,100 rebuilt, 7 underruns; WROVER2 **1,571 (0.68%)**,
   14,248 rebuilt, 7 underruns. Runs: 14,188 singles, 219 of 2, 95 of 4, 25
@@ -383,7 +390,7 @@ in `TODO.md` false.
   plays one channel), `m` mutes any node's speaker, and `bench-mesh.ps1 -Mute`
   runs silent.
 
-  Bench regression, `v0.2.0-36-g04751ea`, clean tree, 600 s, muted, WROVER2
+  Bench regression, `v0.2.0-36-g4c29989`, clean tree, 600 s, muted, WROVER2
   sourcing to WROVER1: **386.8 pkt/s as expected, `qfull=0`; 231,543 blocks,
   zero lost/ovf/und/dup/rsy**. Drift between these two WROVERs is small —
   −4.4 ± 1.2 ppm from the logs, +8.2 ppm from the buffer slope over the whole
@@ -413,7 +420,7 @@ in `TODO.md` false.
   | **12 Mbps** | **2** | **0 in 15 s** | **0** |
   | 54 Mbps | 2 | 0 in 15 s | 0 |
 
-  Then the shipped build (`v0.2.0-33-g025af5c`) with the server's own speaker
+  Then the shipped build (`v0.2.0-33-gc733208`) with the server's own speaker
   on, as in use: three 6 s tones at 0, 0.36 and 0.18 dips/s, 0–8 of ~3,000
   blocks lost; and **600 s at 0.094% lost** (126 of 133,875), zero
   underruns, overflows and resyncs. The copy stood in for 2,347 blocks whose
@@ -462,7 +469,7 @@ in `TODO.md` false.
   half of one 23.2 ms packet from Windows. It is now 8 × 256, 46 ms
   (`SERVER_DMA_BUF_LEN`), filled with silence at the start of every stream —
   a ring deeper than a packet no longer fills itself, and without the prefill
-  it would run just in time. Measured on WROVER2, `v0.2.0-22-gc02cc85`, the
+  it would run just in time. Measured on WROVER2, `v0.2.0-22-gf56b808`, the
   PC streaming a tone, forwarding on, both depths in one Bluetooth session
   (`q64` / `q256` between runs):
 
@@ -504,7 +511,7 @@ in `TODO.md` false.
   11.6 ms DMA ring — `f` toggles forwarding, `w` stops WiFi. `mon.py` logs the
   window every 2 s during real use.
 
-  What it found on WROVER2 (COM19, `v0.2.0-18-g8b49010` for everything after
+  What it found on WROVER2 (COM19, `v0.2.0-18-gfc9512e` for everything after
   the first row):
 
   | | pitch | tone length | dips/s |
@@ -598,7 +605,7 @@ in `TODO.md` false.
   Five boards on the bench for the first time (WROOM source, two WROVER-Es,
   S3, C3), 600 s each, all on one clean tree.
 
-  `v0.2.0-8-g45550a3`, 1 Mbps (the ESP-NOW default), WROOM sourcing 132,079
+  `v0.2.0-8-ga830cbe`, 1 Mbps (the ESP-NOW default), WROOM sourcing 132,079
   packets at 220.5/s with clean counters — and the four receivers lost
   WROVER-1 **0**, WROVER-2 280 (0.21%), S3 2,955 (2.24%), C3 **14,079
   (10.7%)** with 196 underruns. The loss came in multi-second bursts at the
@@ -610,7 +617,7 @@ in `TODO.md` false.
   half of channel 1 — the mesh had been running on the busiest channel there
   is at the most collision-prone rate there is.
 
-  `v0.2.0-10-g539b37d`, same boards, same source, **6 Mbps OFDM**
+  `v0.2.0-10-gbd7326c`, same boards, same source, **6 Mbps OFDM**
   (`ESPNOW_PHY_RATE`, D13), immediately after: C3 1,495 (1.13%), S3 1,493,
   WROVER-2 708, WROVER-1 86. Total loss 4.6× lower; and the C3 and S3 now
   lost *identical* counts every minute (193/194, 208/205, 202/202 …) — the
@@ -769,7 +776,7 @@ in `TODO.md` false.
 `b335d5a…77601a2`, tagged at `77601a2`.
 
 **It holds.** WROOM source, ESP32-C3 client, 600 s each way, same boards and same
-session, `v0.1.0-7-g778986f`:
+session, `v0.1.0-7-g64fc8e7`:
 
 | | uncorrected (`-NoDrift`) | corrected |
 |---|---|---|
