@@ -10,8 +10,9 @@ How to test on real boards, in the order to reach for them:
 3. **By hand, with a phone** — the role changes no script can make: connect,
    disconnect, swap servers.
 
-Board names, ports and MACs are in the README's build table; results go in
-`CHANGELOG.md` with the firmware version they came from.
+Board names and ports are in the README's build table, MACs in the gitignored
+`boards.local.md` beside it; results go in `CHANGELOG.md` with the firmware
+version they came from.
 
 ## Automated: `tools/bench-mesh.ps1`
 
@@ -131,7 +132,8 @@ python -m venv .venv-btlisten
 A server that reboots or is reflashed drops the Bluetooth link; `k` gets it
 back without anybody clicking Connect — the board dials the PC, which accepts
 as it would a headset. Then set the volume, because a board that dialled in
-starts at 1 of 127 and forwards a stream too quiet to hear:
+starts at 1 of 127 and forwards a stream too quiet to hear. The address after
+`k` is the PC's own, from `boards.local.md`:
 
 ```
 python tools/btlisten/ser.py COM20 "kaa:bb:cc:dd:ee:ff

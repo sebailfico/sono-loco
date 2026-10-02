@@ -277,16 +277,21 @@ name per board that might be plugged in:
 | Environment   | Board        | Port | Build | Role |
 |---------------|--------------|------|-------|------|
 | `esp32dev`    | ESP32 WROOM  | COM8 | `esp32_classic` | BT speaker, **or** a mesh client in client-only mode (`c`). Not both: no PSRAM means BT and WiFi cannot run together |
-| `esp32stereo` | ESP32 WROOM `0A:1B:2C:3D:4E:62` + PCM5102A | COM8, first flash only | `esp32_classic` | Client-only, at the stereo's aux input with no cable to the PC: updated with `./tools/ota.ps1 -Env esp32stereo` (D15) |
-| `esp32wrover` | ESP32 WROVER-E `0A:1B:2C:3D:4E:60` + MAX98357A | COM20 | `esp32_classic` | SERVER or CLIENT — the reference node |
-| `esp32wrover2` | ESP32 WROVER-E `0A:1B:2C:3D:4E:5F` + PCM5102 + TPA3116 | COM22 | `esp32_classic` | Same binary, second name so a phone can tell the two apart |
-| `esp32s3`     | ESP32-S3 `0A:1B:2C:3D:4E:61` + MAX98357A | COM9 | `esp32s3_client` | CLIENT only (no BT Classic). Plug its native USB port: on the CH343 port it flashes but prints nothing |
+| `esp32stereo` | ESP32 WROOM + PCM5102A | COM8, first flash only | `esp32_classic` | Client-only, at the stereo's aux input with no cable to the PC: updated with `./tools/ota.ps1 -Env esp32stereo` (D15) |
+| `esp32wrover` | ESP32 WROVER-E + MAX98357A | COM20 | `esp32_classic` | SERVER or CLIENT — the reference node |
+| `esp32wrover2` | ESP32 WROVER-E + PCM5102 + TPA3116 | COM22 | `esp32_classic` | Same binary, second name so a phone can tell the two apart |
+| `esp32s3`     | ESP32-S3 + MAX98357A | COM9 | `esp32s3_client` | CLIENT only (no BT Classic). Plug its native USB port: on the CH343 port it flashes but prints nothing |
 | `esp32c3`     | ESP32-C3     | COM10 | `esp32c3_client` | CLIENT only (no BT Classic). RISC-V, hence its own build |
 
 A CH340 is numbered by USB socket, so the WROVERs' ports move with every
-replug: check the MAC (`?`, or `pio device list`). `tools/bench-mesh.ps1` does
-not depend on the ports — it discovers them and identifies each chip at run
-time, so a new board needs no edit here.
+replug: check the MAC that `?` prints. `tools/bench-mesh.ps1` does not depend
+on the ports — it discovers them and identifies each chip at run time, so a new
+board needs no edit here.
+
+Each board's MAC, and the PC's Bluetooth address that `k` dials, are in
+`boards.local.md` at the repo root. It is gitignored: the repo is public, and
+those addresses name this particular hardware on the air. Anywhere else, the
+placeholder is `aa:bb:cc:dd:ee:ff`.
 
 `esp32dev` and `esp32wrover` compile **the same binary**; they exist as separate names
 only so each board keeps its port. The Arduino core ships `CONFIG_SPIRAM=y` with
@@ -414,7 +419,7 @@ Any node can be driven by hand over the serial monitor, in any build:
 | `f` | BT server: toggle forwarding to the mesh. Local playback carries on, so one Bluetooth session can be measured with and without the mesh's transmissions |
 | `w` | BT server: stop WiFi until the next reboot — the WROOM case, on a WROVER |
 | `j` | BT server: play the connect jingle now, the way a connection does — into the server's own output, from `loop()`, so it cannot interleave with the stream; the ring re-arms afterwards and the clients follow |
-| `k` | BT server: `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, the way a headset reconnects to a phone. What lets a reflashed server get its link back with nobody clicking Connect; the PC's own Bluetooth address goes here |
+| `k` | BT server: `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, the way a headset reconnects to a phone. What lets a reflashed server get its link back with nobody clicking Connect; the PC's own Bluetooth address goes here (`boards.local.md`) |
 | `V` | BT server: `V<0..127>` sets the A2DP volume, as a phone's slider would. Applied before forwarding, so it moves every room; a server that dialled in with `k` starts at 1 |
 | `m` | mute this node's speaker until reboot — zeroes what its ring hands to I2S, on a server and a client alike; the mesh and every timing are untouched. How a mic hears one node alone, and how `bench-mesh.ps1 -Mute` runs silent |
 | `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS |

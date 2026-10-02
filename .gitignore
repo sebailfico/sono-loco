@@ -26,6 +26,10 @@ desktop.ini
 # Claude Code local settings
 .claude/settings.local.json
 
+# The bench's own addresses: board MACs, the PC's Bluetooth address. The repo
+# is public; see the README's Build & Upload section.
+boards.local.md
+
 # Logs
 *.log
 

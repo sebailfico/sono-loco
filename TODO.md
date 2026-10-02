@@ -9,7 +9,8 @@ it, and the open list got lost inside the done one.
 + TPA3116, COM22) — the two that can be a server — and the S3 (MAX98357A,
 COM9). The C3 (COM10) is off the bench. The WROOM is `esp32stereo`, a client
 at the stereo across the room with no cable, updated over WiFi (D15). The
-WROVERs' ports move with every replug: check the MAC.
+WROVERs' ports move with every replug: check the MAC (`?`) against
+`boards.local.md`.
 
 ---
 

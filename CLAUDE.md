@@ -24,6 +24,14 @@ out long after it had been written; a later version claimed a constant had been
 renamed when the code still used the old name. Both were caught by reading the
 code, not the docs — assume the code is the truth and fix the doc.
 
+**The repo is public.** No MAC or Bluetooth address, local path, email or
+anything that says where the user lives goes into a tracked file or a commit
+message — bench output pasted into `CHANGELOG.md` included. Each board's MAC
+and the PC's Bluetooth address are in `boards.local.md`, gitignored, next to
+this file; in the docs the placeholder is `aa:bb:cc:dd:ee:ff`. Taking one out
+after a push costs a history rewrite and a force push, and it has been done
+twice.
+
 ## Working on the firmware
 
 - Pure logic belongs in `esp32-code/lib/`, where it is tested on the host

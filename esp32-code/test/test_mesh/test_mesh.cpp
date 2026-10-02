@@ -167,6 +167,8 @@ static bool targets(const char *target, const char *room, const char *mac) {
     return meshTargetMatches(target, strlen(target), room, mac);
 }
 
+// Made up, and locally administered (0x02 set in the first byte), so it can
+// be no real board's: the repo is public.
 static const char *MAC = "0A:1B:2C:3D:4E:5F";
 
 /** The build says SonoLoco-C3 and the hostname sonoloco-c3: the same node. */

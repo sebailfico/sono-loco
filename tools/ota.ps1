@@ -55,7 +55,7 @@
 .EXAMPLE
     ./tools/ota.ps1 -Env esp32wrover2
     ./tools/ota.ps1 -Env esp32stereo -Status
-    ./tools/ota.ps1 -Env esp32dev -Target 0A:1B:2C:3D:4E:60 -Relay COM9
+    ./tools/ota.ps1 -Env esp32dev -Target AA:BB:CC:DD:EE:FF -Relay COM9
 #>
 
 [CmdletBinding()]

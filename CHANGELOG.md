@@ -160,8 +160,8 @@ in `TODO.md` false.
   streaming Bluetooth server has left. Rewritten on ESP-IDF directly it costs
   **80**. Classic image 1.60 of 1.875 MB.
 
-  **On hardware, `v0.2.0-64-ga6816cd`.** The WROOM `0A:1B:2C:3D:4E:62`, now
-  `esp32stereo` / `SonoLoco-Stereo`, updated through WROVER1 as the relay:
+  **On hardware, `v0.2.0-64-ga6816cd`.** The WROOM, now `esp32stereo` /
+  `SonoLoco-Stereo`, updated through WROVER1 as the relay:
   - *An update*, 54 s end to end: the request heard at once, the home WiFi
     joined in 7 s (channel 1, RSSI −66 on the bench), the node found by the
     LAN scan, 1,607,488 bytes in 13.3 s into `app1`. It booted on probation
@@ -440,7 +440,7 @@ in `TODO.md` false.
 - **A server can be driven without anybody at the PC.** `k<mac>` makes a
   server dial an A2DP source it is bonded with, the way a headset reconnects
   to a phone, and Windows accepts. A reflash no longer costs the link:
-  flash, `kaa:bb:cc:dd:ee:ff`, carry on. Also new, all at runtime so one
+  flash, `k<mac>`, carry on. Also new, all at runtime so one
   Bluetooth session can compare them: `V<0..127>` the A2DP volume (a board
   that dialled in starts at `VOLUME_DEFAULT`, 1 of 127, which forwards a mesh
   stream too quiet to hear), `m` mutes the server's own speaker, `t<n>` sets
@@ -550,7 +550,7 @@ in `TODO.md` false.
   tried and dropped 23 packets at an audio restart; 32 was 6.7 KB for a
   counter that had never moved).
 
-  With that: phone `aa:bb:cc:dd:ee:ff` paired, audio started and stopped six
+  With that: a phone paired, audio started and stopped six
   times, the node went SERVER → DISCOVERY → SERVER across a disconnect and
   reconnect, connect and disconnect tones played, and the heap held at
   **28–32 KB free while streaming, 18–21 KB with ESP-NOW forwarding on top**.
