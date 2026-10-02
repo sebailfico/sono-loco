@@ -363,12 +363,27 @@ void playTone(uint16_t freq, uint16_t durationMs, uint16_t amp = TONE_AMPLITUDE)
     int16_t buf[chunk * 2];
     int written = 0;
 
+    // The sine by recurrence, s[n] = 2cos(w)*s[n-1] - s[n-2]: a multiply and a
+    // subtraction a sample, and sinf() twice a tone. sinf() a sample is cheap
+    // with an FPU, and the C3 has none: it computed its tones at a sixth of
+    // the speed they play, and the DMA, cleared whenever it ran dry
+    // (tx_desc_auto_clear), played them as bursts with silence between --
+    // the startup beeps took 1,410 ms instead of 330 (2026-10-03). The bench
+    // tone had the same cause (benchBuildTone). Single precision throughout:
+    // a double anywhere, M_PI included, is soft-float on every one of these chips.
+    const float w    = 2.0f * (float)M_PI * (float)freq / (float)BT_SAMPLE_RATE;
+    const float k    = 2.0f * cosf(w);
+    float       prev = -(float)amp * sinf(w);   // the sample before the first, sin(-w)
+    float       cur  = 0.0f;                    // the first, sin(0)
+
     while (written < total) {
         int n = min(chunk, total - written);
 
         for (int i = 0; i < n; i++) {
-            float t = (float)(written + i) / BT_SAMPLE_RATE;
-            int16_t s = (int16_t)(amp * sinf(2.0f * M_PI * freq * t));
+            int16_t s = (int16_t)cur;
+            const float next = k * cur - prev;
+            prev = cur;
+            cur  = next;
             int pos = written + i;
             if (pos < fade)              s = s * pos / fade;
             else if (pos > total - fade) s = s * (total - pos) / fade;
