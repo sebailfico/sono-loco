@@ -37,6 +37,51 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **XOR redundancy measured live, and it does what the model says**
+  (2026-10-03). Server WROVER1 on `v0.2.0-88-g87ce343`; clients the S3
+  (`-88`), WROVER2 (`-87`) and the C3 (`-91`). None of them was reflashed,
+  because the only firmware change since `-87` is the tone fix, and a flash
+  plays a WROVER's startup beeps. Two traced 600 s soaks behind the PC, with
+  the server on `X15`, every node muted, and the bench on a mesh of its own
+  (`logs/soak-20261003-110043.log`, `logs/soak-20261003-111441.log`).
+  - *Live against the model*, over the same seconds: the firmware's `lost`
+    and `losstrace.py`'s `xor 15` on that run's own trace were 1,171/1,170,
+    1,074/1,074 and 1,215/1,214 in the first run, and 707/707, 669/666 and
+    882/880 in the second.
+  - *Holes*: the server lost 7–8% of its own frames, 89–100% of them missed
+    by every client. XOR left 0.48–0.54% and 0.30–0.39% of blocks as holes.
+    On the same traces, copy-at-11 would have left 0.78–0.82% and 0.58–0.66%,
+    so XOR leaves 35–45% fewer.
+  - *Stream health*: `und`, `dry` and `ovf` were zero on every node. `late`
+    was 3, 1 and 2 in the first run and 0 in the second.
+  - *Schedule jumps*: four per client in the first run and one in the
+    second. Every one fell in the same ten seconds as a run of 26–36 lost
+    packets, longer than the 24 that `MAX_GAP_FILL_PKTS` fills, and a client
+    has to jump back from that, as `config.h` says. The 2026-10-01 soak had
+    no run that long.
+  - *The heap does not fragment*: `maxalloc` did not move by a byte in normal
+    mode. It held at 176,116 on the S3, 27,636 on WROVER2 and 135,156 on the
+    C3 over 600 s, and at 13,300 on the server for the 25 minutes it
+    streamed. It was also flat on all four nodes in the bench run. `String`
+    concatenation in `LOG_*` is not costing the largest block, so on this
+    evidence the `printf` conversion is not needed.
+  - *Bench regression*, 600 s, `-Mute`, WROVER2 sourcing to WROVER1, the S3
+    and the C3 on a mesh of their own (`logs/bench-20261003-104924.log`):
+    386.8 pkt/s, `qfull=0`. 231,543, 231,916 and 231,519 blocks, with
+    **zero lost/ovf/und/dup/rsy**, `sjmp=0` and `dry=0`. Corrections were
+    7.6 ppm (200 drops) and −53.3 ppm (1,409 inserts), as on 2026-10-01. The
+    C3 gave its first figure against this source: −76.2 ppm (2,012 inserts).
+  - *Harness*: `soak.py` now records `heap` and `maxalloc` on every node,
+    the server's from `r` read beside its `a` window. It also takes the last
+    telemetry line of a read, not the first. The S3's reply to one read had
+    arrived too late behind ten seconds of trace, and was taken as the next
+    read's answer.
+  - *Two sounds the mute does not stop*, now in `docs/bench-test.md`. The
+    connect jingle plays on a muted server as the PC connects, because
+    `playTone` writes to I2S directly. And Windows made the server its
+    default output, so a browser tab's audio would have gone into the mesh
+    too. On the default mesh, the stereo would have played it.
+
 - **The C3's tones play as written** (2026-10-03, `v0.2.0-91-g315f341`).
   Its startup beeps were "really weird": timed by sending `p` and then `?`,
   which waits for them, they took 1,410 ms for 330 ms of sound. Each sample

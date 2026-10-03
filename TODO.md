@@ -23,11 +23,12 @@ WROVERs' ports move with every replug: check the MAC (`?`) against
       2.6 ms holes. Scored on one 600 s recording behind the server
       (2026-10-01, `logs/soak-20261001-190328.log`, `losstrace.py`), the XOR of
       blocks 1 and 15 back leaves **0.24%**, and the model predicted the
-      firmware's own copy-at-11 holes to within 1% on the same run. **Next:** a
-      traced soak with the server on `X15`, checking that the firmware's live
-      `lost` matches what `losstrace.py` predicts for `xor 15` on that run's own
-      trace, and `late=0`. Then `MESH_REDUNDANCY_PARITY` 1 and distance 15,
-      and the bench regression. Beyond that: a client that keeps the parities
+      firmware's own copy-at-11 holes to within 1% on the same run. Live on
+      `X15` (2026-10-03, two traced soaks, `CHANGELOG.md`) the firmware's
+      `lost` matched the model's `xor 15` to within 3 blocks a client, and left
+      0.30–0.54% where copy-at-11 would have left 0.58–0.82% of the same
+      traces. **Next:** `MESH_REDUNDANCY_PARITY` 1 and distance 15, flashed to
+      every node, and the bench regression. Beyond that: a client that keeps the parities
       it could not use yet and retries them when a block comes back (`xor 15*`
       in the scorer: 0.16%), `t2` on top at twice the airtime (the trace
       cannot score it), and a **two-chip server** (an A2DP chip handing PCM to
@@ -232,16 +233,6 @@ polish.
 
 ### Housekeeping
 
-- [ ] **Is `String` concatenation in `LOG_*` actually fragmenting the heap?**
-      Half-measured, and the half that is done is the half that cannot answer it.
-      Over 600 s of normal-mode client playback free heap was byte-identical
-      start to end, but `ESP.getFreeHeap()` is *total* free, and fragmentation
-      shows up as the largest allocatable block shrinking while the total stays
-      flat. `maxalloc=` is now in both the status line and the bench telemetry;
-      the confirming run has not been done. Do it before touching the logging:
-      this may well be a non-problem, and the `printf` conversion would be churn
-      across every log call. `./tools/test-client-only.ps1 -Client COMn -Source
-      COMm -Duration 600` reports both figures.
 - [ ] **Install a host compiler** so `pio test -e native` can run — there is no
       gcc/clang/MSVC on this machine, only the PlatformIO cross-toolchains.
       `winget install -e --id MSYS2.MSYS2` then `pacman -S
