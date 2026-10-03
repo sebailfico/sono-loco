@@ -50,16 +50,15 @@ twice.
   tree (trailing `*`) is not reproducible, so commit before measuring anything
   worth recording. See D10.
 - One build per instruction set, and no more: three today (classic Xtensa, S3,
-  C3) for five board types. A build config is for silicon that cannot execute the
-  same instructions. If a board needs different *behaviour*, detect it at runtime
-  or make it a setting — don't add a build config.
+  C3). A build config is for silicon that cannot execute the same instructions.
+  If a board needs different *behaviour*, detect it at runtime or make it a
+  setting — don't add a build config.
 - **Anything touching the client audio path must be re-measured, not reasoned
   about.** Run `./tools/bench-mesh.ps1 -Flash -Duration 600 -Mute` and compare
   against the latest bench regression in `CHANGELOG.md`: zero
-  lost/ovf/und/dup/rsy, source at 386.8 pkt/s, and the corrections recorded
-  for that pair of boards (WROVER2 sourcing: WROVER1 +7.6 ppm in drops, the S3
-  −53 ppm in inserts). The worst bug found so far — a permanent 24/s
-  underrun — was invisible in the code and obvious in that output. `-Flash`
+  lost/ovf/und/dup/rsy, source at 386.8 pkt/s, and each board's correction as
+  last recorded with the same source. The worst bug found so far — a permanent
+  24/s underrun — was invisible in the code and obvious in that output. `-Flash`
   names every classic board SonoLoco-WROOM; before a Bluetooth test, flash the
   WROVERs by name (`pio run -e esp32wrover -t upload`) and run without it.
 - **Test mutes by reading the state, never by toggling blind.** `m` toggles,
@@ -68,5 +67,8 @@ twice.
 - **Ask before anything the user has to hear for long.** Without `-Mute` the
   bench tone plays on every client with an amp for the whole run; a 10-minute
   tone was started once while the user was away and they came back to it.
+  `-Mute` reaches only the boards on USB: a node on the same mesh with no
+  cable, like the stereo WROOM, plays the tone anyway unless the bench is on a
+  mesh of its own (`docs/bench-test.md`).
 - Drift figures need long runs. At 45 s the measurement noise exceeds the effect;
   600 s is the shortest run worth quoting.
