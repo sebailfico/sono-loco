@@ -11,7 +11,9 @@ underrun every node has when the stream stops.
 
 Reports, per node, the underruns (`und`, a DMA that ran dry and re-armed),
 `dry`, the schedule jumps (`sjmp`), the range of the timing error (`se`, us),
-and on clients the blocks lost and rebuilt. Mutes are read before they are
+and on clients the blocks lost and rebuilt. On every node, the server too, the
+largest free block (`maxalloc`) first, lowest and last: fragmentation shrinks
+it while the total free heap stays flat. Mutes are read before they are
 toggled and put back as found. The log goes to logs/soak-<time>.log.
 
 With --trace each client also records which packets it missed (`L1`), into
@@ -24,7 +26,14 @@ import sounddevice as sd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import listen, ser, sync
 
-KEYS = ('rx', 'lost', 'rec', 'ovf', 'und', 'dry', 'sjmp', 'se', 'sync', 'jit', 'mode', 'ins', 'drp')
+KEYS = ('rx', 'lost', 'rec', 'ovf', 'und', 'dry', 'sjmp', 'se', 'sync', 'jit', 'mode', 'ins', 'drp',
+        'heap', 'maxalloc')
+
+
+def heap_range(samples):
+    """maxalloc first, lowest and last, from the samples that carry it."""
+    m = [int(c['maxalloc']) for c in samples if c.get('maxalloc', '').isdigit()]
+    return f'maxalloc {m[0]}/{min(m)}/{m[-1]} (first/min/last)' if m else 'maxalloc ?'
 
 
 def a_window(sp):
@@ -48,10 +57,14 @@ def node_lines(sp, cmd, secs, sink):
 
 
 def node_counters(sp, sink):
+    """The last telemetry line, not the first: the input is not flushed (it holds
+    the trace), so a reply too late for the read before comes first -- the S3's,
+    behind ten seconds of [LT] lines, which then reported its 20 s figures at 30 s."""
+    found = {}
     for line in node_lines(sp, 'r', 0.4, sink):
         if line.startswith('[BENCH] ms='):
-            return dict(kv.split('=', 1) for kv in line.split()[1:] if '=' in kv)
-    return {}
+            found = dict(kv.split('=', 1) for kv in line.split()[1:] if '=' in kv)
+    return found
 
 
 def main():
@@ -109,6 +122,7 @@ def main():
     dev = listen.find_dev(a.device, 'output')
     series = {p: [] for p in a.node}
     srv = []
+    srv_heap = []
     t0 = time.time()
     out(f'{datetime.datetime.now():%H:%M:%S} streaming {a.secs:.0f} s at {a.level:.0f} dBFS, nodes muted')
     with sd.OutputStream(device=dev, channels=2, samplerate=fs, dtype='float32', callback=cb,
@@ -130,6 +144,9 @@ def main():
             w, line = a_window(sps[a.server])
             srv.append(w)
             out(f'{el:6.0f}s {a.server} {line}')
+            c = sync.counters(sps[a.server])
+            srv_heap.append(c)
+            out(f'{el:6.0f}s {a.server} heap={c.get("heap", "?")} maxalloc={c.get("maxalloc", "?")}')
         if a.trace:   # what the last second left, then off, while the stream still runs
             time.sleep(1.2)
             for p in a.node:
@@ -152,13 +169,14 @@ def main():
         se = [int(c['se']) for c in s if 'se' in c and c.get('sync') == '1']
         out(f'{p}: {len(s)} samples over {10 * (len(s) - 1)} s  und=+{d("und")} dry=+{d("dry")} '
             f'sjmp=+{d("sjmp")} lost=+{d("lost")} rec=+{d("rec")} ovf=+{d("ovf")}  '
-            + (f'se {min(se)}..{max(se)} us' if se else 'never on the schedule'))
+            + (f'se {min(se)}..{max(se)} us' if se else 'never on the schedule')
+            + f'  {heap_range(s)}')
     ws = [w for w in srv if w]
     dd = lambda k: int(ws[-1].get(k, 0)) - int(ws[0].get(k, 0)) if len(ws) > 1 else 0
     gap = max((float(w.get('gapmax', '0ms')[:-2]) for w in ws), default=0)
     # und, ovf and dry are running totals on the server; gapmax is per window.
     out(f'{a.server} (server): und=+{dd("und")} dry=+{dd("dry")} ovf=+{dd("ovf")} '
-        f'gapmax={gap:.1f}ms (worst 10 s window)')
+        f'gapmax={gap:.1f}ms (worst 10 s window)  {heap_range(srv_heap)}')
     for p in a.node:   # reset at the start; late = copies that came after their silence played
         for l in node_lines(sps[p], 'l', 0.4, tracer(p)):
             if l.startswith('[LOSS]'):
