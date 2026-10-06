@@ -16,23 +16,18 @@ WROVERs' ports move with every replug: check the MAC (`?`) against
 
 ## Blocking
 
-- [ ] **The server drops 3–12% of its own frames; make the redundancy XOR.**
-      A WROVER streaming Bluetooth loses its own mesh frames to its BT link —
-      singles, and runs of 4–5 when the link has the radio — and every client
-      loses the same ones. Copy-at-11 (D13) leaves about 0.5% of blocks as
-      2.6 ms holes. Scored on one 600 s recording behind the server
-      (2026-10-01, `logs/soak-20261001-190328.log`, `losstrace.py`), the XOR of
-      blocks 1 and 15 back leaves **0.24%**, and the model predicted the
-      firmware's own copy-at-11 holes to within 1% on the same run. Live on
-      `X15` (2026-10-03, two traced soaks, `CHANGELOG.md`) the firmware's
-      `lost` matched the model's `xor 15` to within 3 blocks a client, and left
-      0.30–0.54% where copy-at-11 would have left 0.58–0.82% of the same
-      traces. **Next:** `MESH_REDUNDANCY_PARITY` 1 and distance 15, flashed to
-      every node, and the bench regression. Beyond that: a client that keeps the parities
-      it could not use yet and retries them when a block comes back (`xor 15*`
-      in the scorer: 0.16%), `t2` on top at twice the airtime (the trace
-      cannot score it), and a **two-chip server** (an A2DP chip handing PCM to
-      a €2 C3 that only does ESP-NOW), which removes the cause.
+- [ ] **The server drops 3–13% of its own frames.** A WROVER streaming
+      Bluetooth loses its own mesh frames to its BT link — singles, and runs
+      of 4–5 when the link has the radio — and every client loses the same
+      ones. Since 2026-10-06 the XOR of the blocks 1 and 15 back is the
+      default (D13), and it leaves 0.3–1.1% of blocks as 2.6 ms holes, about
+      45% fewer than the copy at 11 did on the same losses; the more the
+      server drops, the more holes (`CHANGELOG.md`). Next, scored or not:
+      a client that keeps the parities it could not use yet and retries them
+      when a block comes back (`xor 15*` in `losstrace.py`: about 30% fewer
+      holes again, on every trace so far), `t2` on top at twice the airtime
+      (the trace cannot score it), and a **two-chip server** (an A2DP chip
+      handing PCM to a €2 C3 that only does ESP-NOW), which removes the cause.
       Also unexplained: the server's own output crackled once on 2026-09-28
       (27 holes/s, one per A2DP packet) and never again after a reboot. If
       it comes back, run `listen.py --serial` at once and compare the `a`

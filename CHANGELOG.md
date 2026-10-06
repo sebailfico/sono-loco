@@ -37,6 +37,38 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **XOR of the blocks 1 and 15 back is the default, and a muted node is
+  silent** (2026-10-06, `v0.2.0-97-gb9b73b2` on all five nodes). The S3 and
+  the C3 were flashed over USB, and the WROVERs and the stereo were updated
+  over WiFi. Neither path plays a startup sound. Windows reconnected both
+  muted WROVERs on its own when its Bluetooth came back on, which would have
+  played two connect jingles before this build.
+  - *Bench regression*, 600 s, `-Mute`, WROVER2 sourcing to WROVER1, the S3
+    and the C3 on a mesh of their own (`logs/bench-20261006-152526.log`):
+    386.8 pkt/s, `qfull=0`. 231,543, 231,917 and 231,520 blocks, with
+    **zero lost/ovf/und/dup/rsy**, `sjmp=0` and `dry=0`. WROVER1 rebuilt 400
+    blocks from parity. Corrections were 7.7 ppm (202 drops), −53.2 ppm
+    (1,407 inserts) and −76.7 ppm (2,024 inserts), against 7.6, −53.3 and
+    −76.2 on 2026-10-03 with the copy at 11. `maxalloc` was flat on all four.
+  - *Behind the PC on the new defaults* (`logs/soak-20261006-163352.log`),
+    600 s, traced, WROVER1 serving `dist=15 par=1` with no command sent. The
+    server lost 12.7% of its own frames, against 7–8% on 2026-10-03. The C3
+    lost a further 5.7% of the stream itself: 31% of its losses were not
+    shared by every client. Holes
+    were 1.04%, 1.07% and 2.33% (S3, WROVER2, C3). On the same losses the
+    copy at 11 would have left 1.93%, 2.00% and 3.86%. Live against the
+    model: 2,330/2,330, 2,423/2,420 and 5,292/5,288.
+  - *Stream health*: `und`, `dry` and `ovf` were zero, and `late` was 3, 3
+    and 4. Five jumps per client, each in the same ten seconds as a run of
+    26–29 lost packets. A run of 25, one block past the fill, moved `se` to
+    −3.1 ms on two clients, under the 4 ms jump threshold, and the
+    controller steered it back. `maxalloc` was flat on every node, the
+    server's at 13,300 again.
+  - *Harness*: `soak.py` now tells a telemetry reply to this read from a
+    late one by the node's own clock (`ms=`). Taking the last line of a read
+    (2026-10-03) was not enough: the S3 still reported its 70 s figures at
+    80 s, when its new reply came later than the read.
+
 - **XOR redundancy measured live, and it does what the model says**
   (2026-10-03). Server WROVER1 on `v0.2.0-88-g87ce343`; clients the S3
   (`-88`), WROVER2 (`-87`) and the C3 (`-91`). None of them was reflashed,
