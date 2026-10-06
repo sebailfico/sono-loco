@@ -137,9 +137,10 @@ python -m venv .venv-btlisten
 
 A server that reboots or is reflashed drops the Bluetooth link; `k` gets it
 back without anybody clicking Connect — the board dials the PC, which accepts
-as it would a headset. Then set the volume, because a board that dialled in
-starts at 1 of 127 and forwards a stream too quiet to hear. The address after
-`k` is the PC's own, from `boards.local.md`:
+as it would a headset. A board that dialled in starts at `VOLUME_DEFAULT`, 38
+of 127 (30%) since 2026-10-06; it was 1, too quiet to hear, before. `V40` keeps
+the level every measurement before then was taken at. The address after `k`
+is the PC's own, from `boards.local.md`:
 
 ```
 python tools/btlisten/ser.py COM20 "kaa:bb:cc:dd:ee:ff

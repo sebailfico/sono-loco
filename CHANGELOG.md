@@ -37,6 +37,13 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **A connection starts at 30% volume, not 1%** (2026-10-06).
+  `VOLUME_DEFAULT` 38 of 127. A phone or PC adopts the server's volume as its
+  slider when it connects, so every first connection began at 1 of 127,
+  inaudible. That level was chosen while WROVER2's TPA3116 played everything
+  far too loud, which each node's own trim in NVS has handled since
+  2026-10-01 (`v-12` there).
+
 - **The beeps are water drops** (2026-10-06, `v0.2.0-100-ge9fad22`).
   Listening is two drops on C♯6, joined three rising (A♯5, C♯6, F♯6),
   nothing heard the same three falling. Each drop is a sine that glides up

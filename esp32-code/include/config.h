@@ -69,7 +69,13 @@
 // ============================================================================
 #define BT_DEVICE_NAME   ROOM_NAME
 #define BT_SAMPLE_RATE   44100
-#define VOLUME_DEFAULT   1       // 0–127; keep low, TPA3116 has high gain
+// The A2DP volume a server starts at, 0-127. A phone or PC adopts it as its
+// slider when it connects (AVRCP absolute volume), and keeps whatever it sets
+// afterwards until the node reboots or passes through CLIENT. 38 is 30%. It
+// was 1 while WROVER2's TPA3116 played every stream far too loud; each node's
+// own trim (`v<dB>`, NVS) has tamed that since 2026-10-01, and starting at 1%
+// only meant every connection began inaudible.
+#define VOLUME_DEFAULT   38
 
 // The server's own speaker plays from its own ring, exactly as a client's does
 // (CLIENT_DMA_* and JITTER_PREFILL below), not through the A2DP library's I2S
