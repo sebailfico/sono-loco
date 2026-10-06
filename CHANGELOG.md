@@ -37,6 +37,26 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **The beeps are water drops** (2026-10-06, `v0.2.0-100-ge9fad22`).
+  Listening is two drops on C♯6, joined three rising (A♯5, C♯6, F♯6),
+  nothing heard the same three falling. Each drop is a sine that glides up
+  three semitones into its note with an FM shimmer on the attack, repeated
+  210 ms later at 13% (`lib/tones`). Chosen and tuned by ear in
+  `tools/tones/preview.html`, from a proposal of three voices. The stereo
+  was updated over WiFi to this version, and the C3 flashed with it. The S3
+  and both WROVERs were flashed over USB from the same source before it was
+  committed, so they report `v0.2.0-99-ga6f435d*` until their next flash.
+  - *`test_tones`*, 10 tests, passed on the C3: every sample of the three
+    sounds matches the preview's, by hash. The joined sound, 1,585 ms long,
+    renders in 227 ms there. It also passed on WROVER2, an Xtensa, from the
+    same source before the commit.
+  - *By ear*: every board on USB unplugged and plugged back in, and a
+    Bluetooth source connecting to and disconnecting from both WROVERs. All
+    as intended.
+  - *Longer than the beeps*: 1.19 s for listening and 1.64 s for the other
+    two, against 0.33 and 0.53 s, most of it the echo dying away. Power-on
+    waits that long, and a server's jingle holds its output that long.
+
 - **XOR of the blocks 1 and 15 back is the default, and a muted node is
   silent** (2026-10-06, `v0.2.0-97-gb9b73b2` on all five nodes). The S3 and
   the C3 were flashed over USB, and the WROVERs and the stereo were updated

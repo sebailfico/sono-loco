@@ -168,6 +168,12 @@ carrying it out.
   in download mode with BOOT and reflashed. `test/unity_config.h` and `.cpp`
   replace that glue, and their presence in `test/` is what stops PlatformIO
   generating it (2026-10-02). A classic board's CH340 never showed it.
+- **`pio test` can sit at "Testing..." while the board has already passed.**
+  On 2026-10-06 it printed nothing for ten minutes, on the C3 and on WROVER2
+  alike, while each board had run the suite before PlatformIO was reading.
+  Upload with `--without-testing`, reset with esptool (on a C3 with
+  `--after watchdog_reset`, or it may come back in download mode), and read
+  the port with `tools/btlisten/ser.py`.
 
 ## Build configuration
 
