@@ -286,21 +286,27 @@
 // past whatever took the first: a Bluetooth server loses its frames in runs
 // of 4-5 packets, 10-13 ms, when its own link has the radio (D13), and a
 // block one packet back was lost in the same run. It also has to arrive
-// before the silence plays -- 11 is 28 ms, inside the ~44 ms a client keeps
-// buffered. The price of any distance above 1 is that a lone lost packet is
-// no longer always saved: its copy can land on another loss. Measured behind
+// before the silence plays -- 15 is 39 ms, well inside the ring a client
+// keeps on the server's schedule (JITTER_PREFILL). As a plain copy, the
+// price of any distance above 1 was that a lone lost packet is no longer
+// always saved: its copy can land on another loss. Measured as a copy behind
 // a streaming server, alternating 60 s runs (2026-09-30): holes 1.17% at 1,
-// 0.57% at 6, 0.33% at 11 -- and 0.7% at 11 over the 600 s after. Sent in
-// every packet, so a server's `D<n>` changes it for the whole mesh at once.
-#define MESH_REDUNDANCY_DISTANCE  11
+// 0.57% at 6, 0.33% at 11 -- and 0.7% at 11 over the 600 s after. The
+// parity below removes that price, and 15 was the best distance for it on
+// every recording scored (2026-10-01, 2026-10-03). Sent in every packet, so
+// a server's `D<n>` or `X<n>` changes it for the whole mesh at once.
+#define MESH_REDUNDANCY_DISTANCE  15
 
 // Parity instead of a plain older block: the second block is the XOR of the
 // blocks 1 and MESH_REDUNDANCY_DISTANCE back, and a client that holds either
 // rebuilds the other. The same bytes buy both distances -- a lone loss comes
 // back from the next packet, a run from the one DISTANCE later -- where a
 // plain block buys one. `X<n>` on a server turns it on with distance n,
-// `D<n>` off.
-#define MESH_REDUNDANCY_PARITY  0
+// `D<n>` off. Two traced 600 s soaks behind the streaming server on `X15`
+// (2026-10-03): the firmware's holes matched the model's to within 3 blocks
+// a client, 0.30-0.54% of blocks where a copy at 11 would have left
+// 0.58-0.82% of the same losses.
+#define MESH_REDUNDANCY_PARITY  1
 
 // What a client plays for a block that never arrived and was not rebuilt: 1
 // fills it from its two neighbours, each played backwards away from the edge

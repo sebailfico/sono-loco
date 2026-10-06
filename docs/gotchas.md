@@ -99,9 +99,9 @@ carrying it out.
   send callback calls every one a success.** 12–24% of broadcasts, one frame at
   a time, with `senderr=0 radiofail=0` on the server and nothing else on the
   channel. Only a receiver's `lost` shows it, and every client loses the same
-  packets. That is why every block goes out twice, the second time 11 packets
-  later (D13), past the 4–5-packet runs the server drops — and why "the server
-  reports it sent them" proves nothing.
+  packets. That is why every packet also carries the XOR of the blocks 1 and
+  15 back (D13), whose far half reaches past the 4–5-packet runs the server
+  drops — and why "the server reports it sent them" proves nothing.
 - **A node that runs Bluetooth cannot turn WiFi power save off.** The IDF
   coexistence layer requires modem sleep while the BT controller is enabled and
   enforces it with `abort()`: `esp_wifi_set_ps(WIFI_PS_NONE)` before BT starts

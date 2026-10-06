@@ -414,7 +414,7 @@ anything (`m`, `M`, `c` are toggles).
 | `z` | client: `z1` fills a block that was lost and not rebuilt from its neighbours, `z0` plays zeroes. `MESH_CONCEAL` is the default |
 | `t` | `t<n>` sends each mesh frame n times (1–3) until reboot |
 | `D` | `D<n>` each packet carries the block n packets back as well (0–15) until reboot; on the wire, so clients follow |
-| `X` | `X<n>` each packet carries the XOR of the blocks 1 and n back instead (2–15) until reboot |
+| `X` | `X<n>` each packet carries the XOR of the blocks 1 and n back instead (2–15) until reboot. `X15` is the default |
 | `P` | `P<us>` spaces audio packets at least that far apart, until reboot |
 | `R` | `R<Mbps>` sets the ESP-NOW PHY rate this node sends at, until reboot: 1, 2, 6…54 |
 

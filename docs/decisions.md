@@ -524,7 +524,8 @@ id stays but stops being the only thing keeping the two apart.
 ## D13 — ESP-NOW frames go out at 12 Mbps, twice, not once at the 1 Mbps default
 
 **Decided:** 2026-09-14 (6 Mbps), amended 2026-09-29 (12 Mbps, two copies),
-2026-09-30 (the second copy 11 packets later).
+2026-09-30 (the second copy 11 packets later), 2026-10-06 (the second block
+the XOR of the blocks 1 and 15 back).
 **Status:** holding. Range: across one room, at a stereo, 240,425 packets
 and none lost (2026-10-01); further than that untested.
 
@@ -619,7 +620,16 @@ later, in the same bytes. It is already in the firmware (`X<n>`) and becomes
 the default once a live run confirms the firmware rebuilds what the model
 says it does (`TODO.md`).
 
-**What would change this:** that confirmation, first. Then a range
+**Amended 2026-10-06 — the parity of 1 and 15 back is the default.** The
+live run, twice (2026-10-03): two traced 600 s soaks behind the streaming
+server on `X15`, three clients each. Over the same seconds the firmware's
+holes and the model's agreed to within 3 blocks a client — 1,171/1,170,
+1,074/1,074, 1,215/1,214, then 707/707, 669/666, 882/880 — and were
+0.30–0.54% of blocks where a copy at 11 would have left 0.58–0.82% of the
+same losses. Same bytes, same airtime: `MESH_REDUNDANCY_PARITY` 1,
+`MESH_REDUNDANCY_DISTANCE` 15, and `D11` on a server puts the copy back.
+
+**What would change this:** a range
 measurement showing 6 Mbps reaching a room that 12 does not — then 9 Mbps, or
 the copies alone at 6, before anything slower. A server with no Bluetooth of its own (the two-chip server in
 `TODO.md`) would make the copies a hedge against interference only, and worth
