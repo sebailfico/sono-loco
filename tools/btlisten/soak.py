@@ -56,14 +56,33 @@ def node_lines(sp, cmd, secs, sink):
     return rest
 
 
+clock = {}   # per port: the node's ms minus the PC's, from its first reply
+
+
 def node_counters(sp, sink):
-    """The last telemetry line, not the first: the input is not flushed (it holds
-    the trace), so a reply too late for the read before comes first -- the S3's,
-    behind ten seconds of [LT] lines, which then reported its 20 s figures at 30 s."""
+    """This read's own telemetry line, or {} if it never came. The input is not
+    flushed (it holds the trace), so a reply too late for the read before can
+    arrive first: the S3's, behind ten seconds of [LT] lines, reported its 20 s
+    figures at 30 s (2026-10-03), and taking the last line of the read still
+    gave its 70 s figures at 80 s when the new reply was later still
+    (2026-10-06). The line's own `ms` tells them apart: this read's reply was
+    stamped about now on the node's clock, an older one ten seconds before.
+    Waits up to a second more for it."""
     found = {}
-    for line in node_lines(sp, 'r', 0.4, sink):
-        if line.startswith('[BENCH] ms='):
-            found = dict(kv.split('=', 1) for kv in line.split()[1:] if '=' in kv)
+    for cmd in ('r', '', ''):
+        lines = [l for l in node_lines(sp, cmd, 0.4, sink) if l.startswith('[BENCH] ms=')]
+        for line in lines:
+            c = dict(kv.split('=', 1) for kv in line.split()[1:] if '=' in kv)
+            if not c.get('ms', '').isdigit():
+                continue
+            off = int(c['ms']) - time.time() * 1000
+            if sp.port not in clock:   # the first: the freshest line of this read
+                clock[sp.port] = max(int(l.split()[1][3:]) for l in lines
+                                     if l.split()[1][3:].isdigit()) - time.time() * 1000
+            if abs(off - clock[sp.port]) < 3000:
+                found = c
+        if found:
+            break
     return found
 
 
