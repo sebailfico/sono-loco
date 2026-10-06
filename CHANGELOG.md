@@ -44,8 +44,8 @@ hash until it is reflashed.
   210 ms later at 13% (`lib/tones`). Chosen and tuned by ear in
   `tools/tones/preview.html`, from a proposal of three voices. The stereo
   was updated over WiFi to this version, and the C3 flashed with it. The S3
-  and both WROVERs were flashed over USB from the same source before it was
-  committed, so they report `v0.2.0-99-ga6f435d*` until their next flash.
+  and both WROVERs were flashed over USB with `v0.2.0-101-g41780ad`, the
+  docs commit after it: the same firmware.
   - *`test_tones`*, 10 tests, passed on the C3: every sample of the three
     sounds matches the preview's, by hash. The joined sound, 1,585 ms long,
     renders in 227 ms there. It also passed on WROVER2, an Xtensa, from the
