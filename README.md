@@ -390,7 +390,7 @@ anything (`m`, `M`, `c` are toggles).
 | `N` | where this node sits in the mesh: its mode, its source (`phone`, `bench`, or the MAC of the server it is locked to), and `rx`/`lost`/`und` in this stream. One line, so `@* N` lists the mesh |
 | `@` | `@<name\|mac\|*> <command>`: run the command on that node, or on every node of this mesh, and print the answers. See above |
 | `v` | `v<dB>` this node's own volume trim, −40…+12; bare `v` reports. Applied at this node's output, after the mesh has its copy, so the phone's slider still moves every room and the trim sets where this room sits among them. Kept in NVS |
-| `m` | mute this node's speaker until reboot — the mesh and every timing are untouched. A toggle |
+| `m` | mute this node's speaker until reboot, its jingles and beeps included — the mesh and every timing are untouched. A toggle |
 | `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS. A toggle |
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once |
 | `p` | listen for 60 s and join the mesh that offers itself — the node half of pairing |

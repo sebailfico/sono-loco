@@ -149,15 +149,15 @@ V40
 
 If the dial times out, check that the PC's Bluetooth is switched on.
 
-**Two sounds the mute does not stop.** The connect jingle plays on the server
-as the link comes up, and the disconnect jingle as it goes, muted or not
-(`playTone` writes to I2S directly). And Windows makes the board its default
-output as it connects, so everything the PC plays — a video in a browser tab —
-goes to the server and into the mesh until the link drops, and on the default
-mesh the stereo plays it. For a silent run: the bench on a mesh of its own
-(`g<name>`), the nodes muted (reading `?` first) before the `k`, and the
-server rebooted with `n` afterwards — a reboot drops the link with no
-disconnect jingle, and Windows goes back to its own speakers.
+**What the mute does not stop.** Windows makes the board its default output
+as it connects, so everything the PC plays — a video in a browser tab — goes
+to the server and into the mesh until the link drops, and on the default mesh
+the stereo plays it. The connect and disconnect jingles are muted with the
+node since 2026-10-06; firmware older than that plays them regardless. For a
+silent run: the bench on a mesh of its own (`g<name>`), the nodes muted
+(reading `?` first) before the `k`, and the server rebooted with `n`
+afterwards — a reboot drops the link with no disconnect jingle, and Windows
+goes back to its own speakers.
 
 **`listen.py` — is there a hole in what one node plays?** It plays a 997 Hz
 tone into the server and records with the PC's microphone. First the control,

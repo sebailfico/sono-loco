@@ -174,8 +174,9 @@ static bool        clientOnly = false;
 //
 // `m` mutes, until reboot: zeroes where this node's samples meet its speaker
 // -- on a Bluetooth node after the mesh has taken its copy, on a client before
-// I2S. Volume 0 for this node alone. It is how a microphone next to one node
-// hears that node alone, and how a bench run stays silent.
+// I2S. Volume 0 for this node alone, its jingles and beeps included
+// (playTone). It is how a microphone next to one node hears that node alone,
+// and how a bench run stays silent.
 static volatile bool outputMuted   = false;
 // `M` mixes a client's stereo to mono on both channels, kept in NVS: a node
 // with one speaker -- a MAX98357A plays one channel -- would otherwise lose
@@ -371,6 +372,11 @@ void playTone(uint16_t freq, uint16_t durationMs, uint16_t amp = TONE_AMPLITUDE)
     // the startup beeps took 1,410 ms instead of 330 (2026-10-03). The bench
     // tone had the same cause (benchBuildTone). Single precision throughout:
     // a double anywhere, M_PI included, is soft-float on every one of these chips.
+    // A muted node plays its jingles and beeps as silence, for exactly as long:
+    // what follows a tone (the schedule a jingle invalidates) runs unchanged.
+    // Before, a muted server played its connect jingle as the PC dialled in,
+    // during a run meant to be silent (2026-10-03).
+    if (outputMuted) amp = 0;
     const float w    = 2.0f * (float)M_PI * (float)freq / (float)BT_SAMPLE_RATE;
     const float k    = 2.0f * cosf(w);
     float       prev = -(float)amp * sinf(w);   // the sample before the first, sin(-w)
