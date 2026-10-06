@@ -1,0 +1,943 @@
+<title>SonoLoco Drop Tones</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Michroma&family=Hind:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column under an aqua sky: voice picker, the three sounds side by side, tuning in three groups, then the settings to paste. */
+:root {
+  --bg: #edf3f6;
+  --sky: #d3e9f5;
+  --surface: #ffffff;
+  --ink: #102431;
+  --muted: #587080;
+  --line: #d2dfe6;
+  --accent: #1373c4;
+  --accent-soft: #e1eef9;
+  --wave: #1a7fcf;
+  --dot: #0e5c9e;
+  --gel-top: #8ad6f7;
+  --gel-mid: #2b90dd;
+  --gel-bot: #1466b8;
+  --gel-edge: #0f5aa3;
+  --gel-shine: rgba(255, 255, 255, 0.85);
+  --gel-glow: rgba(140, 225, 255, 0.55);
+  --gel-shadow: rgba(16, 70, 120, 0.28);
+  --on-gel: #ffffff;
+  --font-display: "Michroma", "Eurostile", "Arial Black", sans-serif;
+  --font-body: "Hind", "Frutiger", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0a1419;
+    --sky: #0f2a3a;
+    --surface: #11202a;
+    --ink: #e2edf2;
+    --muted: #8aa2b0;
+    --line: #223844;
+    --accent: #5ab8f2;
+    --accent-soft: #14324a;
+    --wave: #58b6ee;
+    --dot: #a5dbfb;
+    --gel-top: #6fcaf1;
+    --gel-mid: #2181cf;
+    --gel-bot: #0f4f91;
+    --gel-edge: #0a3f75;
+    --gel-shine: rgba(255, 255, 255, 0.6);
+    --gel-glow: rgba(110, 210, 255, 0.45);
+    --gel-shadow: rgba(0, 0, 0, 0.45);
+    --on-gel: #ffffff;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0a1419;
+  --sky: #0f2a3a;
+  --surface: #11202a;
+  --ink: #e2edf2;
+  --muted: #8aa2b0;
+  --line: #223844;
+  --accent: #5ab8f2;
+  --accent-soft: #14324a;
+  --wave: #58b6ee;
+  --dot: #a5dbfb;
+  --gel-top: #6fcaf1;
+  --gel-mid: #2181cf;
+  --gel-bot: #0f4f91;
+  --gel-edge: #0a3f75;
+  --gel-shine: rgba(255, 255, 255, 0.6);
+  --gel-glow: rgba(110, 210, 255, 0.45);
+  --gel-shadow: rgba(0, 0, 0, 0.45);
+  --on-gel: #ffffff;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 1.0625rem/1.55 var(--font-body);
+}
+.sky { background: radial-gradient(120% 50% at 50% 0%, var(--sky) 0%, transparent 70%); }
+.wrap {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding-inline: clamp(16px, 4vw, 40px);
+  padding-block: 2.75rem 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2.75rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.8rem;
+  font: 500 0.75rem/1.2 var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+h1 {
+  margin: 0 0 1rem;
+  font: 400 clamp(1.9rem, 5.4vw, 2.9rem)/1.1 var(--font-display);
+  letter-spacing: 0.02em;
+  text-wrap: balance;
+}
+h2 {
+  margin: 0;
+  font: 400 1rem/1.3 var(--font-display);
+  letter-spacing: 0.06em;
+  text-wrap: balance;
+}
+.lede { margin: 0; max-width: 41rem; }
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-bottom: 1rem;
+}
+.section-head p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.hint { margin: -0.25rem 0 1.4rem; color: var(--muted); font-size: 0.95rem; max-width: 44rem; }
+
+/* Voice picker */
+.voices { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.voice { position: relative; }
+.voice input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.voice label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+.voice input:checked + label { border-color: var(--accent); background: var(--accent-soft); }
+.voice input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tag {
+  font: 500 0.66rem/1 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.blurb { margin: 0.9rem 0 0; color: var(--muted); max-width: 44rem; }
+
+/* The three sounds */
+.events { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 1rem 1rem 0.95rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.card h3 { margin: 0; font: 600 1.1rem/1.2 var(--font-body); }
+.shape {
+  margin: 0;
+  font: 500 0.7rem/1.2 var(--font-mono);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.when { margin: 0; color: var(--muted); font-size: 0.93rem; line-height: 1.45; min-height: 2.9em; }
+.card canvas { display: block; width: 100%; height: 132px; }
+.foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem; }
+.meta {
+  font: 400 0.78rem/1.35 var(--font-mono);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Aqua gel buttons: the one loud thing on the page */
+.gel {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 1.2rem 0.55rem 0.95rem;
+  border: 1px solid var(--gel-edge);
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--gel-top) 0%, var(--gel-mid) 54%, var(--gel-bot) 100%);
+  box-shadow: 0 2px 7px var(--gel-shadow), inset 0 -3px 6px var(--gel-glow);
+  color: var(--on-gel);
+  font: 600 0.95rem/1 var(--font-body);
+  text-shadow: 0 1px 1px var(--gel-edge);
+  cursor: pointer;
+}
+.gel::before {
+  content: "";
+  position: absolute;
+  left: 9%;
+  right: 9%;
+  top: 1px;
+  height: 52%;
+  border-radius: 999px 999px 45% 45% / 999px 999px 30% 30%;
+  background: linear-gradient(180deg, var(--gel-shine), transparent);
+  pointer-events: none;
+}
+.gel > * { position: relative; }
+.gel svg { width: 0.75rem; height: 0.75rem; fill: currentColor; }
+.gel:hover { filter: brightness(1.07) saturate(1.05); }
+.gel:active { transform: translateY(1px); }
+.gel:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.gel .bars { display: none; }
+.gel[data-playing] .tri { display: none; }
+.gel[data-playing] .bars { display: inline; }
+
+.quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.95rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 500 0.92rem/1 var(--font-body);
+  cursor: pointer;
+}
+.quiet:hover { border-color: var(--accent); }
+.quiet:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.quiet:disabled { opacity: 0.45; cursor: default; }
+
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 0.9rem 1.5rem; margin-top: 1rem; }
+.vol { display: flex; align-items: center; gap: 0.7rem; color: var(--muted); font-size: 0.92rem; }
+.vol input { width: 9rem; }
+input[type="range"] { accent-color: var(--accent); }
+
+/* Tuning */
+.groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.5rem 2rem; }
+fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+fieldset:disabled { opacity: 0.45; }
+legend {
+  padding: 0;
+  margin-bottom: 0.9rem;
+  font: 500 0.72rem/1 var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.knobs { display: flex; flex-direction: column; gap: 0.8rem; }
+.knob { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 0.1rem 0.75rem; }
+.knob label { font-size: 0.97rem; }
+.knob output { font: 400 0.8rem/1.5 var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.knob input { grid-column: 1 / -1; width: 100%; margin: 0; }
+
+/* Settings */
+.cfg { min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.cfg-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  padding: 0.6rem 0.6rem 0.6rem 1rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.93rem;
+}
+.cfg-actions { display: flex; align-items: center; gap: 0.75rem; }
+.status { font: 400 0.8rem/1 var(--font-mono); color: var(--accent); min-width: 4.5rem; text-align: right; }
+pre {
+  margin: 0;
+  padding: 1rem;
+  overflow-x: auto;
+  font: 400 0.8rem/1.65 var(--font-mono);
+  color: var(--ink);
+  tab-size: 4;
+}
+
+/* Notes */
+.notes ul { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.6rem; max-width: 46rem; }
+.notes li::marker { color: var(--accent); }
+code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  background: var(--accent-soft);
+}
+
+@media (max-width: 780px) {
+  .events, .groups { grid-template-columns: minmax(0, 1fr); }
+  .when { min-height: 0; }
+}
+</style>
+
+<div class="sky">
+<main class="wrap">
+  <header>
+    <p class="eyebrow">SonoLoco · tools/tones/preview.html</p>
+    <h1>Drop tones</h1>
+    <p class="lede">The notification sounds, made here with the integer steps <code>lib/tones</code> uses: a water drop that glides up into its note, through an echo. Two drops at one pitch mean listening, three rising mean joined, three falling mean nothing heard. Tune by ear, then copy the settings into <code>config.h</code> and the figures into <code>test_tones</code>.</p>
+  </header>
+
+  <section aria-labelledby="h-voice">
+    <div class="section-head"><h2 id="h-voice">Voice</h2></div>
+    <div class="voices" id="voices" role="radiogroup" aria-labelledby="h-voice"></div>
+    <p class="blurb" id="blurb"></p>
+  </section>
+
+  <section aria-labelledby="h-sounds">
+    <div class="section-head">
+      <h2 id="h-sounds">The three sounds</h2>
+      <p>Dots are drops, placed by pitch. Fainter ones are echoes.</p>
+    </div>
+    <div class="events" id="events"></div>
+    <div class="transport">
+      <button class="quiet" id="playAll" type="button">
+        <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M1 0.5 9 5 1 9.5z" fill="currentColor"/></svg>
+        Play all three
+      </button>
+      <div class="vol">
+        <label for="volume">Preview volume</label>
+        <input type="range" id="volume" min="0" max="1.5" step="0.05">
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-tune">
+    <div class="section-head">
+      <h2 id="h-tune">Tune</h2>
+      <button class="quiet" id="reset" type="button">Reset this voice</button>
+    </div>
+    <p class="hint">An echo time of 1.5 note gaps puts every echo between two drops. Off that ratio, an echo can land on a drop and smear it.</p>
+    <div class="groups" id="groups"></div>
+  </section>
+
+  <section aria-labelledby="h-cfg">
+    <div class="section-head"><h2 id="h-cfg">Settings</h2></div>
+    <div class="cfg">
+      <div class="cfg-bar">
+        <span id="cfgNote">The values for config.h, and the figures test_tones checks the firmware against.</span>
+        <span class="cfg-actions">
+          <span class="status" id="copyStatus" aria-live="polite"></span>
+          <button class="quiet" id="copy" type="button">Copy</button>
+        </span>
+      </div>
+      <pre id="cfg" tabindex="0"></pre>
+    </div>
+  </section>
+
+  <section class="notes" aria-labelledby="h-notes">
+    <div class="section-head"><h2 id="h-notes">On the board</h2></div>
+    <ul>
+      <li>Integer arithmetic only: a 1,024-step sine table, a phase counter, multiplies and shifts. The C3 has no FPU, and <code>sinf()</code> per sample is what made its beeps stutter.</li>
+      <li>The echo is not a delay buffer. Each drop is played again, later and quieter, as one more voice. A sound needs a few hundred bytes of state and no heap, which matters on a Bluetooth server.</li>
+      <li>The glass is two-operator FM, the sound of DX7 bells and polyphonic ringtones. Each echo keeps less of it, the way a tape echo loses its top end.</li>
+      <li>The same sample goes to both channels, as now. A ping-pong echo would lose half its repeats on a MAX98357A, which plays one channel.</li>
+      <li>Each sound holds <code>loop()</code> for as long as it plays: the length under it, plus 50 ms of silence that lets the DMA play the end out. Power-on waits for the listening sound, and a server's connect jingle holds its output for the joined one.</li>
+      <li>What plays here is what a speaker gets, apart from loudness: each node sets that with <code>TONE_AMPLITUDE</code>, and the peak under each sound is relative to it. The old beeps peaked at 1.00. <code>test_tones</code> checks the firmware against the figures in the settings, sample for sample.</li>
+    </ul>
+  </section>
+</main>
+</div>
+
+<script>
+// SYNTH-BEGIN
+// Everything here is integer arithmetic a C3 can do without an FPU. Math.imul
+// is a 32-bit multiply and >> an arithmetic shift, as in the C it stands for.
+const FS = 44100;
+const SIN = new Int16Array(1024);
+for (let i = 0; i < SIN.length; i++) SIN[i] = Math.round(32767 * Math.sin(2 * Math.PI * i / SIN.length));
+const AMP = 8000;                       // stands in for TONE_AMPLITUDE
+const ATTACK = 44;                      // 1 ms, linear
+const ATTACK_STEP = Math.floor((1 << 24) / ATTACK);
+
+// Per sample, a one-pole moves this fraction (Q20) of the way to its target.
+function coef20(ms) { return Math.round(1048576 * (1 - Math.exp(-1000 / (ms * FS)))); }
+function incFor(hz) { return Math.round(hz * 4294967296 / FS); }
+function hzFor(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
+
+// Drops: [beat (in note gaps), MIDI note, gain, decay multiplier]. A gain of
+// 0.8 leaves room for the echoes that overlap a drop: the peak stays near 1.
+const SCORES = {
+  listen:  [[0, 83, 0.8, 1], [1, 83, 0.8, 1.4]],
+  joined:  [[0, 80, 0.8, 1], [1, 83, 0.8, 1], [2, 88, 0.8, 1.8]],
+  nothing: [[0, 88, 0.8, 1], [1, 83, 0.8, 1], [2, 80, 0.8, 1.8]],
+};
+const END = 33554;                      // a voice stops at -54 dB: 2^24 / 500
+
+function dropVoices(score, p) {
+  const voices = [], marks = [];
+  const from = Math.pow(2, -p.glideSt / 12);
+  const idx0 = Math.round(p.glass / (2 * Math.PI) * 131072);   // radians -> phase units / 2^15
+  for (const [beat, midi, gain, decMul] of score) {
+    const note = midi + p.pitch;
+    const target = incFor(hzFor(note));
+    const start0 = Math.round(beat * p.gapMs * FS / 1000);
+    for (let k = 0; k <= p.repeats; k++) {
+      const gQ = Math.round(32767 * gain * Math.pow(p.feedback, k));
+      if (gQ < 66) break;                                       // under -54 dB
+      const start = start0 + Math.round(k * p.echoMs * FS / 1000);
+      voices.push({
+        start, target, inc: Math.round(target * from),
+        kg: coef20(p.glideMs), kd: coef20(p.decayMs * decMul), kgl: coef20(p.glassMs),
+        ratioQ8: Math.round(p.ratio * 256),
+        idxQ: Math.round(idx0 * Math.pow(p.glassKeep, k)) * 256,
+        gQ, endEnv: Math.min(1 << 24, Math.floor(END * 32767 / gQ)),
+        pc: 0, pm: 0, env: 0, age: 0, done: false,
+      });
+      marks.push({ t: start / FS, midi: note, gain: gQ / 32767, glideSt: p.glideSt, glideMs: p.glideMs });
+    }
+  }
+  return { voices, marks };
+}
+
+function renderVoices(voices, amp) {
+  const out = new Int16Array(FS * 6);
+  let n = 0;
+  for (; n < out.length; n++) {
+    let sum = 0, live = 0;
+    for (const v of voices) {
+      if (v.done) continue;
+      live++;
+      if (n < v.start) continue;
+      v.inc += Math.imul((v.target - v.inc) >> 10, v.kg) >> 10;          // glide up into the note
+      let off = 0;
+      if (v.idxQ > 0) {                                                   // glass: FM modulator
+        v.pm = (v.pm + Math.imul(v.inc >> 8, v.ratioQ8)) >>> 0;
+        off = Math.imul(SIN[v.pm >>> 22], v.idxQ >> 8);
+        v.idxQ -= Math.imul(v.idxQ >> 8, v.kgl) >> 12;
+      }
+      v.pc = (v.pc + v.inc) >>> 0;
+      const s = SIN[((v.pc + off) >>> 0) >>> 22];
+      if (v.age < ATTACK) v.env = Math.imul(v.age, ATTACK_STEP);
+      else if (v.age === ATTACK) v.env = 1 << 24;
+      else v.env -= Math.imul(v.env >> 8, v.kd) >> 12;
+      v.age++;
+      sum += Math.imul(Math.imul(s, v.env >> 9) >> 15, v.gQ) >> 15;
+      if (v.age > ATTACK && v.env < v.endEnv) v.done = true;
+    }
+    if (live === 0) break;
+    const o = Math.imul(sum, amp) >> 15;
+    out[n] = o > 32767 ? 32767 : o < -32768 ? -32768 : o;
+  }
+  return out.slice(0, n);
+}
+
+function renderDrops(key, p) {
+  const { voices, marks } = dropVoices(SCORES[key], p);
+  return { pcm: renderVoices(voices, AMP), marks, voices: voices.length };
+}
+
+// The old beeps, as main.cpp's playTone() made them: a sine by recurrence,
+// 5 ms linear fades, then silence. [Hz, MIDI for the plot, ms]; Hz 0 is a gap.
+const BEEPS = {
+  listen:  [[880, 81, 100], [0, 0, 80], [880, 81, 100], [0, 0, 50]],
+  joined:  [[523, 72, 120], [0, 0, 30], [659, 76, 120], [0, 0, 30], [784, 79, 180], [0, 0, 50]],
+  nothing: [[784, 79, 120], [0, 0, 30], [659, 76, 120], [0, 0, 30], [523, 72, 180], [0, 0, 50]],
+};
+
+function renderBeeps(key) {
+  const out = [], marks = [];
+  const fade = Math.floor(FS * 5 / 1000);
+  for (const [hz, midi, ms] of BEEPS[key]) {
+    const total = Math.floor(FS * ms / 1000);
+    if (!hz) { for (let i = 0; i < total; i++) out.push(0); continue; }
+    marks.push({ t: out.length / FS, midi, gain: 1, len: ms / 1000 });
+    const w = 2 * Math.PI * hz / FS, k = 2 * Math.cos(w);
+    let prev = -AMP * Math.sin(w), cur = 0;
+    for (let pos = 0; pos < total; pos++) {
+      let s = Math.trunc(cur);
+      const next = k * cur - prev;
+      prev = cur; cur = next;
+      if (pos < fade) s = Math.trunc(s * pos / fade);
+      else if (pos > total - fade) s = Math.trunc(s * (total - pos) / fade);
+      out.push(s);
+    }
+  }
+  return { pcm: Int16Array.from(out), marks, voices: marks.length };
+}
+// SYNTH-END
+
+const KNOB_GROUPS = [
+  { name: 'Drop', knobs: [
+    { id: 'pitch',   label: 'Pitch',        min: -12, max: 12,  step: 1,    fmt: v => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v) + ' st' },
+    { id: 'glideSt', label: 'Glide depth',  min: 0,   max: 24,  step: 1,    fmt: v => v === 0 ? 'none' : v + ' st below' },
+    { id: 'glideMs', label: 'Glide time',   min: 5,   max: 60,  step: 1,    fmt: v => v + ' ms' },
+    { id: 'decayMs', label: 'Decay',        min: 20,  max: 250, step: 5,    fmt: v => v + ' ms' },
+    { id: 'gapMs',   label: 'Note gap',     min: 80,  max: 250, step: 5,    fmt: v => v + ' ms' },
+  ]},
+  { name: 'Glass', knobs: [
+    { id: 'glass',     label: 'Amount',          min: 0, max: 3,   step: 0.1,  fmt: v => v === 0 ? 'off' : v.toFixed(1) },
+    { id: 'ratio',     label: 'Ratio',           min: 1, max: 4,   step: 0.25, fmt: v => '×' + v.toFixed(2) },
+    { id: 'glassMs',   label: 'Fade',            min: 5, max: 80,  step: 1,    fmt: v => v + ' ms' },
+    { id: 'glassKeep', label: 'Kept per echo',   min: 0, max: 1,   step: 0.05, fmt: v => Math.round(v * 100) + '%' },
+  ]},
+  { name: 'Echo', knobs: [
+    { id: 'echoMs',   label: 'Time',     min: 80, max: 400, step: 5,    fmt: v => v + ' ms' },
+    { id: 'feedback', label: 'Level',    min: 0,  max: 0.7, step: 0.01, fmt: v => Math.round(v * 100) + '%' },
+    { id: 'repeats',  label: 'Repeats',  min: 0,  max: 6,   step: 1,    fmt: v => String(v) },
+  ]},
+];
+const KNOBS = KNOB_GROUPS.flatMap(g => g.knobs);
+
+const VOICES = {
+  beeps: {
+    name: 'Old beeps',
+    blurb: 'What the nodes played until 2026-10-06: plain sine beeps with 5 ms fades. Here to compare against, with nothing to tune.',
+  },
+  shipped: {
+    name: 'In the firmware', tag: 'config.h',
+    blurb: 'Aqua glass as it was tuned by ear on 2026-10-06: a shallower glide, a slower decay and a quiet echo. What config.h holds.',
+    p: { pitch: 2, glideSt: 3, glideMs: 14, decayMs: 115, gapMs: 160, glass: 0.5, ratio: 3.5, glassMs: 20, glassKeep: 0.5, echoMs: 210, feedback: 0.13, repeats: 3 },
+  },
+  droplet: {
+    name: 'Droplet',
+    blurb: 'A pure sine that glides up into its note, like a drop landing in water, then a dotted echo. The plainest of the three.',
+    p: { pitch: 0, glideSt: 12, glideMs: 12, decayMs: 55, gapMs: 120, glass: 0, ratio: 3.5, glassMs: 18, glassKeep: 0.45, echoMs: 180, feedback: 0.42, repeats: 3 },
+  },
+  aqua: {
+    name: 'Aqua glass',
+    blurb: 'The droplet with a glassy FM shimmer on each attack, a little duller on every echo. Where the firmware sound started.',
+    p: { pitch: 0, glideSt: 8, glideMs: 9, decayMs: 75, gapMs: 120, glass: 1.4, ratio: 3.5, glassMs: 20, glassKeep: 0.45, echoMs: 180, feedback: 0.45, repeats: 3 },
+  },
+  bubble: {
+    name: 'Bubble',
+    blurb: 'An octave lower, with a deeper and slower glide and a longer echo: a bloop more than a plink.',
+    p: { pitch: -12, glideSt: 19, glideMs: 22, decayMs: 75, gapMs: 140, glass: 0.5, ratio: 2, glassMs: 30, glassKeep: 0.5, echoMs: 210, feedback: 0.4, repeats: 3 },
+  },
+};
+const ORDER = ['beeps', 'shipped', 'droplet', 'aqua', 'bubble'];
+
+const EVENTS = [
+  { key: 'listen',  name: 'Listening',     when: 'Power-on, and a pairing window opening.',                  shape: ['Two drops, one pitch', 'Two beeps, one pitch'] },
+  { key: 'joined',  name: 'Joined',        when: 'A node adopting a mesh, or a phone connecting to a server.', shape: ['Three drops rising', 'Three beeps rising'] },
+  { key: 'nothing', name: 'Nothing heard', when: 'A pairing window closing empty, or a phone disconnecting.',  shape: ['Three drops falling', 'Three beeps falling'] },
+];
+
+// ---------- state ----------
+const STORE = 'sonoloco-tones-preview-v1';
+const state = { voice: 'shipped', lastDrop: 'shipped', params: {}, volume: 0.8, rendered: {}, axisSec: 1, lo: 70, hi: 90 };
+for (const k of ORDER) if (VOICES[k].p) state.params[k] = { ...VOICES[k].p };
+try {
+  const s = JSON.parse(localStorage.getItem(STORE) || 'null');
+  if (s && typeof s === 'object') {
+    if (VOICES[s.voice]) state.voice = s.voice;
+    if (s.params) for (const k in state.params) for (const kn of KNOBS) {
+      const v = s.params[k] && s.params[k][kn.id];
+      if (typeof v === 'number' && isFinite(v)) state.params[k][kn.id] = Math.min(kn.max, Math.max(kn.min, v));
+    }
+    if (typeof s.volume === 'number' && isFinite(s.volume)) state.volume = Math.min(1.5, Math.max(0, s.volume));
+  }
+} catch (e) { /* storage unavailable: defaults */ }
+if (state.voice !== 'beeps') state.lastDrop = state.voice;
+let saveTimer = 0;
+function save() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try { localStorage.setItem(STORE, JSON.stringify({ voice: state.voice, params: state.params, volume: state.volume })); } catch (e) {}
+  }, 250);
+}
+
+// ---------- build the page ----------
+const $ = id => document.getElementById(id);
+const NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+const ASCII = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const noteName = (m, ascii) => (ascii ? ASCII : NAMES)[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+
+for (const k of ORDER) {
+  const v = VOICES[k];
+  const wrap = document.createElement('div');
+  wrap.className = 'voice';
+  wrap.innerHTML = `<input type="radio" name="voice" id="v-${k}" value="${k}"><label for="v-${k}">${v.name}${v.tag ? ` <span class="tag">${v.tag}</span>` : ''}</label>`;
+  $('voices').appendChild(wrap);
+  wrap.querySelector('input').addEventListener('change', () => selectVoice(k));
+}
+
+const cards = EVENTS.map(e => {
+  const el = document.createElement('article');
+  el.className = 'card';
+  el.innerHTML = `
+    <h3>${e.name}</h3>
+    <p class="shape"></p>
+    <p class="when">${e.when}</p>
+    <canvas role="img"></canvas>
+    <div class="foot">
+      <button class="gel" type="button">
+        <svg class="tri" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 0.5 9 5 1 9.5z"/></svg>
+        <svg class="bars" viewBox="0 0 10 10" aria-hidden="true"><rect x="1" y="1" width="3" height="8"/><rect x="6" y="1" width="3" height="8"/></svg>
+        <span class="lbl">Play</span>
+      </button>
+      <span class="meta"></span>
+    </div>`;
+  $('events').appendChild(el);
+  const card = { ...e, el, canvas: el.querySelector('canvas'), btn: el.querySelector('.gel'),
+                 lbl: el.querySelector('.lbl'), meta: el.querySelector('.meta'), shapeEl: el.querySelector('.shape'), head: false };
+  card.btn.addEventListener('click', () => {
+    if (activeFor(card.key)) { stopAll(); return; }
+    stopAll(); play(card.key, 0);
+  });
+  card.btn.setAttribute('aria-label', 'Play ' + e.name);
+  return card;
+});
+
+const knobEls = {};
+for (const g of KNOB_GROUPS) {
+  const fs = document.createElement('fieldset');
+  fs.innerHTML = `<legend>${g.name}</legend><div class="knobs"></div>`;
+  for (const kn of g.knobs) {
+    const row = document.createElement('div');
+    row.className = 'knob';
+    row.innerHTML = `<label for="k-${kn.id}">${kn.label}</label><output for="k-${kn.id}" id="o-${kn.id}"></output>
+      <input type="range" id="k-${kn.id}" min="${kn.min}" max="${kn.max}" step="${kn.step}">`;
+    fs.querySelector('.knobs').appendChild(row);
+    const input = row.querySelector('input');
+    knobEls[kn.id] = { input, out: row.querySelector('output'), kn };
+    input.addEventListener('input', () => {
+      if (state.voice === 'beeps') return;
+      state.params[state.voice][kn.id] = parseFloat(input.value);
+      knobEls[kn.id].out.textContent = kn.fmt(parseFloat(input.value));
+      scheduleRender();
+      save();
+    });
+  }
+  $('groups').appendChild(fs);
+}
+
+function syncKnobs() {
+  const v = state.voice === 'beeps' ? state.lastDrop : state.voice;
+  const p = state.params[v];
+  for (const id in knobEls) {
+    const { input, out, kn } = knobEls[id];
+    input.value = p[id];
+    out.textContent = kn.fmt(p[id]);
+  }
+  const off = state.voice === 'beeps';
+  for (const fs of document.querySelectorAll('#groups fieldset')) fs.disabled = off;
+  $('reset').disabled = off || isDefault(state.voice);
+}
+
+function isDefault(v) {
+  const p = state.params[v], d = VOICES[v].p;
+  return KNOBS.every(kn => Math.abs(p[kn.id] - d[kn.id]) < 1e-9);
+}
+
+function selectVoice(k) {
+  state.voice = k;
+  if (k !== 'beeps') state.lastDrop = k;
+  $('v-' + k).checked = true;
+  $('blurb').textContent = VOICES[k].blurb;
+  syncKnobs();
+  renderAll();
+  save();
+}
+
+$('reset').addEventListener('click', () => {
+  if (state.voice === 'beeps') return;
+  state.params[state.voice] = { ...VOICES[state.voice].p };
+  syncKnobs();
+  renderAll();
+  save();
+});
+
+// ---------- render ----------
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; renderAll(); });
+}
+
+function renderAll() {
+  const v = state.voice, p = state.params[v];
+  let maxDur = 0, lo = 999, hi = -999;
+  for (const e of EVENTS) {
+    const r = v === 'beeps' ? renderBeeps(e.key) : renderDrops(e.key, p);
+    let peak = 0;
+    for (let i = 0; i < r.pcm.length; i++) { const a = Math.abs(r.pcm[i]); if (a > peak) peak = a; }
+    r.peak = peak / AMP;
+    r.dur = r.pcm.length / FS;
+    state.rendered[e.key] = r;
+    maxDur = Math.max(maxDur, r.dur);
+    for (const m of r.marks) { lo = Math.min(lo, m.midi); hi = Math.max(hi, m.midi); }
+  }
+  state.axisSec = Math.max(1, Math.ceil(maxDur / 0.25) * 0.25);
+  state.lo = lo - 3;
+  state.hi = Math.max(hi + 2, lo + 8);
+  const beeps = v === 'beeps';
+  for (const c of cards) {
+    const r = state.rendered[c.key];
+    c.shapeEl.textContent = c.shape[beeps ? 1 : 0];
+    c.meta.textContent = `${r.dur.toFixed(2)} s · peak ${r.peak.toFixed(2)}`;
+    c.canvas.setAttribute('aria-label', `${c.name}: ${c.shape[beeps ? 1 : 0].toLowerCase()}, ${r.dur.toFixed(2)} seconds`);
+    draw(c);
+  }
+  $('reset').disabled = beeps || isDefault(v);
+  updateCfg();
+}
+
+function draw(card) {
+  const cv = card.canvas;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+  }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement);
+  const col = n => css.getPropertyValue(n).trim();
+  const r = state.rendered[card.key];
+  if (!r) return;
+
+  const L = 2, R = 2;
+  const T = state.axisSec;
+  const x = t => L + (w - L - R) * t / T;
+  const rollTop = 6, rollH = 36;
+  const waveTop = rollTop + rollH + 8, axisY = h - 15, waveH = axisY - 4 - waveTop;
+  const mid = waveTop + waveH / 2;
+  const y = m => rollTop + rollH * (1 - (m - state.lo) / (state.hi - state.lo));
+
+  // time grid every 0.25 s, labels every 0.5 s
+  g.strokeStyle = col('--line');
+  g.lineWidth = 1;
+  for (let t = 0; t <= T + 1e-9; t += 0.25) {
+    const X = Math.round(x(t)) + 0.5;
+    g.beginPath(); g.moveTo(X, rollTop); g.lineTo(X, axisY); g.stroke();
+  }
+  g.beginPath(); g.moveTo(L, Math.round(mid) + 0.5); g.lineTo(w - R, Math.round(mid) + 0.5); g.stroke();
+  g.fillStyle = col('--muted');
+  g.font = '10px ' + col('--font-mono');
+  g.textBaseline = 'alphabetic';
+  for (let t = 0; t <= T + 1e-9; t += 0.5) {
+    g.textAlign = t === 0 ? 'left' : t >= T - 1e-9 ? 'right' : 'center';
+    g.fillText(t === 0 ? '0' : t.toFixed(1) + ' s', x(t), h - 2);
+  }
+
+  // waveform, min/max per pixel column
+  const pcm = r.pcm, cols = Math.floor(w - L - R), spp = T * FS / cols, half = waveH / 2;
+  g.fillStyle = col('--wave');
+  for (let c = 0; c < cols; c++) {
+    const a = Math.floor(c * spp);
+    if (a >= pcm.length) break;
+    const b = Math.min(pcm.length, Math.floor((c + 1) * spp));
+    let mn = 0, mx = 0;
+    for (let i = a; i < b; i++) { const s = pcm[i]; if (s < mn) mn = s; if (s > mx) mx = s; }
+    const top = mid - Math.min(1, mx / AMP) * half;
+    const bot = mid - Math.max(-1, mn / AMP) * half;
+    g.fillRect(L + c, top, 1, Math.max(1, bot - top));
+  }
+
+  // the score: drops glide up into a dot, beeps are flat bars
+  g.save();
+  g.beginPath(); g.rect(0, rollTop - 4, w, rollH + 8); g.clip();
+  g.strokeStyle = col('--dot');
+  g.fillStyle = col('--dot');
+  for (const m of r.marks) {
+    g.globalAlpha = 0.18 + 0.82 * m.gain;
+    if (m.len) {
+      g.fillRect(x(m.t), y(m.midi) - 2, Math.max(2, x(m.t + m.len) - x(m.t)), 4);
+      continue;
+    }
+    const settle = 3 * m.glideMs / 1000;
+    if (m.glideSt > 0) {
+      g.lineWidth = 1.25;
+      g.beginPath();
+      for (let i = 0; i <= 10; i++) {
+        const f = i / 10;
+        const px = x(m.t + f * settle), py = y(m.midi - m.glideSt * Math.exp(-3 * f));
+        i ? g.lineTo(px, py) : g.moveTo(px, py);
+      }
+      g.stroke();
+    }
+    g.beginPath(); g.arc(x(m.t + settle), y(m.midi), 3.1, 0, Math.PI * 2); g.fill();
+  }
+  g.restore();
+
+  // playhead
+  const e = activeFor(card.key);
+  if (e) {
+    const t = Math.max(0, ac.currentTime - e.t0);
+    g.strokeStyle = col('--accent');
+    g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(x(t), rollTop - 2); g.lineTo(x(t), axisY); g.stroke();
+  }
+}
+
+// ---------- settings text ----------
+function fnv(pcm) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < pcm.length; i++) {
+    const u = pcm[i] & 0xffff;
+    h = Math.imul(h ^ (u & 0xff), 16777619) >>> 0;
+    h = Math.imul(h ^ (u >> 8), 16777619) >>> 0;
+  }
+  return h.toString(16).toUpperCase().padStart(8, '0');
+}
+
+function updateCfg() {
+  const v = state.voice;
+  let lines;
+  if (v === 'beeps') {
+    lines = [
+      '// The old beeps, until 2026-10-06: playStartupSound, playConnectedSound, playDisconnectedSound',
+      '// listening      A5 100 ms, 80 ms gap, A5 100 ms',
+      '// joined         C5 120 ms, E5 120 ms, G5 180 ms, 30 ms gaps',
+      '// nothing heard  G5 120 ms, E5 120 ms, C5 180 ms, 30 ms gaps',
+    ];
+    $('cfgNote').textContent = 'Pick a drop voice to get settings to paste.';
+  } else {
+    const p = state.params[v];
+    const n = m => noteName(m + p.pitch, true);
+    const D = (name, val, why) => ('#define ' + name).padEnd(31) + String(val).padEnd(8) + (why ? '// ' + why : '');
+    lines = [
+      `// SonoLoco drop tones: ${VOICES[v].name}${isDefault(v) ? '' : ', tuned'}`,
+      D('DROP_NOTE_LOW', 80 + p.pitch, n(80)),
+      D('DROP_NOTE_MID', 83 + p.pitch, n(83)),
+      D('DROP_NOTE_HIGH', 88 + p.pitch, n(88)),
+      D('DROP_GLIDE_DEPTH_ST', p.glideSt, 'a drop starts this far below its note'),
+      D('DROP_GLIDE_MS', p.glideMs, 'and closes on it with this time constant'),
+      D('DROP_DECAY_MS', p.decayMs, 'x1.8 on the last of three, x1.4 on the second of two'),
+      D('DROP_GAP_MS', p.gapMs, 'between drops'),
+      D('DROP_GLASS', p.glass.toFixed(1), 'FM index in radians; 0 is a pure sine'),
+      D('DROP_GLASS_RATIO', p.ratio.toFixed(2), 'modulator : carrier'),
+      D('DROP_GLASS_MS', p.glassMs, 'the shimmer\'s time constant'),
+      D('DROP_ECHO_GLASS_KEEP', p.glassKeep.toFixed(2), 'shimmer left on each repeat'),
+      D('DROP_ECHO_MS', p.echoMs, ''),
+      D('DROP_ECHO_LEVEL', p.feedback.toFixed(2), 'each repeat, relative to the one before'),
+      D('DROP_ECHO_REPEATS', p.repeats, 'at most: one under -54 dB is not played'),
+      '',
+      '// test_tones, SOUNDS[]: frames and FNV-1a of each sound at amplitude 8000',
+      ...EVENTS.map(e => { const r = state.rendered[e.key]; return `//   ${(e.name + ':').padEnd(15)}${String(r.pcm.length).padStart(6)}  0x${fnv(r.pcm)}`; }),
+    ];
+    $('cfgNote').textContent = 'The values for config.h, and the figures test_tones checks the firmware against.';
+  }
+  $('cfg').textContent = lines.join('\n');
+}
+
+$('copy').addEventListener('click', () => {
+  const text = $('cfg').textContent;
+  const status = $('copyStatus');
+  const fallback = () => {
+    const sel = window.getSelection(), range = document.createRange();
+    range.selectNodeContents($('cfg'));
+    sel.removeAllRanges(); sel.addRange(range);
+    status.textContent = 'Selected: press Ctrl+C';
+  };
+  try {
+    navigator.clipboard.writeText(text).then(() => { status.textContent = 'Copied'; }, fallback);
+  } catch (e) { fallback(); }
+  setTimeout(() => { status.textContent = ''; }, 4000);
+});
+
+// ---------- audio ----------
+let ac = null, master = null;
+const sources = new Set();
+function ensureAudio() {
+  if (!ac) {
+    const C = window.AudioContext || window.webkitAudioContext;
+    ac = new C();
+    master = ac.createGain();
+    master.connect(ac.destination);
+  }
+  master.gain.value = state.volume;
+  if (ac.state === 'suspended') ac.resume();
+}
+
+function play(key, delay) {
+  ensureAudio();
+  const r = state.rendered[key];
+  const buf = ac.createBuffer(1, r.pcm.length, FS);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < r.pcm.length; i++) ch[i] = r.pcm[i] / 32768;
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  src.connect(master);
+  const entry = { src, key, t0: ac.currentTime + 0.03 + delay, dur: buf.duration };
+  src.start(entry.t0);
+  src.onended = () => { sources.delete(entry); };
+  sources.add(entry);
+  startFrames();
+  return entry.dur;
+}
+
+function stopAll() {
+  for (const e of sources) { try { e.src.stop(); } catch (err) {} }
+  sources.clear();
+}
+
+function activeFor(key) {
+  if (!ac) return null;
+  for (const e of sources) {
+    const t = ac.currentTime - e.t0;
+    if (e.key === key && t >= 0 && t <= e.dur) return e;
+  }
+  return null;
+}
+
+let framing = false;
+function startFrames() {
+  if (framing) return;
+  framing = true;
+  const tick = () => {
+    for (const c of cards) {
+      const on = !!activeFor(c.key);
+      if (on || c.head) draw(c);
+      c.head = on;
+      if (on) { c.btn.setAttribute('data-playing', ''); c.lbl.textContent = 'Stop'; }
+      else { c.btn.removeAttribute('data-playing'); c.lbl.textContent = 'Play'; }
+    }
+    if (sources.size || cards.some(c => c.head)) requestAnimationFrame(tick);
+    else framing = false;
+  };
+  requestAnimationFrame(tick);
+}
+
+$('playAll').addEventListener('click', () => {
+  stopAll();
+  let t = 0;
+  for (const e of EVENTS) t += play(e.key, t) + 0.7;
+});
+
+$('volume').value = state.volume;
+$('volume').addEventListener('input', () => {
+  state.volume = parseFloat($('volume').value);
+  if (master) master.gain.value = state.volume;
+  save();
+});
+
+// ---------- redraw on resize and theme ----------
+const redrawAll = () => cards.forEach(draw);
+if ('ResizeObserver' in window) new ResizeObserver(redrawAll).observe($('events'));
+else window.addEventListener('resize', redrawAll);
+try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redrawAll); } catch (e) {}
+new MutationObserver(redrawAll).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class'] });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(redrawAll);
+
+selectVoice(state.voice);
+</script>

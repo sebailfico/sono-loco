@@ -112,7 +112,7 @@ ends: `o` on a node already in the mesh (or a three-second BOOT hold on a
 server-capable one) to offer it, then `p` on the node being moved (or a
 three-second hold there — GPIO 9 on a C3, GPIO 0 on the others). Expect
 `[MESH] offering mesh=…` on one and `[MESH] paired mesh=…` on the other within a
-second, plus two beeps at each press and the rising tone on the node that
+second, plus two drops at each press and three rising ones on the node that
 joined, if it has a DAC. Power-cycle it afterwards to confirm the adopted id
 survived: surviving a power cut is the whole reason it is in NVS and not RTC
 memory.

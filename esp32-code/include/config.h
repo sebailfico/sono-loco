@@ -90,7 +90,32 @@
 #ifndef TONE_AMPLITUDE
 #define TONE_AMPLITUDE   500
 #endif
-#define TONE_FADE_MS     5       // ramp in/out, kills the click at tone edges
+
+// Each sound is a few water drops through an echo (lib/tones): a sine that
+// glides up into its note with a glassy shimmer on the attack, then repeats,
+// quieter, DROP_ECHO_MS later. Chosen by ear on 2026-10-06 in a browser
+// preview that runs the same arithmetic, tools/tones/preview.html, and
+// test_tones holds the firmware to that preview's samples: retune there, then
+// copy its settings here and its figures into the test.
+//
+// The notes are MIDI numbers, 69 being A4 at 440 Hz. Listening is two drops
+// on the middle one, joined rises through all three, nothing heard falls.
+// Doubles, not floats: lib/tones works out its coefficients from these once a
+// sound, in double, so that they round as the preview's did.
+#define DROP_NOTE_LOW          82      // A#5
+#define DROP_NOTE_MID          85      // C#6
+#define DROP_NOTE_HIGH         90      // F#6
+#define DROP_GLIDE_DEPTH_ST    3       // a drop starts this far below its note
+#define DROP_GLIDE_MS          14      // and closes on it with this time constant
+#define DROP_DECAY_MS          115     // x1.8 on the last of three, x1.4 on the second of two
+#define DROP_GAP_MS            160     // between drops
+#define DROP_GLASS             0.5     // FM index in radians; 0 is a pure sine
+#define DROP_GLASS_RATIO       3.5     // modulator : carrier
+#define DROP_GLASS_MS          20      // the shimmer's time constant
+#define DROP_ECHO_GLASS_KEEP   0.5     // shimmer left on each repeat
+#define DROP_ECHO_MS           210
+#define DROP_ECHO_LEVEL        0.13    // each repeat, relative to the one before
+#define DROP_ECHO_REPEATS      3       // at most: one under -54 dB is not played, so 2 here
 
 // The range of a node's own volume trim (`v<dB>`, lib/jitter/gain.h). Above
 // 0 a loud passage clips; the ceiling is there so a typo cannot ask for +40.

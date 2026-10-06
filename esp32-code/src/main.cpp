@@ -48,6 +48,7 @@
 #include "mesh.h"
 #include "seqtracker.h"
 #include "sync.h"
+#include "tones.h"
 
 #ifdef ENABLE_BLUETOOTH
 #include "BluetoothA2DPSink.h"
@@ -175,7 +176,7 @@ static bool        clientOnly = false;
 // `m` mutes, until reboot: zeroes where this node's samples meet its speaker
 // -- on a Bluetooth node after the mesh has taken its copy, on a client before
 // I2S. Volume 0 for this node alone, its jingles and beeps included
-// (playTone). It is how a microphone next to one node hears that node alone,
+// (playDrops). It is how a microphone next to one node hears that node alone,
 // and how a bench run stays silent.
 static volatile bool outputMuted   = false;
 // `M` mixes a client's stereo to mono on both channels, kept in NVS: a node
@@ -349,59 +350,12 @@ static size_t i2sWriteAll(const void *src, size_t bytes, TickType_t timeout) {
 }
 
 // ============================================================================
-// Tone Generation (startup / connect / disconnect sounds)
+// Notification sounds (startup / connect / disconnect)
 // ============================================================================
-
-#define NOTE_C5  523
-#define NOTE_E5  659
-#define NOTE_G5  784
-#define NOTE_A5  880
-
-void playTone(uint16_t freq, uint16_t durationMs, uint16_t amp = TONE_AMPLITUDE) {
-    const int total = (BT_SAMPLE_RATE * durationMs) / 1000;
-    const int chunk = 512;
-    const int fade  = BT_SAMPLE_RATE * TONE_FADE_MS / 1000;
-    int16_t buf[chunk * 2];
-    int written = 0;
-
-    // The sine by recurrence, s[n] = 2cos(w)*s[n-1] - s[n-2]: a multiply and a
-    // subtraction a sample, and sinf() twice a tone. sinf() a sample is cheap
-    // with an FPU, and the C3 has none: it computed its tones at a sixth of
-    // the speed they play, and the DMA, cleared whenever it ran dry
-    // (tx_desc_auto_clear), played them as bursts with silence between --
-    // the startup beeps took 1,410 ms instead of 330 (2026-10-03). The bench
-    // tone had the same cause (benchBuildTone). Single precision throughout:
-    // a double anywhere, M_PI included, is soft-float on every one of these chips.
-    // A muted node plays its jingles and beeps as silence, for exactly as long:
-    // what follows a tone (the schedule a jingle invalidates) runs unchanged.
-    // Before, a muted server played its connect jingle as the PC dialled in,
-    // during a run meant to be silent (2026-10-03).
-    if (outputMuted) amp = 0;
-    const float w    = 2.0f * (float)M_PI * (float)freq / (float)BT_SAMPLE_RATE;
-    const float k    = 2.0f * cosf(w);
-    float       prev = -(float)amp * sinf(w);   // the sample before the first, sin(-w)
-    float       cur  = 0.0f;                    // the first, sin(0)
-
-    while (written < total) {
-        int n = min(chunk, total - written);
-
-        for (int i = 0; i < n; i++) {
-            int16_t s = (int16_t)cur;
-            const float next = k * cur - prev;
-            prev = cur;
-            cur  = next;
-            int pos = written + i;
-            if (pos < fade)              s = s * pos / fade;
-            else if (pos > total - fade) s = s * (total - pos) / fade;
-            buf[i * 2]     = s;
-            buf[i * 2 + 1] = s;
-        }
-
-        size_t bw = i2sWriteAll(buf, n * 4, pdMS_TO_TICKS(100));
-        if (bw < (size_t)n * 4) return;   // I2S is not accepting — abort the tone
-        written += n;
-    }
-}
+//
+// Water drops through an echo, made by lib/tones and chosen by ear in
+// tools/tones/preview.html (2026-10-06). They replaced beeps, and keep what
+// the beeps meant: two at one pitch, three rising, three falling (D12).
 
 void playSilence(uint16_t durationMs) {
     const int total = (BT_SAMPLE_RATE * durationMs) / 1000;
@@ -417,21 +371,69 @@ void playSilence(uint16_t durationMs) {
     }
 }
 
-void playStartupSound() {
-    playTone(NOTE_A5, 100); playSilence(80);
-    playTone(NOTE_A5, 100); playSilence(50);
+static const DropSound::Timbre DROP_TIMBRE = {
+    DROP_GLIDE_DEPTH_ST, DROP_GLIDE_MS, DROP_DECAY_MS, DROP_GLASS, DROP_GLASS_RATIO, DROP_GLASS_MS,
+    DROP_ECHO_GLASS_KEEP, DROP_ECHO_MS, DROP_ECHO_LEVEL, DROP_ECHO_REPEATS,
+};
+
+/**
+ * Play drops into the output driver as they are rendered, then 50 ms of
+ * silence, so the DMA has played the end out before a caller uninstalls it.
+ *
+ * Rendering is integer arithmetic a sample (lib/tones), and has to be: the C3
+ * has no FPU, and when its beeps were a sinf() a sample it computed them at a
+ * sixth of the speed they play. The DMA, cleared whenever it ran dry
+ * (tx_desc_auto_clear), played them as bursts with silence between: 1,410 ms
+ * for 330 ms of sound (2026-10-03). test_tones times the render on the board.
+ *
+ * A muted node plays its jingles and beeps as silence, for exactly as long:
+ * what follows a sound (the schedule a jingle invalidates) runs unchanged.
+ * Before, a muted server played its connect jingle as the PC dialled in,
+ * during a run meant to be silent (2026-10-03).
+ */
+static void playDrops(const DropSound::Note *notes, int count) {
+    DropSound     sound;
+    int16_t       mono[256];
+    int16_t       stereo[256 * 2];
+    const int32_t amp = outputMuted ? 0 : TONE_AMPLITUDE;
+    int           n;
+
+    sound.begin(notes, count, DROP_TIMBRE, BT_SAMPLE_RATE);
+    while ((n = sound.render(mono, 256, amp)) > 0) {
+        for (int i = 0; i < n; i++) stereo[i * 2] = stereo[i * 2 + 1] = mono[i];
+        size_t bw = i2sWriteAll(stereo, n * 4, pdMS_TO_TICKS(100));
+        if (bw < (size_t)n * 4) return;   // I2S is not accepting — abort the sound
+    }
+    playSilence(50);
 }
 
-void playConnectedSound() {
-    playTone(NOTE_C5, 120); playSilence(30);
-    playTone(NOTE_E5, 120); playSilence(30);
-    playTone(NOTE_G5, 180); playSilence(50);
+// Drops at 0.8 leave room for the echoes that overlap them: each sound peaks
+// within a few percent of TONE_AMPLITUDE, where the beeps did.
+
+void playStartupSound() {         // listening: two drops at one pitch
+    static const DropSound::Note notes[] = {
+        {0,           DROP_NOTE_MID, 0.8, 1.0},
+        {DROP_GAP_MS, DROP_NOTE_MID, 0.8, 1.4},
+    };
+    playDrops(notes, sizeof(notes) / sizeof(notes[0]));
 }
 
-void playDisconnectedSound() {
-    playTone(NOTE_G5, 120); playSilence(30);
-    playTone(NOTE_E5, 120); playSilence(30);
-    playTone(NOTE_C5, 180); playSilence(50);
+void playConnectedSound() {       // joined: three rising
+    static const DropSound::Note notes[] = {
+        {0,               DROP_NOTE_LOW,  0.8, 1.0},
+        {DROP_GAP_MS,     DROP_NOTE_MID,  0.8, 1.0},
+        {2 * DROP_GAP_MS, DROP_NOTE_HIGH, 0.8, 1.8},
+    };
+    playDrops(notes, sizeof(notes) / sizeof(notes[0]));
+}
+
+void playDisconnectedSound() {    // nothing heard: three falling
+    static const DropSound::Note notes[] = {
+        {0,               DROP_NOTE_HIGH, 0.8, 1.0},
+        {DROP_GAP_MS,     DROP_NOTE_MID,  0.8, 1.0},
+        {2 * DROP_GAP_MS, DROP_NOTE_LOW,  0.8, 1.8},
+    };
+    playDrops(notes, sizeof(notes) / sizeof(notes[0]));
 }
 
 void initI2SForTones() {

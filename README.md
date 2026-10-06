@@ -240,10 +240,10 @@ Name it with `g Casa Rossi` on the first node.
 Moving a node into a mesh afterwards needs no console and no typing — it is a
 **three-second hold of the BOOT button at each end**:
 
-1. Hold BOOT on the server whose mesh you are joining. It beeps twice and
+1. Hold BOOT on the server whose mesh you are joining. It plays two drops and
    *offers* its mesh for 60 s.
-2. Hold BOOT on the node you are moving. It beeps twice, adopts the offer, and
-   plays the rising three-note tone when it has joined. A falling tone means the
+2. Hold BOOT on the node you are moving. It plays two drops, adopts the offer,
+   and plays three rising drops when it has joined. Three falling drops mean the
    window closed with no offer heard — press again.
 
 Both presses are required, so a neighbour playing music during the window

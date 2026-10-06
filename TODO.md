@@ -185,10 +185,10 @@ polish.
       and no finger has been on either. What to check, on a board with a DAC so
       the tones can be heard:
 
-      - A 3 s hold opens a window at each end — two beeps, and the matching
+      - A 3 s hold opens a window at each end — two drops, and the matching
         `[MESH] offering` / `[MESH] listening` line on the console.
       - Offer on one, listen on the other: the listening node adopts within a
-        second, plays the rising tone, and comes back streaming on the new mesh.
+        second, plays three rising drops, and comes back streaming on the new mesh.
       - **The negative case, which is the whole reason there are two presses.**
         With no offer open, a listening node must sit through a foreign stream
         and report `listening closed, no offer heard` after 60 s, having joined

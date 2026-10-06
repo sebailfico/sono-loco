@@ -236,8 +236,8 @@ answer.
 
 ## D7 — Pure logic lives in `lib/`, and is tested on the host
 
-**Decided:** 2026-08-19. **Status:** holding; five libraries now (`jitter`,
-`adpcm`, `mesh`, `drift`, `sync`), each with its suite.
+**Decided:** 2026-08-19. **Status:** holding; six libraries now (`jitter`,
+`adpcm`, `mesh`, `drift`, `sync`, `tones`), each with its suite.
 
 The ring buffer and the packet sequence accounting were the first to move to
 `lib/jitter/` rather than stay in `main.cpp`, with host tests in
@@ -496,12 +496,22 @@ audio packet in 65536 — a false beacon every three minutes at 387 packets/s �
 invitation to join a stranger. A beacon must also be dropped *before* the
 sequence tracker sees it, or its sequence number reads as a stream restart.
 
-**The tones are not decoration.** Two beeps when a window opens, the rising
-three-note tone on adoption, a falling one when a window closes empty. Pairing
+**The tones are not decoration.** Two drops at one pitch when a window opens,
+three rising on adoption, three falling when a window closes empty. Pairing
 is used by somebody holding a button on a box with no screen and no console, and
 without them the button is indistinguishable from a button that does nothing.
 They play only in DISCOVERY: in CLIENT and SERVER mode `loop()` is feeding the
 I2S driver from the ring.
+
+**Amended 2026-10-06 — drops.** The beeps became water drops through an echo,
+chosen by ear in `tools/tones/preview.html` and made by `lib/tones`; the shapes
+that carry the meaning stayed. A sound now lasts 1.2–1.6 s against 0.3–0.5 s,
+most of it the echo dying away, and holds `loop()` for that long, as the beeps
+held it for theirs. In DISCOVERY nothing is waiting on it. A server's connect
+jingle holds its output a second longer than before, and its own speaker can
+lose that much of a stream that starts meanwhile; the mesh carries on
+(`playJingle`). The echo is extra voices rather than a delay line, which would
+need 18 KB on a server whose largest free block is 13 KB.
 
 It is a long press **while running**, never a press held through a reset. The
 BOOT button these devkits use is a strapping pin — held across a reset it puts

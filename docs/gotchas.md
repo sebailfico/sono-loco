@@ -157,8 +157,10 @@ carrying it out.
   `M_PI` is a double, and one in an expression promotes the rest. The bench
   tone ran at a sixth of real time on a C3 until it became a table, and the
   startup beeps stuttered — 1,410 ms for 330 ms of sound, the DMA playing the
-  gaps as silence — until they became a recurrence (2026-10-03). Anything a
-  C3 computes per sample has to be measured on a C3.
+  gaps as silence — until they became a recurrence (2026-10-03). The drops
+  that replaced them (`lib/tones`) are integers per sample, and `test_tones`
+  times them on the board it runs on. Anything a C3 computes per sample has to
+  be measured on a C3.
 - **`pio test` must not end on `Serial.end()` on a C3 or an S3.** PlatformIO's
   generated Unity glue does, and on these chips `Serial` is the chip's own
   USB port: a C3 dropped off USB the moment its tests had passed, and again

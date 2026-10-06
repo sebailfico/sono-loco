@@ -41,6 +41,10 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   through the packets' `due` stamps, earliest of each window. The arithmetic
   behind D14, where an error is a node playing cleanly a few ms away from the
   others — which nothing but a microphone would notice.
+- `esp32-code/lib/tones/` — the notification sounds: water drops through an
+  echo. Integers per sample, because the C3 has no FPU, and the echo as extra
+  voices rather than a delay line the heap could not spare. Chosen by ear in
+  `tools/tones/preview.html`, which runs the same arithmetic.
 - `esp32-code/test/test_jitter/` — host tests for the ring buffer and sequence
   accounting. Each one corresponds to a real bug or a real invariant.
 - `esp32-code/test/test_adpcm/` — the codec against the reference's own output,
@@ -55,6 +59,9 @@ further; the exception below is argued in `docs/decisions.md` (D7).
 - `esp32-code/test/test_sync/` — host tests for `lib/sync`: wake latency, an
   output slower than nominal, a window of slow packets, a server clock with
   its own slope, a schedule that moves, and the 32-bit wrap in every one.
+- `esp32-code/test/test_tones/` — the sounds against the preview's samples,
+  every one of them; each drop on its note, so joined still rises; a muted
+  node silent for exactly as long; and, on a board, how fast it renders.
 - `esp32-code/test/unity_config.h`, `.cpp` — Unity's output for every suite,
   in place of the glue PlatformIO generates, which ends a run on
   `Serial.end()` and takes a C3 or S3 off USB (`docs/gotchas.md`).
@@ -84,6 +91,9 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   WAV in, the original, the old 22.05 kHz mono path and the ADPCM path out, at
   the same rate and level. It decided D5, and its encoder is the reference
   `lib/adpcm` is tested against.
+- `tools/tones/preview.html` — hear and tune the notification sounds in a
+  browser, computed with `lib/tones`' integer steps. Its settings are
+  `config.h`'s `DROP_*` values and the figures `test_tones` checks.
 - `tools/btlisten/` — the Bluetooth half's test signal. The PC streams a 997 Hz
   tone to a server and records it with its own microphone, then counts holes,
   clicks and pitch error; with `--serial` the board's `a` window for the same
