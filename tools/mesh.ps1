@@ -116,6 +116,7 @@ try {
     $replies = Get-Replies $lines
 
     if (-not $listing) {
+        Write-Host ''   # apart from the relay line, as the listing is
         foreach ($r in $replies) { Write-Host ('{0,-18} {1}' -f $r.Name, $r.Text) }
         if ($replies.Count -eq 0) { Write-Host 'No answer.' -ForegroundColor Yellow }
         return

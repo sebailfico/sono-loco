@@ -37,6 +37,14 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **The scripts ask through a WROVER** (2026-10-06). `mesh.ps1` and `ota.ps1`
+  used to take the first board on USB, sorted as text, and that was the C3
+  on COM10. Through the C3 or the S3 the stereo never answered while a stream
+  played, though it did run the command it was sent. Through either WROVER it
+  answered every time. The cause is not known. Boards on a USB-serial bridge
+  now come first, then by port number. `mesh.ps1` also leaves a blank line
+  between the relay line and the answers.
+
 - **A connection starts at 30% volume, not 1%** (2026-10-06).
   `VOLUME_DEFAULT` 38 of 127. A phone or PC adopts the server's volume as its
   slider when it connects, so every first connection began at 1 of 127,

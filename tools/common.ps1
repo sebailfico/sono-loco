@@ -71,9 +71,17 @@ function Find-Relay {
     $ports = @()
     foreach ($d in ($json | ConvertFrom-Json)) {
         # The same bridges bench-mesh.ps1 looks for: CP210x, CH34x, FTDI, Espressif native.
-        if ($d.hwid -match 'VID:PID=(10C4|1A86|0403|303A)') { $ports += $d.port }
+        if ($d.hwid -match 'VID:PID=(10C4|1A86|0403|303A)') {
+            $ports += [pscustomobject]@{ Port = $d.port; Native = ($matches[1] -eq '303A') }
+        }
     }
-    foreach ($p in ($ports | Sort-Object -Unique)) {
+    # A board on a USB-serial bridge first, then by port number. On this bench
+    # that is the WROVERs, whose module antennas reached the stereo across the
+    # room while a stream played; through the S3 or the C3, on native USB, it
+    # did not answer at all (2026-10-06). Sorted as text, COM10 came first.
+    $ordered = $ports | Sort-Object Port -Unique |
+               Sort-Object Native, { [int]($_.Port -replace '\D', '') }
+    foreach ($p in ($ordered | ForEach-Object { $_.Port })) {
         $sp = $null
         try { $sp = Open-Port $p } catch { Write-Host "  $p busy, skipped"; continue }
         Start-Sleep -Milliseconds 300
