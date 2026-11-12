@@ -37,6 +37,32 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **A setup network on every node, and a page to set the mesh from a phone**
+  (2026-11-12, D19). **Built for every environment, and not yet run on a
+  board**; on the `config-mode` branch, on top of `two-chip-server`.
+  - A node opens `<room name>-setup` on the mesh's own channel, with a captive
+    page that lists the mesh and sets each node's name, trim, mute and mono.
+    Every change is an `@<mac>` command, and the page shows the answer. Open
+    until a password is set on the page, WPA2 after; the home WiFi for update
+    mode can be stored from it only then.
+  - Opened by a 10-15 s hold or `C` (`C0` closes). A node with no password and
+    no Bluetooth of its own opens it for 5 minutes on a power-on. A WROVER
+    pauses its Bluetooth while it is open, and refuses while serving a phone.
+  - The button reads three ranges on release (`lib/button`, `test_button`):
+    under 1 s Bluetooth, 3-9 s pairing, 10-15 s setup, with a drop at 3 s and
+    10 s in DISCOVERY. **Pairing now acts on release**, not as the hold reaches
+    3 s. An S3 or C3 without a front end now listens when paired rather than
+    offering.
+  - `I<name>`: the room name in NVS, the Bluetooth name from its next start
+    (D8 amended). `m1`/`m0` and `M1`/`M0` set rather than toggle. `N` gains
+    `mono=`, `?` gains `cfg=`.
+  - A question to one node that gets no answer is asked again twice, if
+    asking twice means the same (`meshCommandRetryable`), and ends 0.3 s after
+    its answer begins instead of after 2.5 s (D16 amended). `I` and `C` are
+    refused for `*`. 13 more host cases (`test_mesh`, `test_button`).
+  - The page's script was run in a browser against a fake node: every control,
+    a refused rename, a node that never answers, the password and WiFi forms.
+  - The classic image is 15 KB larger, with 360 bytes more static RAM.
 - **A two-chip server: Bluetooth on a WROOM, the mesh on any node** (2026-11-12,
   D18). **Built for every environment, and not yet run on a board**; on the
   `two-chip-server` branch. A classic board in front-end mode (`F`, NVS) runs

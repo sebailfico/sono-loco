@@ -242,7 +242,8 @@ bool meshCommandAllowedRemote(char cmd);
  * radio (w), or stops it playing to wait for a phone (B): each of those, sent
  * to `*`, takes the whole house off the air, and only a node named by the
  * person who meant it should do that. Nor `>`, which runs any of them on a
- * node's Bluetooth front end (D18).
+ * node's Bluetooth front end (D18), nor `I`, which would give every node one
+ * name, nor `C`, which would open a setup network on every one (D19).
  */
 bool meshCommandAllowedForAll(char cmd);
 
@@ -252,5 +253,21 @@ bool meshCommandAllowedForAll(char cmd);
  */
 bool meshCommandAddressed(const char *target, size_t len, char cmd, const char *roomName,
                           const char *mac);
+
+/**
+ * May a node be called this? 1..MESH_TARGET_MAX printable ASCII characters,
+ * no spaces -- `@` reads a target up to the first one -- and nothing that `@`
+ * would read as something else: `*`, a MAC, a leading `@` or `>`. No quotes or
+ * backslashes either, so a name goes into the setup page's JSON as it is.
+ */
+bool meshRoomNameValid(const char *name);
+
+/**
+ * May the asking node send this command again when no answer came back? Only
+ * if running it twice is the same as running it once: a read, or a setting
+ * given its value (`v-6`, `m1`). Never a toggle (`m`), which the retry would
+ * undo, nor anything that starts, stops, reboots or opens a window.
+ */
+bool meshCommandRetryable(const char *text);
 
 #endif  // MESH_H

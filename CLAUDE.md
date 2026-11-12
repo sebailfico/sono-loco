@@ -61,8 +61,9 @@ twice.
   24/s underrun — was invisible in the code and obvious in that output. `-Flash`
   names every classic board SonoLoco-WROOM; before a Bluetooth test, flash the
   WROVERs by name (`pio run -e esp32wrover -t upload`) and run without it.
-- **Test mutes by reading the state, never by toggling blind.** `m` toggles,
-  and a node that was not rebooted is already muted: one blind `m` played a
+- **Test mutes by reading the state, never by toggling blind.** Send `m1`,
+  which sets; bare `m` toggles, and a node that was not rebooted is already
+  muted: one blind `m` played a
   minute of music on the S3. `?` prints `mute=`.
 - **Ask before anything the user has to hear for long.** Without `-Mute` the
   bench tone plays on every client with an amp for the whole run; a 10-minute

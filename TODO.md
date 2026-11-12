@@ -212,8 +212,10 @@ polish.
       and no finger has been on either. What to check, on a board with a DAC so
       the tones can be heard:
 
-      - A 3 s hold opens a window at each end — two drops, and the matching
-        `[MESH] offering` / `[MESH] listening` line on the console.
+      - A hold of 3-9 s, let go, opens a window at each end — one drop as the
+        hold reaches 3 s, two drops on release, and the matching
+        `[MESH] offering` / `[MESH] listening` line on the console. Since D19
+        it acts on release, not at 3 s.
       - Offer on one, listen on the other: the listening node adopts within a
         second, plays three rising drops, and comes back streaming on the new mesh.
       - **The negative case, which is the whole reason there are two presses.**
@@ -235,16 +237,36 @@ polish.
       something. A slow idle beacon — one a second, say, outside pairing too —
       would let a client show that its mesh exists. Weigh it against the radio
       time it costs and against giving a neighbour a constant signal to see.
-- [ ] **Provisioning without a PC.** Since D16 every setting of a board already
-      on the wall — the trim, the mesh name (`@<name> g<mesh>`), client-only
-      mode — can be changed from any node on USB, over the mesh. What is left
-      is doing it with no PC at all, which is what somebody with six speakers in
-      four rooms wants. A phone app over BLE to one node, which then asks the
-      mesh exactly as a node on USB does (D16), or a temporary SoftAP with a
-      captive page. `ROOM_NAME` is still a build setting and would have to
-      become an NVS one. Note that a BT-capable node running BLE alongside A2DP
-      re-opens the coexistence question D3 is about, so this is not free on a
-      WROVER.
+- [ ] **The setup network (D19): run it.** Built on the `config-mode` branch
+      on 2026-11-12, on top of `two-chip-server`; never on a board. The page's
+      script was run in a browser against a fake node (every control, a refused
+      rename, a node that never answers, the password and WiFi forms), the
+      firmware not at all. On a board, in order:
+      - The S3, freshly flashed with no password: `[CONFIG] open ... auth=open`
+        at boot, two drops, and `SonoLoco-S3-setup` in a phone's list. Joining
+        it opens the page by itself on Android and on an iPhone (the captive
+        DNS); if one does not, 192.168.4.1 by hand.
+      - The page lists every node (`@* N`); trim, mute, mono and rename on a
+        client each answer, and the room hears it. A node switched off shows
+        "no answer, after retries" and its control goes back.
+      - **The mesh while a phone is on it**: a 600 s bench run with the S3 as a
+        client and a phone joined to its network, against the latest bench
+        regression. The AP and ESP-NOW share the channel; this is the number
+        that says whether that costs anything.
+      - The password: set it, the network comes back WPA2, the old open one is
+        gone, and the home WiFi form appears. A power cut keeps the password
+        and does not open the network at boot again.
+      - A WROVER: the 10-15 s hold pauses Bluetooth (`bt=0`) and opens the
+        network; `C0` restores Bluetooth. Refused while a phone is connected.
+      - The window closes by itself 5 minutes after the page's last request,
+        and with the page's close button, with three falling drops.
+- [ ] **The setup page over the home WiFi.** Nodes that join the router so the
+      page is reachable by IP, without leaving the home network. It moves the
+      mesh to the router's channel, where the bench lost 837 packets against 0
+      on channel 11 before redundancy: measure the loss there first (D19).
+- [ ] **Front ends and the setup page.** A phone sees a front end's Bluetooth
+      name, which is its own build's `ROOM_NAME`: the node should hand its NVS
+      name to its front end over the link (D18).
 - [ ] **Payload encryption, if privacy ever matters.** The mesh id keeps a
       neighbour's player out, not a neighbour's receiver: ESP-NOW encrypts only
       unicast frames (per-peer LMK), and this design is broadcast by

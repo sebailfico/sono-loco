@@ -1,0 +1,93 @@
+#ifndef SETUP_PAGE_H
+#define SETUP_PAGE_H
+
+// The setup network's page (D19): served from flash by the node a phone joins,
+// and nothing but a view of the mesh. Every change it makes is a command sent
+// with `@<mac>` through /api/cmd, the same that a node on USB would send, and
+// what it shows is what each node answered -- never what was sent.
+//
+// One file, no build step and nothing fetched from the internet: a phone on
+// this network has none. Names go in through textContent, never innerHTML.
+
+static const char SETUP_PAGE[] = R"PAGE(<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SonoLoco setup</title>
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--ink:#1d1d1b;--dim:#6b6a66;--line:#e2e0da;--acc:#2f6f5e;--bad:#a33}
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--card:#21211f;--ink:#ecebe6;--dim:#9a9890;--line:#34332f;--acc:#6fbfa6;--bad:#e77}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,sans-serif}
+main{max-width:680px;margin:0 auto;padding:16px}h1{font-size:20px;margin:4px 0 2px}h2{font-size:15px;margin:0 0 8px}
+.sub{color:var(--dim);font-size:13px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0}
+.node{border-top:1px solid var(--line);padding:10px 0}.node:first-child{border-top:0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
+input[type=text],input[type=password]{flex:1;min-width:0;padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+input[type=range]{flex:1}button{padding:7px 12px;border:1px solid var(--acc);border-radius:6px;background:var(--acc);color:#fff;font:inherit}
+button.q{background:none;color:var(--acc)}.st{font-size:12px;color:var(--dim);min-height:16px}.err{color:var(--bad)}
+input{accent-color:var(--acc)}label{display:flex;gap:6px;align-items:center}.name{font-weight:600}.mono{font:12px ui-monospace,monospace;color:var(--dim)}
+</style></head><body><main>
+<h1 id="title">SonoLoco</h1><div class="sub" id="who"></div>
+<div class="card" id="lock" hidden><h2>Protect this setup network</h2>
+<div class="sub">Anyone nearby can join it until it has a password. Set one (8 to 63 characters): the network restarts with it, and you join again with the password.</div>
+<div class="row"><input id="appass" type="password" autocomplete="new-password" placeholder="New password"><button id="appassGo">Set</button></div><div class="st" id="appassSt"></div></div>
+<div class="card"><div class="row" style="justify-content:space-between"><h2>Speakers</h2><button class="q" id="refresh">Refresh</button></div>
+<div class="st" id="meshSt">Asking the mesh&hellip;</div><div id="nodes"></div></div>
+<div class="card" id="wifiCard" hidden><h2>Home WiFi, for updates</h2>
+<div class="sub">This node uses it only to take new firmware (update mode). Stored here, on this node.</div>
+<div class="row"><input id="ssid" type="text" placeholder="Network name"></div>
+<div class="row"><input id="wpass" type="password" placeholder="Password"><button id="wifiGo">Save</button></div><div class="st" id="wifiSt"></div></div>
+<div class="row"><button class="q" id="close">Close the setup network</button></div>
+</main><script>
+const $=id=>document.getElementById(id);
+async function post(url,body){const r=await fetch(url,{method:'POST',body});const t=await r.text();if(!r.ok)throw new Error(t.trim()||r.status);return t}
+// What one node said, from the lines of an @ question: '[@name] line', and '[@name]+ rest' continuing one.
+function answers(text){const out=[];let last=null;for(const l of text.split('\n')){const m=l.match(/^\[@([^\]]+)\](\+?) (.*)$/);if(!m)continue;
+ if(m[2]&&last){last.line+=m[3]}else{last={name:m[1],line:m[3]};out.push(last)}}return out}
+function fields(line){const f={};for(const m of line.matchAll(/(\w+)=(\S+)/g))f[m[1]]=m[2];return f}
+async function ask(mac,cmd){const t=await post('/api/cmd','@'+mac+' '+cmd);const a=answers(t);
+ if(!a.length)throw new Error(/retry/.test(t)?'no answer, after retries':'no answer');
+ const last=a[a.length-1].line;if(/\berror\b/.test(last))throw new Error(last.replace(/^\[\w+\] /,''));return fields(last)}
+function nodeCard(n){
+ const d=document.createElement('div');d.className='node';
+ const head=document.createElement('div');head.className='row';
+ const nm=document.createElement('input');nm.type='text';nm.value=n.name;nm.maxLength=31;
+ const save=document.createElement('button');save.className='q';save.textContent='Rename';head.append(nm,save);
+ const info=document.createElement('div');info.className='mono';
+ info.textContent=n.mac+'  '+n.mode+(n.src&&n.src!=='-'?' from '+n.src:'')+'  lost '+n.lost+'  fw '+n.fw;
+ const trimRow=document.createElement('div');trimRow.className='row';
+ const tl=document.createElement('span');tl.style.minWidth='72px';
+ const tr=document.createElement('input');tr.type='range';tr.min=-40;tr.max=12;tr.step=1;tr.value=parseInt(n.trim);
+ const show=()=>tl.textContent='Trim '+tr.value+' dB';show();tr.oninput=show;trimRow.append(tl,tr);
+ const sw=document.createElement('div');sw.className='row';
+ const mute=document.createElement('input');mute.type='checkbox';mute.checked=n.mute==='1';
+ const mono=document.createElement('input');mono.type='checkbox';mono.checked=n.mono==='1';
+ const l1=document.createElement('label');l1.append(mute,'Mute');const l2=document.createElement('label');l2.append(mono,'Mono (one speaker)');sw.append(l1,l2);
+ const st=document.createElement('div');st.className='st';
+ d.append(head,info,trimRow,sw,st);
+ // A control shows what the node said: put back as it was when nobody answered, or the node refused.
+ async function set(cmd,apply,revert){st.className='st';st.textContent='Asking '+n.name+'…';
+  try{const f=await ask(n.mac,cmd);apply(f);st.textContent=n.name+' says '+Object.entries(f).map(e=>e.join('=')).join(' ')}
+  catch(e){revert();st.className='st err';st.textContent=String(e.message||e)}}
+ tr.onchange=()=>set('v'+tr.value,f=>{if(f.trim)n.trim=f.trim;tr.value=parseInt(n.trim);show()},()=>{tr.value=parseInt(n.trim);show()});
+ mute.onchange=()=>set('m'+(mute.checked?1:0),f=>{if(f.mute)n.mute=f.mute;mute.checked=n.mute==='1'},()=>{mute.checked=n.mute==='1'});
+ mono.onchange=()=>set('M'+(mono.checked?1:0),f=>{if(f.mono)n.mono=f.mono;mono.checked=n.mono==='1'},()=>{mono.checked=n.mono==='1'});
+ save.onclick=()=>set('I'+nm.value.trim(),f=>{if(f.name)n.name=f.name;nm.value=n.name},()=>{nm.value=n.name});
+ return d}
+async function refresh(){$('meshSt').className='st';$('meshSt').textContent='Asking the mesh…';
+ try{const t=await post('/api/cmd','@* N');const list=answers(t).map(a=>a.line).filter(l=>l.startsWith('[NODE]')).map(fields);
+  const box=$('nodes');box.replaceChildren(...list.map(nodeCard));
+  $('meshSt').textContent=list.length?list.length+' answered. A speaker that is off, out of range or in another mesh does not.':'Nobody answered.'}
+ catch(e){$('meshSt').className='st err';$('meshSt').textContent=String(e.message||e)}}
+async function info(){try{const r=await fetch('/api/info');const i=await r.json();$('title').textContent=i.name;
+ $('who').textContent='Mesh '+i.meshname+' ('+i.mesh+'), firmware '+i.fw;$('lock').hidden=i.protected;$('wifiCard').hidden=!i.protected;
+ if(i.wifi)$('ssid').value=i.wifi}catch(e){}}
+async function form(id,url,body,done){const s=$(id);s.className='st';s.textContent='…';
+ try{s.textContent=(await post(url,body)).trim();if(done)done()}catch(e){s.className='st err';s.textContent=String(e.message||e)}}
+$('appassGo').onclick=()=>form('appassSt','/api/appass',$('appass').value,()=>$('appass').value='');
+$('wifiGo').onclick=()=>form('wifiSt','/api/wifi',$('ssid').value+'\n'+$('wpass').value,()=>$('wpass').value='');
+$('close').onclick=async()=>{try{await post('/api/close','')}catch(e){}document.body.textContent='The setup network is closing. You can leave this page.'};
+$('refresh').onclick=refresh;info();refresh();
+</script></body></html>
+)PAGE";
+
+#endif  // SETUP_PAGE_H

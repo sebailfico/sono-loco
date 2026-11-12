@@ -4,12 +4,14 @@
 // ============================================================================
 // Room / Device Identification
 // ============================================================================
-// Visible as the Bluetooth speaker name.
+// Visible as the Bluetooth speaker name, and the name `@` and the setup page
+// know the node by.
 //
-// Set it per node in platformio.ini (-DROOM_NAME='"Kitchen"'), not here, so the
-// source tree stays identical for every board and you flash an environment
-// rather than an edited file. This fallback only applies to a build that does
-// not define it.
+// The node keeps its own in NVS once it is given one (`I<name>`, or the setup
+// page, D19); this is only the name it has until then. Set it per node in
+// platformio.ini (-DROOM_NAME='"Kitchen"'), not here, so the source tree stays
+// identical for every board and you flash an environment rather than an edited
+// file. This fallback only applies to a build that does not define it.
 #ifndef ROOM_NAME
 #define ROOM_NAME "SonoLoco"
 #endif
@@ -67,7 +69,6 @@
 // ============================================================================
 // Bluetooth A2DP (SERVER mode — BT Classic nodes only)
 // ============================================================================
-#define BT_DEVICE_NAME   ROOM_NAME
 #define BT_SAMPLE_RATE   44100
 // The A2DP volume a server starts at, 0-127. A phone or PC adopts it as its
 // slider when it connects (AVRCP absolute volume), and keeps whatever it sets
@@ -212,10 +213,12 @@
 #define MESH_NAME "sonoloco"
 #endif
 
-// The node's one button: a short press opens Bluetooth for BT_WINDOW_MS on a
-// node that can be a server (D17), a long press pairs. The devkit BOOT button
-// on every board here, since it is the only one that exists; set to -1 to
-// disable the button entirely and do both over serial (`B`, `o`, `p`).
+// The node's one button, read by how long it was held when it is let go
+// (lib/button): a short press opens Bluetooth for BT_WINDOW_MS on a node that
+// can be a server (D17), a few seconds pair (D12), a long hold opens the
+// setup network (D19). The devkit BOOT button on every board here, since it is
+// the only one that exists; set to -1 to disable the button entirely and do
+// all of it over serial (`B`, `o`, `p`, `C`).
 //
 // It is a press *while running*, never "hold it down at boot": BOOT is a
 // strapping pin, and holding it through a reset puts the chip into the ROM
@@ -231,13 +234,18 @@
 #endif
 #endif
 
-// How long the button must be held to start pairing. Long enough that it cannot
-// be confused with the reset-adjacent fumbling that BOOT normally sees.
-#define MESH_PAIR_HOLD_MS     3000
-
-// A short press: released before MESH_PAIR_HOLD_MS, and down at least this
-// long -- anything shorter is the contact bouncing, not a finger.
-#define BUTTON_PRESS_MIN_MS   50
+// The ranges, by the time the button is let go. Each starts at its first
+// number and ends before its second; between them, and past the last, a
+// release does nothing -- margin for a hand counting seconds, and a way out.
+// Pairing starts at 3 s so it cannot be confused with the reset-adjacent
+// fumbling that BOOT normally sees. A drop says when a hold has reached the
+// next range, in DISCOVERY; while the node plays, the music is all there is.
+#define BUTTON_PRESS_MIN_MS    50      // shorter is the contact bouncing, not a finger
+#define BUTTON_BT_MAX_MS       1000    // a short press: Bluetooth
+#define BUTTON_PAIR_MIN_MS     3000    // 3 to 9 s: pairing
+#define BUTTON_PAIR_MAX_MS     9000
+#define BUTTON_CONFIG_MIN_MS   10000   // 10 to 15 s: the setup network
+#define BUTTON_CONFIG_MAX_MS   15000
 
 // How long a short press keeps Bluetooth on, so a phone can connect. A node
 // that has played as a client keeps it off otherwise (D17). A phone that
@@ -309,6 +317,40 @@
 // Replies heard but not yet printed, on the asking node only: made the first
 // time it asks, about 2 KB, so a node nobody types `@` into never pays for it.
 #define MESH_REPLY_QUEUE_DEPTH    8
+// A question to one node is over this long after its answer begins: the rest
+// of an answer's parts follow within a few ms, so a page does not wait out
+// MESH_REPLY_WAIT_MS for every slider it moves.
+#define MESH_REPLY_SETTLE_MS      300
+// A question to one node that got no answer is asked again, this many times,
+// if asking twice means the same as asking once (meshCommandRetryable): an
+// answer is the only sign a command arrived (D16), and the setup page shows
+// what the answer says rather than what it sent.
+#define MESH_ASK_RETRIES          2
+
+// ============================================================================
+// The setup network (D19)
+// ============================================================================
+//
+// An access point on the mesh's own channel, so the node goes on hearing and
+// asking the mesh while a phone is on it, with a page that lists the mesh and
+// sets each node through the same commands as `@`. Opened by a 10-15 s hold
+// or `C`; on its first power-on, a node with no password set and no Bluetooth
+// of its own opens it by itself for CONFIG_FIRST_WINDOW_MS.
+//
+// Open (no password) until somebody sets one on the page; WPA2 from then on.
+// The home WiFi's password is accepted only once the network has a password,
+// so it never crosses the air in the clear.
+#define CONFIG_WINDOW_MS        600000   // a window opened by hand: 10 minutes...
+#define CONFIG_IDLE_MS          300000   // ...and at least this long after the last request
+#define CONFIG_FIRST_WINDOW_MS  300000   // the first power-on: 5 minutes
+#define CONFIG_MAX_CLIENTS      2
+#define CONFIG_AP_PASS_MIN      8        // WPA2's own limits
+#define CONFIG_AP_PASS_MAX      63
+// What a page's command may print back: `@* N` on a mesh of a dozen nodes.
+#define CONFIG_REPLY_MAX        4096
+// How long the page's request waits for loop() to run its command, retries
+// included: three asks of MESH_REPLY_WAIT_MS and some.
+#define CONFIG_CMD_TIMEOUT_MS   9000
 
 // ============================================================================
 // ESP-NOW Mesh

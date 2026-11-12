@@ -131,7 +131,7 @@ carrying it out.
 
 ## Boards, boot and USB
 
-- **Pairing is a long press while running, never a press held through a reset.**
+- **The button is a press while running, never a press held through a reset.**
   BOOT is a strapping pin: held low across a reset it puts the chip into the ROM
   download mode, where no firmware runs at all and nothing can react to the
   button. (It is GPIO 9 on a C3 devkit and GPIO 0 on the others.)

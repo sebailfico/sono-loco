@@ -360,7 +360,7 @@ void test_some_commands_never_leave_the_node(void) {
 
 /** Sent to `*`, anything that reboots a node or takes it off the mesh would take them all. */
 void test_nothing_sent_to_all_can_take_the_house_off_the_air(void) {
-    for (const char *c = "UbncgpowW@BF>"; *c; c++) TEST_ASSERT_FALSE(meshCommandAllowedForAll(*c));
+    for (const char *c = "UbncgpowW@BF>IC"; *c; c++) TEST_ASSERT_FALSE(meshCommandAllowedForAll(*c));
     for (const char *c = "?NrvmlM"; *c; c++) TEST_ASSERT_TRUE(meshCommandAllowedForAll(*c));
 }
 
@@ -373,6 +373,40 @@ void test_a_command_is_for_its_target_or_for_all(void) {
     TEST_ASSERT_FALSE(meshCommandAddressed("SonoLoco-C3", 11, 'W', "SonoLoco-C3", MAC));
     // `*` is a target for commands only: an update request naming it matches nothing.
     TEST_ASSERT_FALSE(targets("*", "SonoLoco-C3", MAC));
+}
+
+void test_a_room_name_must_be_a_target_and_nothing_else(void) {
+    TEST_ASSERT_TRUE(meshRoomNameValid("Kitchen"));
+    TEST_ASSERT_TRUE(meshRoomNameValid("SonoLoco-WROVER2"));
+    TEST_ASSERT_FALSE(meshRoomNameValid(""));
+    TEST_ASSERT_FALSE(meshRoomNameValid("Living Room"));   // `@` stops at the space
+    TEST_ASSERT_FALSE(meshRoomNameValid("*"));
+    TEST_ASSERT_FALSE(meshRoomNameValid("@Kitchen"));
+    TEST_ASSERT_FALSE(meshRoomNameValid(">Kitchen"));
+    TEST_ASSERT_FALSE(meshRoomNameValid("Say\"hi\""));
+    TEST_ASSERT_FALSE(meshRoomNameValid("Back\\slash"));
+    TEST_ASSERT_FALSE(meshRoomNameValid("AA:BB:CC:DD:EE:FF"));   // somebody's MAC
+    TEST_ASSERT_FALSE(meshRoomNameValid("Cucina\xC3\xA0"));      // the page's JSON stays ASCII
+    TEST_ASSERT_TRUE(meshRoomNameValid("0123456789012345678901234567890"));     // 31
+    TEST_ASSERT_FALSE(meshRoomNameValid("01234567890123456789012345678901"));   // 32
+}
+
+void test_only_a_command_that_means_the_same_twice_is_retried(void) {
+    TEST_ASSERT_TRUE(meshCommandRetryable("N"));
+    TEST_ASSERT_TRUE(meshCommandRetryable("v-12"));
+    TEST_ASSERT_TRUE(meshCommandRetryable("m1"));
+    TEST_ASSERT_TRUE(meshCommandRetryable("M0"));
+    TEST_ASSERT_TRUE(meshCommandRetryable("IKitchen"));
+    TEST_ASSERT_TRUE(meshCommandRetryable(">V60"));
+    TEST_ASSERT_FALSE(meshCommandRetryable("m"));     // a toggle: the retry would undo it
+    TEST_ASSERT_FALSE(meshCommandRetryable("M"));
+    TEST_ASSERT_FALSE(meshCommandRetryable("m10"));
+    TEST_ASSERT_FALSE(meshCommandRetryable("l"));     // reading it resets it
+    TEST_ASSERT_FALSE(meshCommandRetryable("c"));
+    TEST_ASSERT_FALSE(meshCommandRetryable("U"));
+    TEST_ASSERT_FALSE(meshCommandRetryable("B"));
+    TEST_ASSERT_FALSE(meshCommandRetryable(">m"));
+    TEST_ASSERT_FALSE(meshCommandRetryable(""));
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +449,8 @@ int runAllTests(void) {
     RUN_TEST(test_some_commands_never_leave_the_node);
     RUN_TEST(test_nothing_sent_to_all_can_take_the_house_off_the_air);
     RUN_TEST(test_a_command_is_for_its_target_or_for_all);
+    RUN_TEST(test_a_room_name_must_be_a_target_and_nothing_else);
+    RUN_TEST(test_only_a_command_that_means_the_same_twice_is_retried);
 
     return UNITY_END();
 }

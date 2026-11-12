@@ -494,7 +494,7 @@ if ($Mute) {
             Write-Warning "$($n.Port) did not report its mute state ($id) -- left alone, it may be playing"
             continue
         }
-        Send-Cmd -Sp $n.Sp -Cmd 'm'
+        Send-Cmd -Sp $n.Sp -Cmd "m1`n"   # set, not toggled -- the state was read above too
         $line = Wait-ForLine -Sp $n.Sp -Pattern '^\[OUT\] mute=' -TimeoutSec 4
         if (-not $line -or $line -notmatch 'mute=1') {
             Write-Warning "$($n.Port) did not confirm mute ($line) -- it may be playing"

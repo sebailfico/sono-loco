@@ -36,10 +36,14 @@
 #include <esp_ota_ops.h>
 // The two-chip server's link (D18).
 #include <driver/uart.h>
+// The setup network (D19): its captive DNS, and its page.
+#include <lwip/sockets.h>
+#include "setup_page.h"
 
 // Hardware-independent parts of the CLIENT receive path, tested on the host
 // with `pio test -e native` — see test/test_jitter.
 #include "adpcm.h"
+#include "button.h"
 #include "blocks.h"
 #include "conceal.h"
 #include "gain.h"
@@ -95,20 +99,41 @@ public:
         return Serial.write(buf, n);
     }
 
-    /** Copy what this task prints into `buf` from now on; `quiet` keeps it off the port. */
-    void capture(char *buf, size_t size, bool quiet) {
+    /** A capture in progress, put aside while another runs inside it. */
+    struct Saved {
+        char        *buf;
+        TaskHandle_t task;
+        size_t       size, len;
+        bool         quiet;
+    };
+
+    /**
+     * Copy what this task prints into `buf` from now on; `quiet` keeps it off
+     * the port. Returns the capture this one interrupts, for endCapture() to
+     * resume: the setup page captures a question to the mesh across several
+     * passes of loop(), and a command another node sends in the meantime is
+     * captured inside it (D19).
+     */
+    Saved capture(char *buf, size_t size, bool quiet) {
+        const Saved prev = {capBuf, capTask, capSize, capLen, capQuiet};
         buf[0]   = '\0';
         capLen   = 0;
         capSize  = size;
         capQuiet = quiet;
         capTask  = xTaskGetCurrentTaskHandle();
         capBuf   = buf;
+        return prev;
     }
 
-    /** Stop capturing. @return the bytes captured, terminated in the buffer. */
-    size_t endCapture() {
-        capBuf = nullptr;
-        return capLen;
+    /** Stop capturing, and resume `prev`. @return the bytes captured, terminated in the buffer. */
+    size_t endCapture(const Saved &prev) {
+        const size_t n = capLen;
+        capSize  = prev.size;
+        capLen   = prev.len;
+        capQuiet = prev.quiet;
+        capTask  = prev.task;
+        capBuf   = prev.buf;
+        return n;
     }
 
 private:
@@ -183,6 +208,12 @@ static bool        clientOnly = false;
 // with `F`; never in bench mode, which a front end boots as an ordinary node.
 static bool frontEnd = false;
 
+// This node's name: the Bluetooth name, and what `@` and the setup page know it
+// by. ROOM_NAME from the build until it is given one of its own (`I<name>`,
+// D19), which is kept in NVS -- what D8 said would happen once nodes had a
+// configuration interface.
+static char roomName[MESH_TARGET_MAX + 1] = ROOM_NAME;
+
 // This node's own speaker, and nothing else. Neither setting touches what is
 // received, forwarded, buffered or corrected -- only the samples handed to I2S.
 //
@@ -206,6 +237,8 @@ static volatile int32_t outTrimQ12 = GAIN_UNITY_Q12;
 static const char *PREF_NAMESPACE = "sonoloco";
 static const char *PREF_CLIENT_ONLY = "clientonly";
 static const char *PREF_FRONT_END = "frontend";
+static const char *PREF_ROOM_NAME = "roomname";
+static const char *PREF_AP_PASS = "appass";   // the setup network's (D19)
 static const char *PREF_MONO_OUT = "monoout";
 static const char *PREF_TRIM_DB = "trimdb";
 static const char *PREF_MESH_ID = "meshid";
@@ -288,6 +321,9 @@ static unsigned long offeringUntilMs = 0;
 static bool          btWindow        = false;
 static unsigned long btWindowUntilMs = 0;
 static bool          btWindowTone    = false;   // the two drops, on the next loop pass
+// The setup network is open, and this chip's Bluetooth paused for it (D19).
+static bool          cfgOpen         = false;
+static bool          cfgPausedBt     = false;
 static unsigned long lastBeaconMs    = 0;
 
 // Packets dropped because they belong to somebody else's mesh. Worth counting
@@ -472,6 +508,13 @@ void playDisconnectedSound() {    // nothing heard: three falling
         {0,               DROP_NOTE_HIGH, 0.8, 1.0},
         {DROP_GAP_MS,     DROP_NOTE_MID,  0.8, 1.0},
         {2 * DROP_GAP_MS, DROP_NOTE_LOW,  0.8, 1.8},
+    };
+    playDrops(notes, sizeof(notes) / sizeof(notes[0]));
+}
+
+void playTickSound() {            // a held button has reached the next range: one drop
+    static const DropSound::Note notes[] = {
+        {0, DROP_NOTE_HIGH, 0.6, 1.0},
     };
     playDrops(notes, sizeof(notes) / sizeof(notes[0]));
 }
@@ -1037,6 +1080,11 @@ static uint16_t               cmdAskReplies = 0;
 // (ctrlLast) is printed once.
 static uint32_t               cmdAskSeen[16];
 static uint8_t                cmdAskSeenCount = 0;
+// The question being waited on, to ask again if nobody answers it. Only a
+// question to one node, and only one that means the same asked twice.
+static char                   cmdAskLine[2 + MESH_TARGET_MAX + MESH_COMMAND_MAX];
+static bool                   cmdAskAll     = false;
+static uint8_t                cmdAskRetries = 0;
 
 /** A packet in this mesh's control group. Called from the receive callback, in every mode. */
 static void ctrlReceive(const uint8_t *srcMac, const uint8_t *data, int len) {
@@ -1051,7 +1099,7 @@ static void ctrlReceive(const uint8_t *srcMac, const uint8_t *data, int len) {
     if (seq == MESH_UPDATE_SEQ) {
         // Ignored while serving a phone: every room's stream would stop.
         if (currentMode != MODE_SERVER && meshIsUpdateRequest(seq, plen) &&
-            meshTargetMatches((const char *)payload, plen, ROOM_NAME, ownMac)) {
+            meshTargetMatches((const char *)payload, plen, roomName, ownMac)) {
             otaRequested = true;
         }
         return;
@@ -1060,7 +1108,7 @@ static void ctrlReceive(const uint8_t *srcMac, const uint8_t *data, int len) {
     if (seq == MESH_COMMAND_SEQ) {
         MeshCommand cmd;
         if (ctrlIn.ready || !meshUnpackCommand(payload, plen, &cmd)) return;
-        if (!meshCommandAddressed(cmd.target, cmd.targetLen, cmd.text[0], ROOM_NAME, ownMac)) return;
+        if (!meshCommandAddressed(cmd.target, cmd.targetLen, cmd.text[0], roomName, ownMac)) return;
         // A command for everyone gets everyone's answer at once, and
         // broadcasts are not retried: each node waits its own random while,
         // to answer and to answer again.
@@ -1756,9 +1804,9 @@ static void startBluetooth() {
     a2dpSink.set_on_audio_state_changed(btAudioChanged);
     a2dpSink.set_auto_reconnect(false);
     a2dpSink.set_volume(VOLUME_DEFAULT);
-    a2dpSink.start(BT_DEVICE_NAME);
+    a2dpSink.start(roomName);
     btSinkStarted = true;
-    LOG_INFO("BT discoverable as: " BT_DEVICE_NAME);
+    LOG_INFO(String("BT discoverable as: ") + roomName);
     LOG_INFO("Heap after BT start: " + String(ESP.getFreeHeap()) + " bytes, maxalloc " +
              String(ESP.getMaxAllocHeap()));
 }
@@ -2429,7 +2477,7 @@ static void enterClient() {
 // the wrong mesh through a hash collision. What it cannot recover is the name:
 // only the id travels, so a paired node logs "(paired)" from then on.
 
-enum MeshFeedback { MESH_FB_OPEN, MESH_FB_PAIRED, MESH_FB_CLOSED };
+enum MeshFeedback { MESH_FB_OPEN, MESH_FB_PAIRED, MESH_FB_CLOSED, MESH_FB_TICK };
 
 /**
  * Say what just happened, on the speaker the node already has.
@@ -2456,6 +2504,7 @@ static void meshPlayFeedback(MeshFeedback what) {
         case MESH_FB_OPEN:   playStartupSound();      break;   // two beeps: I am listening
         case MESH_FB_PAIRED: playConnectedSound();    break;   // rising: joined
         case MESH_FB_CLOSED: playDisconnectedSound(); break;   // falling: nothing heard
+        case MESH_FB_TICK:   playTickSound();         break;   // one: let go now
     }
 
     if (!someoneElseOwnsI2S) deinitI2SForTones();
@@ -2573,6 +2622,10 @@ static void btOpenWindow() {
         DEBUG_SERIAL.println("[BT] on for good (a front end, D18)");
         return;
     }
+    if (cfgPausedBt) {
+        DEBUG_SERIAL.println("[BT] error reason=config (paused while the setup network is open)");
+        return;
+    }
     if (!btAllowed()) {
         DEBUG_SERIAL.println("[BT] error reason=no_bt (client-only, or bench mode)");
         return;
@@ -2590,7 +2643,7 @@ static void btOpenWindow() {
     btWindow        = true;
     btWindowUntilMs = millis() + BT_WINDOW_MS;
     DEBUG_SERIAL.printf("[BT] window open %lus: discoverable as %s\n",
-                        (unsigned long)(BT_WINDOW_MS / 1000), BT_DEVICE_NAME);
+                        (unsigned long)(BT_WINDOW_MS / 1000), roomName);
     // Not here: `B` over the mesh answers with what this printed, and 1.2 s
     // of drops inside the command would make the answer late for its asker.
     btWindowTone = true;
@@ -2626,51 +2679,73 @@ static void btServiceWindow() {
 #endif
 }
 
+static void configOpen(uint32_t windowMs);
+
 /**
- * The button: a short press opens Bluetooth (btOpenWindow), a long one pairs.
+ * The button, read by how long it was held when it is let go (lib/button):
+ * under a second opens Bluetooth (btOpenWindow), 3 to 9 seconds pairs, 10 to
+ * 15 opens the setup network (D19). Between the ranges, and past the last, a
+ * release does nothing.
  *
  * A press *while running*, never a press held through a reset: the BOOT button
  * these boards use is a strapping pin, and holding it across a reset puts the
  * chip into the ROM download mode, where no firmware runs at all.
  *
- * A short press acts on release, because only then is it known not to be the
- * start of a long one; under BUTTON_PRESS_MIN_MS it is a bounce and does
- * nothing. A long press acts as it reaches MESH_PAIR_HOLD_MS, and its release
- * does nothing. A bounce in the middle of a long press restarts the timer.
+ * Every range acts on release, so a hold on its way to a longer one does
+ * nothing on the way; a drop says when a hold has reached the next range, in
+ * DISCOVERY, where a tone can play. Pairing used to act as the hold reached
+ * 3 s; it waits for the release now, or a hold on its way to the setup
+ * network would open a pairing window as it went past.
  */
 static void meshServiceButton() {
 #if MESH_PAIR_BUTTON_PIN >= 0
-    static bool          held           = false;
-    static unsigned long heldSinceMs    = 0;
-    static bool          firedThisPress = false;
+    static const ButtonTimes times = {BUTTON_PRESS_MIN_MS, BUTTON_BT_MAX_MS,
+                                      BUTTON_PAIR_MIN_MS,  BUTTON_PAIR_MAX_MS,
+                                      BUTTON_CONFIG_MIN_MS, BUTTON_CONFIG_MAX_MS};
+    static bool          held        = false;
+    static unsigned long heldSinceMs = 0;
+    static uint32_t      lastHeldMs  = 0;
 
     const bool down = (digitalRead(MESH_PAIR_BUTTON_PIN) == LOW);
 
-    if (!down) {
-        if (held && !firedThisPress &&
-            (long)(millis() - heldSinceMs) >= (long)BUTTON_PRESS_MIN_MS) {
-            btOpenWindow();
-        }
-        held           = false;
-        firedThisPress = false;
-        return;
-    }
-
     if (!held) {
-        held        = true;
-        heldSinceMs = millis();
+        if (down) {
+            held        = true;
+            heldSinceMs = millis();
+            lastHeldMs  = 0;
+        }
         return;
     }
 
-    if (!firedThisPress &&
-        (long)(millis() - heldSinceMs) >= (long)MESH_PAIR_HOLD_MS) {
-        firedThisPress = true;   // one window per press, not one per loop pass
-        // Role decides which half of the handshake a press is. A node that can
-        // be a server holds the mesh others join; a speaker is what gets moved.
-        // Nothing for the user to pick, and it matches where the two boxes
-        // physically are.
-        if (btAllowed()) meshStartOffering();
-        else             meshStartPairing();
+    const uint32_t heldMs = (uint32_t)(millis() - heldSinceMs);
+    if (down) {
+        // "Let go now": a drop as the hold enters the next range. It holds
+        // loop() for a second or so, which the hold's length then includes.
+        if (buttonEntered(lastHeldMs, heldMs, times) != BUTTON_NONE) meshPlayFeedback(MESH_FB_TICK);
+        lastHeldMs = heldMs;
+        return;
+    }
+
+    held = false;
+    switch (buttonAction(heldMs, times)) {
+        case BUTTON_BLUETOOTH:
+            btOpenWindow();
+            break;
+        case BUTTON_PAIR:
+            // Role decides which half of the handshake a press is. A node that
+            // can be a server holds the mesh others join; a speaker is what
+            // gets moved. Nothing for the user to pick, and it matches where
+            // the two boxes physically are. A node with a front end (D18) is
+            // one that can be a server.
+            if (ownBt() || linkFe) meshStartOffering();
+            else                   meshStartPairing();
+            break;
+        case BUTTON_CONFIG:
+            configOpen(CONFIG_WINDOW_MS);
+            break;
+        case BUTTON_NONE:
+            DEBUG_SERIAL.printf("[BUTTON] released after %lums: nothing\n", (unsigned long)heldMs);
+            break;
     }
 #endif
 }
@@ -2763,7 +2838,7 @@ static void otaDescribe(char *out, size_t outSize) {
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *failed  = esp_ota_get_last_invalid_partition();
     snprintf(out, outSize, "fw=%s chip=%s mac=%s name=%s mesh=%04X app=%s pending=%d rolledback=%s",
-             FW_VERSION, ESP.getChipModel(), ownMac, ROOM_NAME, meshId,
+             FW_VERSION, ESP.getChipModel(), ownMac, roomName, meshId,
              running ? running->label : "?", otaPendingVerify() ? 1 : 0,
              failed ? failed->label : "-");
 }
@@ -2771,7 +2846,7 @@ static void otaDescribe(char *out, size_t outSize) {
 /** ROOM_NAME as a DHCP hostname: SonoLoco-WROVER2 is sonoloco-wrover2 on the router. */
 static void otaHostname(char *out, size_t outSize) {
     size_t n = 0;
-    for (const char *p = ROOM_NAME; *p && n + 1 < outSize; p++) {
+    for (const char *p = roomName; *p && n + 1 < outSize; p++) {
         const char c = (char)tolower((unsigned char)*p);
         out[n++] = ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) ? c : '-';
     }
@@ -3269,7 +3344,7 @@ static void benchIdentify() {
     DEBUG_SERIAL.printf(
         "[BENCH] id fw=%s chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
         "bench=%d bt=%d espnow=%d drift=%d conly=%d mono=%d mute=%d trim=%d mesh=%04X meshname=%s "
-        "name=%s link=%d\n",
+        "name=%s link=%d cfg=%d\n",
         FW_VERSION,
         ESP.getChipModel(),
         (unsigned long)ESP.getPsramSize(),
@@ -3288,9 +3363,10 @@ static void benchIdentify() {
         outTrimDb,
         meshId,
         meshNameForLog(),
-        ROOM_NAME,
+        roomName,
         // D18: 2 a front end, 1 a node hearing one, 0 neither.
-        frontEnd ? 2 : (linkFe ? 1 : 0));
+        frontEnd ? 2 : (linkFe ? 1 : 0),
+        cfgOpen ? 1 : 0);
 }
 
 /**
@@ -3323,10 +3399,11 @@ static void benchNode() {
     if (btSinkStarted) btOn = 1;
 #endif
     DEBUG_SERIAL.printf("[NODE] name=%s mac=%s fw=%s mode=%s src=%s rx=%lu lost=%lu und=%lu "
-                        "up=%lus trim=%d mute=%d bt=%d\n",
-                        ROOM_NAME, ownMac, FW_VERSION, modeStr, src, (unsigned long)rxCount,
+                        "up=%lus trim=%d mute=%d bt=%d mono=%d\n",
+                        roomName, ownMac, FW_VERSION, modeStr, src, (unsigned long)rxCount,
                         (unsigned long)seqTracker.lost, (unsigned long)rxUnderrun,
-                        (unsigned long)(millis() / 1000), outTrimDb, outputMuted ? 1 : 0, btOn);
+                        (unsigned long)(millis() / 1000), outTrimDb, outputMuted ? 1 : 0, btOn,
+                        clientMonoOut ? 1 : 0);
 }
 
 // ============================================================================
@@ -3351,9 +3428,9 @@ static void commandRun(char c, const char *arg, bool remote);
  * `@*`, which it prints as a reply like everyone else's instead.
  */
 static size_t commandCapture(const char *text, bool remote, bool quiet, char *out, size_t size) {
-    debugOut.capture(out, size, quiet);
+    const Console::Saved prev = debugOut.capture(out, size, quiet);
     commandRun(text[0], text + 1, remote);
-    return debugOut.endCapture();
+    return debugOut.endCapture(prev);
 }
 
 /** A reply's text as `[@name] line`, a line at a time; `[@name]+` continues a line cut short. */
@@ -3376,7 +3453,7 @@ static void meshPrintReply(const char *name, size_t nameLen, bool cont, const ch
 
 /** What a command printed, back to the node that asked: as many parts as it takes. */
 static void ctrlReply(uint16_t id, const char *text, size_t len) {
-    const size_t room = ESPNOW_PAYLOAD_SIZE - MESH_REPLY_HEADER(strlen(ROOM_NAME));
+    const size_t room = ESPNOW_PAYLOAD_SIZE - MESH_REPLY_HEADER(strlen(roomName));
     uint8_t payload[ESPNOW_PAYLOAD_SIZE];
     size_t  off  = 0;
     uint8_t part = 0;
@@ -3385,7 +3462,7 @@ static void ctrlReply(uint16_t id, const char *text, size_t len) {
         const size_t n    = meshReplyChunk(text + off, len - off, room);
         const size_t plen = meshPackReply(payload, sizeof(payload), id,
                                           (uint8_t)(part | (cont ? MESH_REPLY_CONT : 0)),
-                                          ROOM_NAME, text + off, n);
+                                          roomName, text + off, n);
         if (plen == 0 || !ctrlQueue(MESH_REPLY_SEQ, payload, plen)) break;
         cont = n > 0 && text[off + n - 1] != '\n';
         off += n;
@@ -3399,7 +3476,17 @@ static void ctrlReply(uint16_t id, const char *text, size_t len) {
  * how many nodes answered. When this node is one of those asked -- `*`, or its
  * own name -- it runs the command too and prints its answer the same way.
  */
+static void commandAskOnce(const char *line);
+
 static void commandAsk(const char *line) {
+    strncpy(cmdAskLine, line, sizeof(cmdAskLine) - 1);
+    cmdAskLine[sizeof(cmdAskLine) - 1] = '\0';
+    cmdAskRetries = MESH_ASK_RETRIES;
+    commandAskOnce(cmdAskLine);
+}
+
+/** One asking of `@`'s question; commandAsk() and its retries call it. */
+static void commandAskOnce(const char *line) {
     const char *target, *text;
     size_t      tlen, clen;
     if (!meshSplitCommandLine(line, &target, &tlen, &text, &clen)) {
@@ -3420,7 +3507,9 @@ static void commandAsk(const char *line) {
         return;
     }
 
-    const bool self = all || meshTargetMatches(target, tlen, ROOM_NAME, ownMac);
+    const bool self = all || meshTargetMatches(target, tlen, roomName, ownMac);
+    cmdAskAll = all;
+    if (all || self || !meshCommandRetryable(cmd)) cmdAskRetries = 0;
     if (all || !self) {
         if (!espnowActive || txQueue == nullptr) {
             DEBUG_SERIAL.println("[CMD] error reason=no_mesh");
@@ -3450,7 +3539,7 @@ static void commandAsk(const char *line) {
     if (self) {
         char         out[MESH_REPLY_CAPTURE];
         const size_t n = commandCapture(cmd, false, true, out, sizeof(out));
-        meshPrintReply(ROOM_NAME, strlen(ROOM_NAME), false, out, n);
+        meshPrintReply(roomName, strlen(roomName), false, out, n);
         if (all) cmdAskReplies++;
         else     DEBUG_SERIAL.println("[CMD] done replies=1");
     }
@@ -3523,13 +3612,28 @@ static void meshServiceControl() {
             if (cmdAskSeenCount < sizeof(cmdAskSeen) / sizeof(cmdAskSeen[0])) {
                 cmdAskSeen[cmdAskSeenCount++] = key;
             }
-            if ((r.part & ~MESH_REPLY_CONT) == 0) cmdAskReplies++;
+            if ((r.part & ~MESH_REPLY_CONT) == 0) {
+                cmdAskReplies++;
+                // One node asked, and it has begun to answer: the rest of its
+                // parts are a few ms behind, not MESH_REPLY_WAIT_MS.
+                const unsigned long settle = millis() + MESH_REPLY_SETTLE_MS;
+                if (!cmdAskAll && (long)(cmdAskUntilMs - settle) > 0) cmdAskUntilMs = settle;
+            }
             meshPrintReply(r.name, r.nameLen, (r.part & MESH_REPLY_CONT) != 0, r.text, r.textLen);
         }
     }
     if (cmdAskId != 0 && (long)(millis() - cmdAskUntilMs) >= 0) {
-        DEBUG_SERIAL.printf("[CMD] done id=%04X replies=%u\n", cmdAskId, cmdAskReplies);
+        const uint16_t id = cmdAskId;
         cmdAskId = 0;
+        if (cmdAskReplies == 0 && cmdAskRetries > 0) {
+            // Nobody answered. The question is one that means the same twice,
+            // so ask again rather than leave the asker to guess (D16, D19).
+            cmdAskRetries--;
+            DEBUG_SERIAL.printf("[CMD] retry id=%04X left=%u\n", id, cmdAskRetries);
+            commandAskOnce(cmdAskLine);
+        } else {
+            DEBUG_SERIAL.printf("[CMD] done id=%04X replies=%u\n", id, cmdAskReplies);
+        }
     }
 }
 
@@ -3698,6 +3802,419 @@ static void linkServiceFrontEnd() {
 #endif
 }
 
+// ============================================================================
+// The setup network (D19)
+// ============================================================================
+//
+// An access point on the mesh's own channel, with a page that lists the mesh
+// and sets each node. The node stays on the mesh while it is open -- AP and
+// ESP-NOW share the one radio and the one channel -- and keeps playing, unless
+// its own chip runs Bluetooth: Espressif rates a SoftAP beside Bluetooth
+// unstable, and a WROVER has the RAM for one of them, so Bluetooth is paused
+// for as long as the network is open, and the network is refused to a node
+// serving a phone with it. A two-chip node (D18) has no such problem.
+//
+// The page knows nothing the commands do not: every change is `@<mac> <cmd>`,
+// run by loop() exactly as if typed on this node's port, and what it shows is
+// what the node answered (meshCommandRetryable, MESH_ASK_RETRIES).
+
+static unsigned long  cfgUntilMs    = 0;     // the window...
+static volatile unsigned long cfgLastReqMs = 0;   // ...held open by the page's requests
+static bool           cfgSecured    = false; // the network as it is running: WPA2, or open
+static esp_netif_t   *cfgApNetif    = nullptr;
+static httpd_handle_t cfgHttp       = nullptr;
+static volatile bool  cfgDnsRun     = false;
+static volatile bool  cfgDnsAlive   = false;   // its task has not ended yet
+static volatile unsigned long cfgReopenAtMs = 0;   // the password changed: restart the AP with it
+static volatile unsigned long cfgCloseAtMs  = 0;   // the page said close
+static char           cfgApPass[CONFIG_AP_PASS_MAX + 1] = "";
+
+// A command from the page, run by loop(). One at a time: the HTTP task queues
+// it and waits, loop() runs it and captures what it prints -- across as many
+// passes as a question to the mesh takes to be answered -- and hands it back.
+// A request that gave up waiting leaves its command ABANDONED, and loop()
+// frees the slot when it finishes.
+enum CfgCmdState : uint8_t { CFG_IDLE, CFG_QUEUED, CFG_RUNNING, CFG_DONE, CFG_ABANDONED };
+static portMUX_TYPE           cfgMux       = portMUX_INITIALIZER_UNLOCKED;
+static volatile CfgCmdState   cfgCmdState  = CFG_IDLE;
+static char                   cfgCmdLine[2 + MESH_TARGET_MAX + MESH_COMMAND_MAX];
+static char                  *cfgCmdOut    = nullptr;   // CONFIG_REPLY_MAX, from the heap
+static size_t                 cfgCmdLen    = 0;
+static Console::Saved         cfgCmdPrev;
+
+static void cfgApStart() {
+    wifi_config_t ap = {};
+    // The room name, so a phone's list says which box it is joining.
+    snprintf((char *)ap.ap.ssid, sizeof(ap.ap.ssid), "%s-setup", roomName);
+    ap.ap.ssid_len       = (uint8_t)strlen((const char *)ap.ap.ssid);
+    ap.ap.channel        = ESPNOW_CHANNEL;
+    ap.ap.max_connection = CONFIG_MAX_CLIENTS;
+    ap.ap.beacon_interval = 100;
+    cfgSecured = cfgApPass[0] != '\0';
+    if (cfgSecured) {
+        strlcpy((char *)ap.ap.password, cfgApPass, sizeof(ap.ap.password));
+        ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    } else {
+        ap.ap.authmode = WIFI_AUTH_OPEN;
+    }
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    esp_wifi_set_config(WIFI_IF_AP, &ap);
+    // The STA side, which ESP-NOW sends on, stays on the mesh's channel with it.
+    esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+}
+
+/**
+ * Every name a phone looks up is this node: what makes the phone notice that
+ * it is on a captive network and open the page by itself. A question for an
+ * address of another kind (AAAA) gets an empty answer, so the phone asks for
+ * an IPv4 one instead of waiting.
+ */
+static void cfgDnsTask(void *) {
+    cfgDnsAlive = true;
+    const int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in addr = {};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(53);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    timeval tv = {0, 300000};   // to notice cfgDnsRun going false
+    if (sock < 0 || bind(sock, (sockaddr *)&addr, sizeof(addr)) != 0) {
+        DEBUG_SERIAL.println("[CONFIG] error reason=dns");
+        if (sock >= 0) close(sock);
+        cfgDnsAlive = false;
+        vTaskDelete(nullptr);
+        return;
+    }
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    esp_netif_ip_info_t ip = {};
+    esp_netif_get_ip_info(cfgApNetif, &ip);
+    uint8_t buf[512];
+    while (cfgDnsRun) {
+        sockaddr_in from;
+        socklen_t   flen = sizeof(from);
+        const int   n    = recvfrom(sock, buf, sizeof(buf), 0, (sockaddr *)&from, &flen);
+        // A standard query (QR 0, opcode 0) with exactly one question.
+        if (n < 12 || (buf[2] & 0xF8) != 0 || buf[4] != 0 || buf[5] != 1) continue;
+        int i = 12;
+        while (i < n && buf[i] != 0) i += buf[i] + 1;
+        i += 5;   // the name's terminator, then type and class
+        if (i > n || i + 16 > (int)sizeof(buf)) continue;
+        const bool a = buf[i - 4] == 0 && buf[i - 3] == 1;
+        buf[2] = (uint8_t)(0x84 | (buf[2] & 0x01));   // an authoritative answer, RD kept
+        buf[3] = 0x80;
+        buf[6] = 0;
+        buf[7] = a ? 1 : 0;
+        buf[8] = buf[9] = buf[10] = buf[11] = 0;   // and nothing else, EDNS included
+        if (a) {
+            const uint8_t rr[] = {0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4};
+            memcpy(buf + i, rr, sizeof(rr));
+            memcpy(buf + i + sizeof(rr), &ip.ip.addr, 4);
+            i += sizeof(rr) + 4;
+        }
+        sendto(sock, buf, i, 0, (sockaddr *)&from, flen);
+    }
+    close(sock);
+    cfgDnsAlive = false;
+    vTaskDelete(nullptr);
+}
+
+// ---------------------------------------------------------------- HTTP
+
+static void cfgTouch() { cfgLastReqMs = millis(); }
+
+/** A small request body, terminated. False if it is longer than `size` - 1. */
+static bool cfgBody(httpd_req_t *req, char *out, size_t size) {
+    if (req->content_len >= size) return false;
+    size_t got = 0;
+    while (got < req->content_len) {
+        const int n = httpd_req_recv(req, out + got, req->content_len - got);
+        if (n <= 0) return false;
+        got += (size_t)n;
+    }
+    out[got] = '\0';
+    return true;
+}
+
+static esp_err_t cfgSend(httpd_req_t *req, const char *status, const char *text) {
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, text);
+}
+
+/** Into a JSON string: names are checked to need nothing (meshRoomNameValid), a mesh name may. */
+static size_t cfgJsonStr(char *out, size_t size, const char *s) {
+    size_t n = 0;
+    for (; *s && n + 3 < size; s++) {
+        const char c = *s;
+        if (c == '"' || c == '\\') out[n++] = '\\';
+        out[n++] = ((unsigned char)c < ' ') ? '?' : c;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+static esp_err_t cfgHttpInfo(httpd_req_t *req) {
+    cfgTouch();
+    char mesh[2 * MESH_NAME_MAX + 2], ssid[2 * 32 + 2];
+    cfgJsonStr(mesh, sizeof(mesh), meshNameForLog());
+    Preferences nvs;   // its own: `prefs` belongs to loop()
+    nvs.begin(PREF_NAMESPACE, true);
+    const String stored = nvs.getString(PREF_WIFI_SSID, "");
+    nvs.end();
+    cfgJsonStr(ssid, sizeof(ssid), stored.c_str());
+    char out[384];
+    snprintf(out, sizeof(out),
+             "{\"name\":\"%s\",\"mac\":\"%s\",\"fw\":\"%s\",\"mesh\":\"%04X\",\"meshname\":\"%s\","
+             "\"protected\":%s,\"wifi\":\"%s\"}",
+             roomName, ownMac, FW_VERSION, meshId, mesh, cfgSecured ? "true" : "false", ssid);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
+static esp_err_t cfgHttpCmd(httpd_req_t *req) {
+    cfgTouch();
+    char line[sizeof(cfgCmdLine)];
+    if (!cfgBody(req, line, sizeof(line))) return cfgSend(req, "400 Bad Request", "too long\n");
+    // Only questions to the mesh: `@<target> <command>`, whose rules (`W`
+    // never travels, nothing that silences the house goes to `*`) commandAsk
+    // already enforces.
+    if (line[0] != '@') return cfgSend(req, "400 Bad Request", "@<target> <command> only\n");
+
+    portENTER_CRITICAL(&cfgMux);
+    const bool free = cfgCmdState == CFG_IDLE;
+    if (free) {
+        memcpy(cfgCmdLine, line, sizeof(cfgCmdLine));
+        cfgCmdState = CFG_QUEUED;
+    }
+    portEXIT_CRITICAL(&cfgMux);
+    if (!free) return cfgSend(req, "503 Service Unavailable", "busy: one question at a time\n");
+
+    const unsigned long t0 = millis();
+    while ((long)(millis() - t0) < (long)CONFIG_CMD_TIMEOUT_MS) {
+        if (cfgCmdState == CFG_DONE) {
+            httpd_resp_set_type(req, "text/plain");
+            const esp_err_t err = httpd_resp_send(req, cfgCmdOut, cfgCmdLen);
+            portENTER_CRITICAL(&cfgMux);
+            cfgCmdState = CFG_IDLE;
+            portEXIT_CRITICAL(&cfgMux);
+            return err;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    // Given up. Not yet started, or already done: the slot is free again.
+    // Running: loop() frees it when it finishes, having a capture to end.
+    portENTER_CRITICAL(&cfgMux);
+    cfgCmdState = cfgCmdState == CFG_RUNNING ? CFG_ABANDONED : CFG_IDLE;
+    portEXIT_CRITICAL(&cfgMux);
+    return cfgSend(req, "504 Gateway Timeout", "no answer in time\n");
+}
+
+static esp_err_t cfgHttpApPass(httpd_req_t *req) {
+    cfgTouch();
+    char pass[CONFIG_AP_PASS_MAX + 2];
+    if (!cfgBody(req, pass, sizeof(pass))) return cfgSend(req, "400 Bad Request", "at most 63 characters\n");
+    const size_t len = strlen(pass);
+    bool ok = len >= CONFIG_AP_PASS_MIN && len <= CONFIG_AP_PASS_MAX;
+    for (size_t i = 0; ok && i < len; i++) ok = pass[i] >= ' ' && pass[i] <= '~';
+    if (!ok) return cfgSend(req, "400 Bad Request", "8 to 63 printable characters\n");
+    Preferences nvs;
+    nvs.begin(PREF_NAMESPACE, false);
+    nvs.putString(PREF_AP_PASS, pass);
+    nvs.end();
+    strlcpy(cfgApPass, pass, sizeof(cfgApPass));
+    memset(pass, 0, sizeof(pass));
+    cfgReopenAtMs = millis() + 1500;   // after this answer has gone
+    DEBUG_SERIAL.println("[CONFIG] password set: restarting the network with it");
+    return cfgSend(req, "200 OK", "Saved. The network restarts in a moment: join it again with the new password.\n");
+}
+
+static esp_err_t cfgHttpWifi(httpd_req_t *req) {
+    cfgTouch();
+    // Only over a network with a password: on an open one the home WiFi's
+    // password would cross the air for anyone to read.
+    if (!cfgSecured) return cfgSend(req, "403 Forbidden", "set a password for this network first\n");
+    char body[33 + 65 + 2];
+    if (!cfgBody(req, body, sizeof(body))) return cfgSend(req, "400 Bad Request", "too long\n");
+    char *nl = strchr(body, '\n');
+    if (nl == nullptr || nl == body || nl - body > 32 || strlen(nl + 1) > 64) {
+        return cfgSend(req, "400 Bad Request", "a network name of 1-32 characters, then its password\n");
+    }
+    *nl = '\0';
+    Preferences nvs;
+    nvs.begin(PREF_NAMESPACE, false);
+    nvs.putString(PREF_WIFI_SSID, body);
+    nvs.putString(PREF_WIFI_PASS, nl + 1);
+    nvs.end();
+    memset(body, 0, sizeof(body));
+    DEBUG_SERIAL.println("[CONFIG] home wifi stored");
+    return cfgSend(req, "200 OK", "Saved for update mode.\n");
+}
+
+static esp_err_t cfgHttpClose(httpd_req_t *req) {
+    cfgCloseAtMs = millis() + 500;
+    return cfgSend(req, "200 OK", "closing\n");
+}
+
+/** The page at `/`; any other address -- a phone checking for internet -- is sent to it. */
+static esp_err_t cfgHttpPage(httpd_req_t *req) {
+    cfgTouch();
+    if (strcmp(req->uri, "/") == 0 || strncmp(req->uri, "/?", 2) == 0) {
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        return httpd_resp_send(req, SETUP_PAGE, sizeof(SETUP_PAGE) - 1);
+    }
+    esp_netif_ip_info_t ip = {};
+    esp_netif_get_ip_info(cfgApNetif, &ip);
+    char to[32];
+    snprintf(to, sizeof(to), "http://" IPSTR "/", IP2STR(&ip.ip));
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", to);
+    return httpd_resp_send(req, nullptr, 0);
+}
+
+// ---------------------------------------------------------------- open and close
+
+static void configClose(const char *why);
+
+/** Open the setup network for `windowMs`, or keep it open that long. `C`, and the long hold. */
+static void configOpen(uint32_t windowMs) {
+    if (cfgOpen) {
+        cfgUntilMs = millis() + windowMs;
+        DEBUG_SERIAL.printf("[CONFIG] open, for %lus more\n", (unsigned long)(windowMs / 1000));
+        return;
+    }
+    if (frontEnd) {
+        DEBUG_SERIAL.println("[CONFIG] error reason=front_end (no WiFi here; open it on the node)");
+        return;
+    }
+    if (benchMode) {
+        DEBUG_SERIAL.println("[CONFIG] error reason=bench");
+        return;
+    }
+    if (!espnowActive) {
+        DEBUG_SERIAL.println("[CONFIG] error reason=no_wifi (a WROOM speaker; client-only mode has it)");
+        return;
+    }
+#ifdef ENABLE_BLUETOOTH
+    if (ownBt() && currentMode == MODE_SERVER) {
+        DEBUG_SERIAL.println("[CONFIG] error reason=serving (a phone is on this chip's Bluetooth)");
+        return;
+    }
+    if (ownBt() && btSinkStarted) {
+        btWindow = false;
+        stopBluetooth();
+        cfgPausedBt = true;
+    }
+#endif
+    if (cfgCmdOut == nullptr) cfgCmdOut = (char *)malloc(CONFIG_REPLY_MAX);
+    if (cfgApNetif == nullptr) cfgApNetif = esp_netif_create_default_wifi_ap();
+    if (cfgCmdOut == nullptr || cfgApNetif == nullptr) {
+        DEBUG_SERIAL.println("[CONFIG] error reason=no_memory");
+        return;
+    }
+    cfgApStart();
+
+    httpd_config_t hc   = HTTPD_DEFAULT_CONFIG();
+    hc.uri_match_fn     = httpd_uri_match_wildcard;
+    hc.max_open_sockets = 4;
+    hc.lru_purge_enable = true;
+    hc.stack_size       = 6144;
+    if (httpd_start(&cfgHttp, &hc) != ESP_OK) {
+        DEBUG_SERIAL.println("[CONFIG] error reason=http");
+        cfgHttp = nullptr;
+    } else {
+        const httpd_uri_t routes[] = {
+            {"/api/info",   HTTP_GET,  cfgHttpInfo,   nullptr},
+            {"/api/cmd",    HTTP_POST, cfgHttpCmd,    nullptr},
+            {"/api/appass", HTTP_POST, cfgHttpApPass, nullptr},
+            {"/api/wifi",   HTTP_POST, cfgHttpWifi,   nullptr},
+            {"/api/close",  HTTP_POST, cfgHttpClose,  nullptr},
+            {"/*",          HTTP_GET,  cfgHttpPage,   nullptr},
+        };
+        for (const httpd_uri_t &r : routes) httpd_register_uri_handler(cfgHttp, &r);
+    }
+    for (int i = 0; cfgDnsAlive && i < 50; i++) delay(10);   // a window just closed
+    cfgDnsRun = true;
+    xTaskCreate(cfgDnsTask, "cfg_dns", 3072, nullptr, 3, nullptr);
+
+    cfgOpen       = true;
+    cfgUntilMs    = millis() + windowMs;
+    cfgLastReqMs  = millis();
+    cfgCloseAtMs  = 0;
+    cfgReopenAtMs = 0;
+    esp_netif_ip_info_t ip = {};
+    esp_netif_get_ip_info(cfgApNetif, &ip);
+    DEBUG_SERIAL.printf("[CONFIG] open ssid=%s-setup auth=%s ip=" IPSTR " for=%lus bt_paused=%d\n",
+                        roomName, cfgSecured ? "wpa2" : "open", IP2STR(&ip.ip),
+                        (unsigned long)(windowMs / 1000), cfgPausedBt ? 1 : 0);
+    meshPlayFeedback(MESH_FB_OPEN);   // two drops, as every window opening
+}
+
+static void configClose(const char *why) {
+    if (!cfgOpen) return;
+    if (cfgCmdState != CFG_IDLE) {
+        // The page is waiting for a command, which only loop() -- this caller
+        // -- can finish, and httpd_stop() would wait for the page: close on a
+        // later pass instead.
+        cfgCloseAtMs = millis() + 100;
+        DEBUG_SERIAL.println("[CONFIG] closing after the page's command");
+        return;
+    }
+    cfgDnsRun = false;   // its task ends at its next receive timeout
+    if (cfgHttp != nullptr) {
+        httpd_stop(cfgHttp);
+        cfgHttp = nullptr;
+    }
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    cfgOpen = false;
+    // A command the page was waiting for is left to finish and free its slot.
+    DEBUG_SERIAL.printf("[CONFIG] closed (%s)\n", why);
+#ifdef ENABLE_BLUETOOTH
+    if (cfgPausedBt) {
+        // Back as it was -- unless the node joined a stream meanwhile, where
+        // D17 keeps Bluetooth off until somebody presses for it.
+        cfgPausedBt = false;
+        if (currentMode != MODE_CLIENT) startBluetooth();
+    }
+#endif
+    meshPlayFeedback(MESH_FB_CLOSED);
+}
+
+/** From loop(): the page's commands, its password restart, and the window's end. */
+static void configService() {
+    // The page's command: start it, and finish it once no question it asked
+    // is still waiting for the mesh.
+    if (cfgCmdState == CFG_QUEUED) {
+        portENTER_CRITICAL(&cfgMux);
+        cfgCmdState = CFG_RUNNING;
+        portEXIT_CRITICAL(&cfgMux);
+        cfgCmdPrev = debugOut.capture(cfgCmdOut, CONFIG_REPLY_MAX, false);
+        commandRun(cfgCmdLine[0], cfgCmdLine + 1, false);
+    }
+    if ((cfgCmdState == CFG_RUNNING || cfgCmdState == CFG_ABANDONED) && cmdAskId == 0) {
+        cfgCmdLen = debugOut.endCapture(cfgCmdPrev);
+        portENTER_CRITICAL(&cfgMux);
+        cfgCmdState = cfgCmdState == CFG_ABANDONED ? CFG_IDLE : CFG_DONE;
+        portEXIT_CRITICAL(&cfgMux);
+    }
+
+    if (!cfgOpen) return;
+    if (cfgReopenAtMs != 0 && (long)(millis() - cfgReopenAtMs) >= 0) {
+        cfgReopenAtMs = 0;
+        cfgApStart();
+        DEBUG_SERIAL.printf("[CONFIG] network restarted auth=%s\n", cfgSecured ? "wpa2" : "open");
+    }
+    if (cfgCloseAtMs != 0 && (long)(millis() - cfgCloseAtMs) >= 0) {
+        cfgCloseAtMs = 0;
+        configClose("closed from the page");
+        return;
+    }
+    const unsigned long now = millis();
+    if ((long)(now - cfgUntilMs) >= 0 && (long)(now - cfgLastReqMs) >= (long)CONFIG_IDLE_MS) {
+        configClose("timed out");
+    }
+}
+
 /**
  * The loss trace accumulated since the last call, once a second while `L1`:
  * `[LT] t=<ms> s=<seq> n=<count> drop=<total> <hex>`, a bit per packet from
@@ -3794,6 +4311,9 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *      This node's port only: over the mesh the password would be broadcast
  *   F  toggle front-end mode and reboot (persists): Bluetooth only, handed to
  *      a node over the link (D18). Classic boards only
+ *   I  `I<name>` this node's name, the Bluetooth one too (persists); bare reports
+ *   C  open the setup network for CONFIG_WINDOW_MS, `C0` closes it (D19)
+ *   m, M  also `m1`/`m0` and `M1`/`M0`, which set rather than toggle
  *   >  `><command>` runs the command on this node's front end and prints its
  *      answer as `[FE] <line>`. On a front end, `s` and `x` start and stop the
  *      bench tone over the link instead of over the mesh
@@ -3814,7 +4334,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  * quarter second (benchReadLine), and bench-mesh.ps1 sends `?` mid-stream.
  */
 static bool commandTakesArg(char c) {
-    return c != '\0' && strchr("gzLtDXPRvUVek@>", c) != nullptr;
+    return c != '\0' && strchr("gzLtDXPRvUVek@>mMIC", c) != nullptr;
 }
 
 /**
@@ -3989,12 +4509,15 @@ static void commandRun(char c, const char *arg, bool remote) {
             DEBUG_SERIAL.printf("[MESH] rate=%dM -> %s\n", want, esp_err_to_name(err));
             break;
         }
+        // `m1`/`m0` and `M1`/`M0` set, bare toggles. The setup page and a
+        // retried question send only the first kind: a toggle sent twice,
+        // because its answer was lost, undoes itself (meshCommandRetryable).
         case 'm':
-            outputMuted = !outputMuted;
+            outputMuted = (arg[0] == '0' || arg[0] == '1') ? arg[0] == '1' : !outputMuted;
             DEBUG_SERIAL.printf("[OUT] mute=%d\n", outputMuted ? 1 : 0);
             break;
         case 'M':
-            clientMonoOut = !clientMonoOut;
+            clientMonoOut = (arg[0] == '0' || arg[0] == '1') ? arg[0] == '1' : !clientMonoOut;
             prefs.begin(PREF_NAMESPACE, false);
             prefs.putBool(PREF_MONO_OUT, clientMonoOut);
             prefs.end();
@@ -4034,6 +4557,31 @@ static void commandRun(char c, const char *arg, bool remote) {
             break;
         case '@': commandAsk(arg); break;
         case '>': linkAsk(arg);    break;
+        case 'C':
+            // The setup network (D19): `C` opens it for CONFIG_WINDOW_MS, or
+            // keeps it open that long; `C0` closes it.
+            if (arg[0] == '0') configClose("C0");
+            else               configOpen(CONFIG_WINDOW_MS);
+            if (!cfgOpen) DEBUG_SERIAL.println("[CONFIG] closed");
+            break;
+        case 'I':
+            // `I<name>`: this node's name, kept in NVS (D19). Bare reports.
+            // At once for `@` and the page; the Bluetooth name at the next
+            // start of Bluetooth, which a reboot is.
+            if (arg[0] != '\0') {
+                if (!meshRoomNameValid(arg)) {
+                    DEBUG_SERIAL.println("[NAME] error reason=invalid (1-31 letters, digits or "
+                                         "punctuation, no spaces)");
+                    break;
+                }
+                strncpy(roomName, arg, sizeof(roomName) - 1);
+                roomName[sizeof(roomName) - 1] = '\0';
+                prefs.begin(PREF_NAMESPACE, false);
+                prefs.putString(PREF_ROOM_NAME, roomName);
+                prefs.end();
+            }
+            DEBUG_SERIAL.printf("[NAME] name=%s\n", roomName);
+            break;
         case 'F':
             // Front-end mode (D18): like client-only mode, persisted and
             // decided in setup(), so it takes a reboot.
@@ -4167,6 +4715,20 @@ void setup() {
     frontEnd   = prefs.getBool(PREF_FRONT_END, false);   // undone below in bench mode
 #endif
     clientMonoOut = prefs.getBool(PREF_MONO_OUT, false);
+    {
+        const String ap = prefs.getString(PREF_AP_PASS, "");
+        strlcpy(cfgApPass, ap.c_str(), sizeof(cfgApPass));
+    }
+    {
+        // Before anything uses it: the update mode's hostname, the Bluetooth
+        // name, every answer over the mesh. A stored name that no longer
+        // passes (a rule tightened since) falls back to the build's.
+        const String stored = prefs.getString(PREF_ROOM_NAME, "");
+        if (stored.length() > 0 && meshRoomNameValid(stored.c_str())) {
+            strncpy(roomName, stored.c_str(), sizeof(roomName) - 1);
+            roomName[sizeof(roomName) - 1] = '\0';
+        }
+    }
     outTrimDb     = prefs.getChar(PREF_TRIM_DB, 0);
     if (outTrimDb < OUT_TRIM_MIN_DB || outTrimDb > OUT_TRIM_MAX_DB) outTrimDb = 0;
     outTrimQ12    = gainQ12FromDb(outTrimDb);
@@ -4314,6 +4876,14 @@ void setup() {
     // all it takes.
     if (linkSourceAllowed()) linkBegin();
 
+    // A node nobody has set up opens its setup network by itself when it is
+    // plugged in (D19) -- and plays as usual meanwhile. Not one whose own chip
+    // runs Bluetooth, which would have to pause it: a phone could not find a
+    // fresh WROVER for five minutes. The long hold opens it there.
+    if (!benchMode && !ownBt() && cfgApPass[0] == '\0' && esp_reset_reason() == ESP_RST_POWERON) {
+        configOpen(CONFIG_FIRST_WINDOW_MS);
+    }
+
     LOG_INFO("Setup complete. Entering DISCOVERY...");
     if (benchMode) benchIdentify();
 }
@@ -4345,6 +4915,7 @@ void loop() {
     otaServiceConfirm();
     btServiceWindow();
     linkServiceNode();
+    configService();
 
     switch (currentMode) {
 

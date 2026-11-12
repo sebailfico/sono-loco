@@ -278,6 +278,11 @@ because "connect to any node" is the product.
 **What would change this:** storing the name in NVS and setting it at runtime,
 if nodes ever get a configuration interface.
 
+**Amended 2026-11-12 (D19) — they have one.** `I<name>` and the setup page
+store a name in NVS; `ROOM_NAME` from `platformio.ini` is the name a node has
+until it is given one. The environments stay, for their COM ports and for a
+node nobody has named.
+
 ---
 
 ## D9 — Bench mode is a runtime mode, not a build
@@ -520,6 +525,13 @@ need 18 KB on a server whose largest free block is 13 KB.
 It is a long press **while running**, never a press held through a reset. The
 BOOT button these devkits use is a strapping pin — held across a reset it puts
 the chip into the ROM download mode, where none of this firmware runs at all.
+
+**Amended 2026-11-12 (D19):** a hold of 3 to 9 seconds, acting on release
+rather than as it reaches 3 s, since a longer hold now opens the setup network
+and must not open a pairing window on its way there. A drop at 3 s says "let
+go now". Which half a press performs follows whether the node can be a server
+— its own Bluetooth, or a front end it hears (D18); an S3 used to offer, as
+every build counted as able.
 
 **This is isolation, not privacy.** ESP-NOW encrypts only unicast frames, with a
 per-peer LMK; a broadcast frame cannot be encrypted at all, which is the
@@ -936,6 +948,16 @@ last answer on the heap for half a second. No signal strength in `N`: the receiv
 callback on this core (IDF 4.4) carries none, and loss is what the audio cares
 about.
 
+**Amended 2026-11-12 (D19) — asked again.** A question to one node that
+got no answer is asked again, `MESH_ASK_RETRIES` times, if asking twice means
+the same as asking once (`meshCommandRetryable`): a read, or a setting given
+its value. That is why `m` and `M` take `1` and `0` now: a toggle sent again,
+because its answer was lost, would undo itself. The answer is the
+acknowledgement — every setter prints the value it left in effect — so the
+setup page shows that rather than what it sent. A question to one node also
+ends `MESH_REPLY_SETTLE_MS` after its answer begins. `*` is not retried: who
+should have answered is the page's to know, from the last `@* N`.
+
 **What would change this:** a command whose answer outgrows
 `MESH_REPLY_CAPTURE` (768 bytes, four packets). A need to set something on many
 nodes with certainty — today nothing is acknowledged, and a missing answer is
@@ -1073,3 +1095,81 @@ the mesh as many frames through the air as one radio lost to the arbiter —
 then the antennas apart, and failing that, the idea itself. Or LE Audio on a
 part this project uses (D2), which would make the front end a receiver of a
 broadcast rather than of one phone.
+
+---
+
+## D19 — A setup network on every node, on the mesh's own channel
+
+**Decided:** 2026-11-12. **Status:** built for every environment on the
+`config-mode` branch, on top of D18; the page run in a browser against a fake
+node, the firmware not yet on a board.
+
+Since D16 every setting reaches every node, from a node on USB. What was left
+was doing it with no PC: somebody with six speakers in four rooms and a phone.
+Each node can now open a WiFi network of its own, `<room name>-setup`, whose
+page lists the mesh (`@* N`) and sets each speaker's name, trim, mute and mono.
+
+**Why an access point on the mesh's channel.** A station has to follow its
+router's channel, which is why update mode is a boot of its own (D15). An
+access point picks its channel, and on `ESPNOW_CHANNEL` it shares the radio
+with ESP-NOW: the node goes on hearing the mesh, playing and asking, while a
+phone is joined. Whether the access point's beacons and the phone's traffic
+cost the audio anything is the first thing to measure (`TODO.md`).
+
+**Why a page and not an app.** Nothing to install, on any phone; the page is
+served from flash (`src/setup_page.h`, about 10 KB). It knows nothing the
+commands do not: every change is `@<mac> <command>`, run by `loop()` exactly
+as if typed on the port, and what it shows is what the node answered — a
+control whose node did not answer goes back to what it was. So the page grows
+with the commands, and an app could later be a nicer face on the same
+`/api/cmd`.
+
+**Why the answer is the read-back.** D16 had no acknowledgement. Now a
+question to one node is asked again when no answer comes, if asking twice
+means the same (D16's amendment), and every setter prints the value it left
+in effect. `m` and `M` take `1` and `0` for that reason; bare, they still
+toggle, for the console.
+
+**Who may open it.** Any node with WiFi up: a WROVER, an S3, a C3, a WROOM in
+client-only mode, a two-chip node. Not a front end, which has no WiFi. A node
+whose own chip runs Bluetooth pauses it for as long as the network is open —
+Espressif rates a SoftAP beside Bluetooth unstable, and a WROVER has the RAM
+for one of them — and refuses while a phone is connected to it. A two-chip node
+(D18) has neither problem, and is the one to set up the mesh from while it
+plays.
+
+**How it opens.** A hold of 10 to 15 seconds, or `C` (`C0` closes it). A node
+nobody has set up — no password stored — opens it by itself for five minutes on
+a power-on, and plays as usual meanwhile; not one with its own Bluetooth, which
+a phone could then not find for five minutes. A window stays open ten minutes,
+and five after the page's last request.
+
+**Security.** Open until somebody sets a password on the page; WPA2 from then
+on. First come, first served: whoever is on the open network first sets it,
+which needs somebody within WiFi range in the five minutes after a fresh node
+is plugged in. The home WiFi's password is accepted only once the network has
+a password, so it never crosses the air in the clear. Mesh commands themselves
+are still unauthenticated (D16): the network protects the page, not the mesh.
+A forgotten password is cleared over USB.
+
+**The button.** It had a short press and a long one; it has three ranges now,
+read on release — under 1 s, 3 to 9 s, 10 to 15 s — with dead zones between
+them and a cancel past the last (`lib/button`). Pairing moved from acting at
+3 s to acting on release, so that a hold on its way to 10 s does not open a
+pairing window as it passes. In DISCOVERY a drop marks each range reached;
+while the node plays there is none, because a tone holds `loop()`.
+
+**What was considered.** A boot of its own, like update mode: clean, but it
+stops the music in the room being set up, and the server is the natural place
+to set up from (it is where the phone already is). Joining the home WiFi so
+the page is reachable by IP: the phone keeps its internet, but every node must
+then sit on the router's channel — measured as the difference between 837 lost
+and 0 on this bench — so it waits for a measurement (`TODO.md`). BLE to one
+node: needs an app, and Web Bluetooth is missing on iOS. mDNS: 1.5 KB of static
+RAM on every boot (D15); the captive DNS needs none.
+
+**What would change this:** the access point costing the mesh audible loss —
+then a boot of its own after all. The home WiFi on the mesh's channel measuring
+clean — then the page over the router too. Or a second person on the network
+who should not change settings — then a shared secret on the commands, as D16
+and D15 already say.

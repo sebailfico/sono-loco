@@ -7,7 +7,8 @@ Deliberately small. `main.cpp` is one file on purpose — resist splitting it
 further; the exception below is argued in `docs/decisions.md` (D7).
 
 - `esp32-code/src/main.cpp` — the state machine, tones, ESP-NOW TX/RX, A2DP
-  callbacks and I2S setup, the link's UART and front-end mode (D18), and `commandRun()`, the one dispatcher every
+  callbacks and I2S setup, the link's UART and front-end mode (D18), the
+  setup network's access point, captive DNS and HTTP handlers (D19), and `commandRun()`, the one dispatcher every
   command goes through, typed on the port or sent over the mesh (D16).
   Everything that needs real hardware.
 - `esp32-code/include/config.h` — every tuneable number. New constants go here,
@@ -46,6 +47,12 @@ further; the exception below is argued in `docs/decisions.md` (D7).
   after noise or a board rebooting mid-frame, and the front end's state. A
   framing bug shows on a board as a node that never becomes a server and says
   nothing, so it is pinned here.
+- `esp32-code/lib/button/` — what a press of the node's one button asks for,
+  by how long it was held when let go, and when a hold enters the next range
+  (D19). The edges are the whole of it.
+- `esp32-code/src/setup_page.h` — the setup network's page (D19), one HTML
+  file served from flash: a view of the mesh that sets nodes only through
+  `@<mac>` commands, and shows what they answered.
 - `esp32-code/lib/tones/` — the notification sounds: water drops through an
   echo. Integers per sample, because the C3 has no FPU, and the echo as extra
   voices rather than a delay line the heap could not spare. Chosen by ear in
@@ -67,6 +74,8 @@ further; the exception below is argued in `docs/decisions.md` (D7).
 - `esp32-code/test/test_link/` — the link's frames through every split a UART
   makes, a ROM banner before them, a flipped byte, a frame cut off by a
   reboot, and the front end's state from another protocol version.
+- `esp32-code/test/test_button/` — every edge of the button's ranges, the dead
+  zones between them, and a hold read late across one.
 - `esp32-code/test/test_tones/` — the sounds against the preview's samples,
   every one of them; each drop on its note, so joined still rises; a muted
   node silent for exactly as long; and, on a board, how fast it renders.

@@ -194,7 +194,7 @@ bool meshCommandAllowedRemote(char cmd) {
 }
 
 bool meshCommandAllowedForAll(char cmd) {
-    return meshCommandAllowedRemote(cmd) && strchr("UbncgpowW@BF>", cmd) == nullptr;
+    return meshCommandAllowedRemote(cmd) && strchr("UbncgpowW@BF>IC", cmd) == nullptr;
 }
 
 bool meshCommandAddressed(const char *target, size_t len, char cmd, const char *roomName,
@@ -204,4 +204,39 @@ bool meshCommandAddressed(const char *target, size_t len, char cmd, const char *
         return meshCommandAllowedForAll(cmd);
     }
     return meshTargetMatches(target, len, roomName, mac);
+}
+
+bool meshRoomNameValid(const char *name) {
+    if (name == nullptr) return false;
+    const size_t len = strlen(name);
+    if (len == 0 || len > MESH_TARGET_MAX) return false;
+    // `*` is every node, and `@`/`>` begin commands of their own.
+    if (len == 1 && name[0] == MESH_TARGET_ALL[0]) return false;
+    if (name[0] == '@' || name[0] == '>') return false;
+    for (size_t i = 0; i < len; i++) {
+        const unsigned char c = (unsigned char)name[i];
+        if (c <= ' ' || c > '~' || c == '"' || c == '\\') return false;
+    }
+    // Two letters, a colon, two letters... is a MAC, and one node's name
+    // matching another node's MAC would make `@` ambiguous.
+    if (len == 17 && name[2] == ':' && name[5] == ':' && name[8] == ':' && name[11] == ':' &&
+        name[14] == ':') {
+        return false;
+    }
+    return true;
+}
+
+bool meshCommandRetryable(const char *text) {
+    if (text == nullptr || text[0] == '\0') return false;
+    const char  cmd = text[0];
+    const char *arg = text + 1;
+    if (cmd == '>') return meshCommandRetryable(arg);   // as safe as what the front end runs
+    // On and off, never the toggle: a toggle that ran and lost its answer
+    // would be undone by its retry.
+    if (cmd == 'm' || cmd == 'M' || cmd == 'z' || cmd == 'L') {
+        return (arg[0] == '0' || arg[0] == '1') && arg[1] == '\0';
+    }
+    // Reads, and settings given their value. Not `l`, whose read resets
+    // what it read, nor anything that starts, stops, reboots or opens a window.
+    return strchr("?NrvgItDXPRVe", cmd) != nullptr;
 }

@@ -57,7 +57,7 @@ Every node runs the same three-state machine:
 After 5 s of silence as a client it stays invisible, so it joins the next
 stream at once instead of 0.8 s late. A short press of its button makes it
 visible for 60 s (`B` on the console), and while that minute runs it stays out
-of CLIENT. A long press pairs, below. See D17.
+of CLIENT. Longer holds pair, or open the setup network, below. See D17.
 
 ## Audio Path
 
@@ -251,23 +251,54 @@ the 16-bit id it hashes to, and a client ignores every packet that is not its
 own — which is what keeps your neighbour's three speakers out of your stream.
 Name it with `g Casa Rossi` on the first node.
 
-The BOOT button does two things. A **short press** on a node that can be a
-server turns its Bluetooth on for 60 s, so a phone can connect (D17): two drops
-when it opens, the connect jingle when a phone does, and three falling drops if
-none did (or, if the mesh is playing, simply the music coming back). Moving a node into a mesh needs no console and no typing either — it
-is a **three-second hold of the BOOT button at each end**:
+The BOOT button does three things, chosen by how long it was held **when it
+is let go** (lib/button):
 
-1. Hold BOOT on the server whose mesh you are joining. It plays two drops and
-   *offers* its mesh for 60 s.
-2. Hold BOOT on the node you are moving. It plays two drops, adopts the offer,
-   and plays three rising drops when it has joined. Three falling drops mean the
-   window closed with no offer heard — press again.
+| Held | Does |
+|------|------|
+| under 1 s | Bluetooth on for 60 s (D17) |
+| 3 to 9 s | pairing (D12), below |
+| 10 to 15 s | the setup network (D19), below |
+
+Between the ranges, and past 15 s, a release does nothing: margin for a hand
+counting, and a way out. In DISCOVERY one drop plays as a hold reaches 3 s and
+another at 10 s — "let go now"; while a node plays, there is no drop.
+
+A **short press** on a node that can be a server turns its Bluetooth on for
+60 s, so a phone can connect: two drops when it opens, the connect jingle when
+a phone does, and three falling drops if none did (or, if the mesh is playing,
+simply the music coming back). Moving a node into a mesh needs no console and
+no typing either — it is a **hold of 3 to 9 seconds at each end**:
+
+1. Hold BOOT on the server whose mesh you are joining, and let go. It plays two
+   drops and *offers* its mesh for 60 s.
+2. Hold BOOT on the node you are moving, and let go. It plays two drops, adopts
+   the offer, and plays three rising drops when it has joined. Three falling
+   drops mean the window closed with no offer heard — press again.
 
 Both presses are required, so a neighbour playing music during the window
 cannot capture the node. On the console the two halves are `o` (offer) and `p`
 (listen). Nodes only hear each other if their ids match, and a mismatch looks
 exactly like being out of range — `mesh=` on the identify line and `fgn=`
 (foreign packets dropped) in the status line tell the two apart. See D12.
+
+### The setup network
+
+Every node can open a WiFi network of its own, `<room name>-setup`, with a
+page that lists the mesh and sets each speaker's name, trim, mute and mono
+(D19). A **10-15 s hold** opens it for ten minutes (`C` on the console, `C0`
+closes it), and a node nobody has set up opens it by itself for five minutes
+when it is plugged in — unless its own chip runs Bluetooth, a WROVER: there the
+hold opens it, and Bluetooth is paused while it is open. A node serving a phone
+with its own Bluetooth refuses; a two-chip server (D18) does not.
+
+Join the network and the page opens by itself (or browse to 192.168.4.1). It is
+open until you set a password on the page; it restarts with WPA2 then, and the
+home WiFi for update mode (D15) can be stored from it only after that. It is on
+the mesh's own channel, so the node goes on playing and asking the mesh while a
+phone is on it. Every change the page makes is a command sent with `@<mac>`,
+asked again when no answer comes (if asking twice means the same), and what it
+shows is what the node answered.
 
 ### Build & Upload
 
@@ -311,9 +342,9 @@ not reproduce. See D10.
 
 ### Tests
 
-The pure logic in `lib/` — seven suites, `test_jitter`, `test_adpcm`,
-`test_mesh`, `test_drift`, `test_sync`, `test_tones` and `test_link` — runs on
-the host, no board needed:
+The pure logic in `lib/` — eight suites, `test_jitter`, `test_adpcm`,
+`test_mesh`, `test_drift`, `test_sync`, `test_tones`, `test_link` and
+`test_button` — runs on the host, no board needed:
 
 ```bash
 pio test -e native
@@ -368,9 +399,15 @@ tone, with the clients locked to it and what each one loses:
 ```
 
 Three limits, on purpose. `*` refuses anything that reboots a node or takes it
-off the mesh — `U b n c g p o w` — which would silence the house from one
-keystroke. `W` never travels, because the password would be broadcast. A node
-serving a phone refuses a remote `U`. See D16.
+off the mesh — `U b n c g p o w B F >`, and `I` and `C` (D19) — which would
+silence the house, or name every node alike, from one keystroke. `W` never
+travels, because the password would be broadcast. A node serving a phone
+refuses a remote `U`. See D16.
+
+A question to one node that gets no answer is asked again, twice, when asking
+twice means the same as asking once — a read, or a setting given its value
+(`v-6`, `m1`), never a toggle (`m`), which the retry would undo. Its answer
+ends the wait 0.3 s after it begins rather than after 2.5 s.
 
 ### Updates over WiFi
 
@@ -399,7 +436,7 @@ its own mesh. See D15.
 
 The same on every node and in every build; a few only mean something on a
 Bluetooth server. `?` prints the node's state, so read it before toggling
-anything (`m`, `M`, `c` are toggles).
+anything (bare `m`, `M` and `c` are toggles; `m1`, `M0` and the like set).
 
 **Everyday**
 
@@ -409,8 +446,10 @@ anything (`m`, `M`, `c` are toggles).
 | `N` | where this node sits in the mesh: its mode, its source (`phone`, `bench`, or the MAC of the server it is locked to), `rx`/`lost`/`und` in this stream, and `bt=1` if a phone could find it now. One line, so `@* N` lists the mesh |
 | `@` | `@<name\|mac\|*> <command>`: run the command on that node, or on every node of this mesh, and print the answers. See above |
 | `v` | `v<dB>` this node's own volume trim, −40…+12; bare `v` reports. Applied at this node's output, after the mesh has its copy, so the phone's slider still moves every room and the trim sets where this room sits among them. Kept in NVS |
-| `m` | mute this node's speaker until reboot, its jingles and beeps included — the mesh and every timing are untouched. A toggle |
-| `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS. A toggle |
+| `m` | mute this node's speaker until reboot, its jingles and beeps included — the mesh and every timing are untouched. `m1` mutes, `m0` unmutes, bare `m` toggles |
+| `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS. `M1`/`M0` set, bare `M` toggles |
+| `I` | `I<name>` this node's name — what `@`, the setup page and (from its next start) Bluetooth know it by; bare `I` reports. Kept in NVS; the build's `ROOM_NAME` until then. 1-31 characters, no spaces |
+| `C` | open the setup network for 10 minutes, or keep it open; `C0` closes it (D19). Over the mesh to one node, never to `*` |
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once |
 | `p` | listen for 60 s and join the mesh that offers itself — the node half of pairing |
 | `o` | offer this mesh for 60 s — the server half |
