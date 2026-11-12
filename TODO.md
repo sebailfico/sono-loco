@@ -26,8 +26,8 @@ WROVERs' ports move with every replug: check the MAC (`?`) against
       a client that keeps the parities it could not use yet and retries them
       when a block comes back (`xor 15*` in `losstrace.py`: about 30% fewer
       holes again, on every trace so far), `t2` on top at twice the airtime
-      (the trace cannot score it), and a **two-chip server** (an A2DP chip
-      handing PCM to a €2 C3 that only does ESP-NOW), which removes the cause.
+      (the trace cannot score it), and a **two-chip server** (D18, below),
+      which removes the cause.
       Also unexplained: the server's own output crackled once on 2026-09-28
       (27 holes/s, one per A2DP packet) and never again after a reboot. If
       it comes back, run `listen.py --serial` at once and compare the `a`
@@ -63,6 +63,23 @@ WROVERs' ports move with every replug: check the MAC (`?`) against
       connectable while it plays, unmeasured (D17). And Windows once failed to
       connect to a freshly rebooted node with nothing reaching it, then
       connected fine later; not understood.
+- [ ] **The two-chip server (D18): run it.** Built on the `two-chip-server`
+      branch on 2026-11-12, never on a board. A WROOM in front-end mode (`F`)
+      wired to the S3: the WROOM's link TX (GPIO 33) to the S3's link RX
+      (GPIO 16), the S3's TX (17) to the WROOM's RX (32), and ground. In order:
+      - The link alone, no phone: `s` on the front end sends the bench tone
+        over the link at A2DP's pace. The S3 becomes SERVER (`N` says
+        `src=link`), `>a` shows no CRC errors and no sequence gaps, and the
+        clients play the tone with the usual bench-regression counters.
+      - CPU: the S3's `a` window and its clients' `und`/`dry` with the link at
+        `LINK_BAUD` against a bench run without it.
+      - A phone on the front end, 600 s behind it with `soak.py --trace`:
+        the clients' `lost` against the 3–13% a WROVER server drops today. The
+        number this whole design is for.
+      - Two radios in one box: the same run with the boards' antennas apart
+        and side by side.
+      - The C3 as the node, single core: the same link run, `und` and `dry`.
+      Then merge, and decide whether WROVERs keep their own Bluetooth path.
 
 ---
 

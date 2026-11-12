@@ -994,3 +994,82 @@ press was chosen over measuring that first.
 slowly loses no more of the stream than one without. Then Bluetooth could stay
 on, and the press would only be needed by a node that is playing. Or a server
 whose Bluetooth is on a chip of its own (the two-chip server in `TODO.md`).
+
+---
+
+## D18 — A two-chip server: Bluetooth on a WROOM, PCM to the node over a UART
+
+**Decided:** 2026-11-12. **Status:** built for every environment on the
+`two-chip-server` branch; not yet run on a board.
+
+A WROVER server runs Bluetooth and the mesh on one radio, and the coexistence
+arbiter gives Bluetooth the air: the server loses 3–13% of its own mesh frames
+before they leave it, in singles and in runs of 4–5, and every client loses the
+same ones (D13, `TODO.md`). Redundancy has brought the holes down to 0.3–1.1%
+of blocks; it cannot bring the cause down. Bluetooth also holds the RAM: a
+streaming server has 18–32 KB of internal DRAM, which rules out anything else
+on it, the configuration page included.
+
+The two-chip server takes Bluetooth off the node. A **front end** — a WROOM,
+the same classic image, put in front-end mode with `F` — runs the A2DP sink and
+nothing else: no WiFi, so no PSRAM. It hands each decoded packet, after the
+phone's volume, to the **node** over a UART, with the connection's state. The
+node is any ESP32, an S3 or a C3 included: the link's packets go into its
+server path exactly where the A2DP callback's went — its own ring, the level
+controller on it, the schedule its packets carry (D14), the encoder — so a
+node with a front end is a server like any other, and its radio is the mesh's
+alone.
+
+**Why packets over a UART, not I2S.** I2S is the obvious wire for audio, and
+the wrong one here. It is a clocked stream: the front end would have to play
+the phone's bursts out at the node's clock, which means a ring and a drift
+controller on the front end as well, and a second buffer — about 70 ms more
+latency — in front of the one D14 already sized for the clients. And control
+would need a UART beside it anyway. Packets keep one buffer, on the node, fed
+the way A2DP fed it: bursty, steered by the controller already tuned for that
+(`SERVER_TARGET_BYTES`). The link is three wires, TX, RX and ground, at
+`LINK_BAUD`: 4 Mbaud carries the 176 KB/s of PCM with more than half again to
+spare.
+
+**The frame** (`lib/link`): a two-byte sync, a type, a sequence number, a
+length and a CRC-16 over all of them. A receiver that loses its place — a
+byte dropped, a board booting and printing on its UART — finds the next sync
+and checks the CRC, so one bad frame costs one frame. Audio goes in chunks of
+`LINK_AUDIO_CHUNK` frames, so a receiver needs no buffer the size of the
+largest A2DP packet. The front end repeats its whole state — connected,
+streaming, sample rate, volume — once a second and on every change, so a lost
+state frame is corrected within a second and a node needs no handshake: it is
+a server while it hears a front end that has a phone. Command lines go the
+other way, and their answers back: `>V60` on the node runs `V60` on its front
+end, over the mesh too.
+
+**What the node gives up.** A WROVER keeps its own Bluetooth path until the
+two-chip one is measured; a classic node takes its PCM from a front end only
+in client-only mode (`c`), so that it never runs two Bluetooth speakers. D17's
+button does not apply to a front end: its Bluetooth is on its own radio, so it
+stays on, and a phone finds a node with a front end without a press. Whether
+that costs the node's reception anything through the air is not known. The
+phone sees the front end's name, which is its own build's `ROOM_NAME` (D8):
+naming the front end after its node waits for the room name to move to NVS.
+
+**What it costs a node without one.** Every node that may take a front end
+listens for one — wiring it is all it takes — so the UART and its receive
+task run on every S3, C3 and client-only classic node, on pins that must stay
+free. Its buffers come from the heap when the link starts: in the classic
+image the link adds 168 bytes of static RAM, against 3.7 KB as static arrays,
+which a WROVER server would have paid for nothing.
+
+**What was considered.** A sealed Bluetooth audio module with I2S output:
+cheaper in firmware, but the room name, the starting volume, the connect state
+and the `a` window would depend on its datasheet, and most cheap modules have
+analog output only. Bluetooth-LE modules (HM-10, nRF51822) and the serial-only
+HC-05/HC-06 carry no A2DP at all. SPI: faster, but a slave that must be ready
+for every burst, and four wires where three will do.
+
+**What would change this:** the UART not carrying the stream cleanly at
+`LINK_BAUD`, or its receive interrupts costing the node's audio path — then
+I2S for the audio, with a ring on the front end. Two radios in one box losing
+the mesh as many frames through the air as one radio lost to the arbiter —
+then the antennas apart, and failing that, the idea itself. Or LE Audio on a
+part this project uses (D2), which would make the front end a receiver of a
+broadcast rather than of one phone.

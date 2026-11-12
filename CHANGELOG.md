@@ -37,6 +37,25 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **A two-chip server: Bluetooth on a WROOM, the mesh on any node** (2026-11-12,
+  D18). **Built for every environment, and not yet run on a board**; on the
+  `two-chip-server` branch. A classic board in front-end mode (`F`, NVS) runs
+  the A2DP sink with no WiFi and hands each packet and its state to a node
+  over a 4 Mbaud UART. The node feeds them into its server path where the
+  A2DP callback's went, so an S3 or a C3 can now be a server.
+  - `lib/link`: frames with a sync, a sequence number and a CRC-16, and a
+    decoder that resynchronises a byte at a time. `test_link`, 11 cases, on
+    the host.
+  - `>` runs a command on a node's front end, over the mesh too. `s` on a
+    front end sends the bench tone over the link, paced as A2DP from Windows,
+    so the node's server path runs with no phone. `N` says `src=link`, `?`
+    gains `link=`, and `a` prints the link's counters.
+  - A front end's state with a rate other than 44.1 kHz is refused, not
+    played at the wrong pitch.
+  - `F` and `>` are refused for `*` (`test_mesh`).
+  - The server path no longer depends on this chip having Bluetooth: a bench
+    source in normal mode no longer drops out of SERVER either.
+  - The classic image is 6.5 KB larger, with 168 bytes more static RAM.
 - **The host suites run on the dev machine** (2026-11-12). MSYS2's gcc is on
   `PATH`, and `pio test -e native` passes all six suites, 139 cases, D17's
   `test_mesh` change included. Until now they ran only on a board.

@@ -238,10 +238,11 @@ bool meshCommandAllowedRemote(char cmd);
 
 /**
  * May this command be sent to every node at once? Not one that reboots a node
- * (U b n c), moves it to another mesh or opens pairing (g p o), stops its
+ * (U b n c F), moves it to another mesh or opens pairing (g p o), stops its
  * radio (w), or stops it playing to wait for a phone (B): each of those, sent
  * to `*`, takes the whole house off the air, and only a node named by the
- * person who meant it should do that.
+ * person who meant it should do that. Nor `>`, which runs any of them on a
+ * node's Bluetooth front end (D18).
  */
 bool meshCommandAllowedForAll(char cmd);
 

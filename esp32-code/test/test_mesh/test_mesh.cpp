@@ -360,7 +360,7 @@ void test_some_commands_never_leave_the_node(void) {
 
 /** Sent to `*`, anything that reboots a node or takes it off the mesh would take them all. */
 void test_nothing_sent_to_all_can_take_the_house_off_the_air(void) {
-    for (const char *c = "UbncgpowW@B"; *c; c++) TEST_ASSERT_FALSE(meshCommandAllowedForAll(*c));
+    for (const char *c = "UbncgpowW@BF>"; *c; c++) TEST_ASSERT_FALSE(meshCommandAllowedForAll(*c));
     for (const char *c = "?NrvmlM"; *c; c++) TEST_ASSERT_TRUE(meshCommandAllowedForAll(*c));
 }
 

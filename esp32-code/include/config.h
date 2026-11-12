@@ -83,6 +83,70 @@
 // the library's driver with an 8 x 256 ring, prefilled at every stream start.
 
 // ============================================================================
+// The link — a two-chip server (D18)
+// ============================================================================
+//
+// A front end (a classic board in front-end mode, `F`) runs Bluetooth and
+// hands the phone's audio to a node over one UART: front end TX to node RX,
+// node TX to front end RX, and ground. Every node listens on these pins, so
+// the wiring is all a front end needs. Override per node in platformio.ini
+// (-DLINK_RX_PIN=…) if a board is wired differently.
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+// UART0's own pins, free because the console is on native USB. The ROM prints
+// its boot banner on 21 at reset; the far end's decoder skips it as noise.
+#define LINK_RX_PIN  20
+#define LINK_TX_PIN  21
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+// Clear of the I2S pins, the strapping pins, native USB (19/20) and the
+// octal-PSRAM bank (33-37).
+#define LINK_RX_PIN  16
+#define LINK_TX_PIN  17
+#else
+// Classic. Not 16/17, which are the PSRAM's on a WROVER.
+#define LINK_RX_PIN  32
+#define LINK_TX_PIN  33
+#endif
+#define LINK_UART_NUM  UART_NUM_1
+
+// 4 Mbaud: 400 KB/s against the 176 KB/s of 44.1 kHz stereo PCM, and an exact
+// divisor of the 80 MHz clock every target here runs its UART from. Short
+// wires only -- a few centimetres between two boards in one box.
+#define LINK_BAUD  4000000
+
+// The UART driver's ring buffers. The receive side holds more than one A2DP
+// packet from Windows (4 KB) while the receive task is between reads; the
+// transmit side two, so the front end's A2DP callback never waits for the wire
+// -- a chunk that does not fit is dropped and counted instead (`drops=`).
+#define LINK_RX_BUFFER  8192
+#define LINK_TX_BUFFER  8192
+
+// Stereo frames per audio frame on the link: 1 KB, LINK_MAX_PAYLOAD in
+// lib/link. An A2DP packet goes as several, back to back.
+#define LINK_AUDIO_CHUNK  256
+
+// The front end sends its whole state on every change and this often anyway,
+// so a state lost on the wire is corrected within this. A node that hears no
+// state for LINK_LOST_MS takes the front end, and its phone, as gone.
+#define LINK_STATE_INTERVAL_MS  1000
+#define LINK_LOST_MS            3000
+
+// How long `>` waits for the front end's answer. The node's speaker keeps
+// playing meanwhile; a front end on the far side of 4 Mbaud answers in a few ms.
+#define LINK_REPLY_WAIT_MS  300
+
+// The receive task: above loop(), which feeds I2S and would otherwise make the
+// UART's buffer wait behind a blocking write, and below the WiFi and Bluetooth
+// stacks. On core 0 where there are two, as the Bluetooth callbacks it stands in
+// for run there.
+#define LINK_TASK_PRIO   6
+#define LINK_TASK_STACK  4096
+
+// The front end's test signal (`s` in front-end mode): the bench tone, sent
+// over the link the way Windows sends A2DP -- 1024 frames every 23.2 ms -- so
+// a node's server path can be run with no phone.
+#define LINK_TONE_PACKET_FRAMES  1024
+
+// ============================================================================
 // Notification Tones (startup / connect / disconnect)
 // ============================================================================
 // The tones use BT_SAMPLE_RATE directly. Connect/disconnect tones are written

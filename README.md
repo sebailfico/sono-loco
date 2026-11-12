@@ -137,6 +137,14 @@ Where things are written down, one place each:
 Only the **WROVER** makes every node interchangeable: it is the one module that
 can be a server *and* switch to being a client.
 
+**A two-chip server** (D18, built and not yet run on a board) takes Bluetooth
+off the node altogether. A WROOM in front-end mode (`F`) runs only the A2DP
+sink and hands the phone's audio to any node — an S3 or a C3 included — over
+one UART: front end TX to node RX, node TX to front end RX, and ground. The
+pins are in `config.h` (classic RX 32 / TX 33, S3 16 / 17, C3 20 / 21). The
+node is then a server like any other, with a radio the mesh has to itself. A
+classic node takes a front end only in client-only mode (`c`).
+
 **A WROOM has to choose.** Bluetooth Classic and WiFi together need PSRAM;
 without it the Bluetooth stack runs out of RAM, so a WROOM about to start
 Bluetooth leaves the mesh off. In **client-only mode** (`c`, kept in NVS) it
@@ -303,9 +311,9 @@ not reproduce. See D10.
 
 ### Tests
 
-The pure logic in `lib/` — six suites, `test_jitter`, `test_adpcm`,
-`test_mesh`, `test_drift`, `test_sync` and `test_tones` — runs on the host, no
-board needed:
+The pure logic in `lib/` — seven suites, `test_jitter`, `test_adpcm`,
+`test_mesh`, `test_drift`, `test_sync`, `test_tones` and `test_link` — runs on
+the host, no board needed:
 
 ```bash
 pio test -e native
@@ -441,6 +449,8 @@ anything (`m`, `M`, `c` are toggles).
 | `k` | `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, as a headset reconnects to a phone; the PC's address is in `boards.local.md`. Needs Bluetooth on: `B` first on a node that has been a client |
 | `V` | `V<0..127>` the A2DP volume, as a phone's slider would set it: it moves every room |
 | `e` | `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
+| `F` | toggle front-end mode and reboot, on a classic board: Bluetooth only, handed to a node over the link (D18). Kept in NVS. On a front end, `s` and `x` start and stop the bench tone over the link, so a node's server path runs with no phone |
+| `>` | `><command>` runs the command on this node's front end and prints its answer as `[FE] <line>` — `>V60`, `>a`. Works over the mesh, never to `*` |
 
 Bench mode exists because the server role needs a phone to connect, which
 cannot be automated. It never starts Bluetooth, so it also runs on a board with

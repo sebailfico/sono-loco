@@ -194,7 +194,7 @@ bool meshCommandAllowedRemote(char cmd) {
 }
 
 bool meshCommandAllowedForAll(char cmd) {
-    return meshCommandAllowedRemote(cmd) && strchr("UbncgpowW@B", cmd) == nullptr;
+    return meshCommandAllowedRemote(cmd) && strchr("UbncgpowW@BF>", cmd) == nullptr;
 }
 
 bool meshCommandAddressed(const char *target, size_t len, char cmd, const char *roomName,

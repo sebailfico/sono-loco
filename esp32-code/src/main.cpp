@@ -34,6 +34,8 @@
 // Update mode only, on a boot that never starts the mesh. See D15.
 #include <esp_http_server.h>
 #include <esp_ota_ops.h>
+// The two-chip server's link (D18).
+#include <driver/uart.h>
 
 // Hardware-independent parts of the CLIENT receive path, tested on the host
 // with `pio test -e native` — see test/test_jitter.
@@ -44,6 +46,7 @@
 #include "drift.h"
 #include "holes.h"
 #include "jitter.h"
+#include "link.h"
 #include "losstrace.h"
 #include "mesh.h"
 #include "seqtracker.h"
@@ -170,6 +173,16 @@ static bool benchSource = false;   // this node is generating the test stream
 static Preferences prefs;
 static bool        clientOnly = false;
 
+// ============================================================================
+// Front-end mode (D18)
+// ============================================================================
+//
+// A classic board that runs Bluetooth for another node and nothing else: no
+// WiFi, no mesh, no speaker. Each A2DP packet goes to the node over the link,
+// and the node is the server. A setting like client-only mode, so in NVS, set
+// with `F`; never in bench mode, which a front end boots as an ordinary node.
+static bool frontEnd = false;
+
 // This node's own speaker, and nothing else. Neither setting touches what is
 // received, forwarded, buffered or corrected -- only the samples handed to I2S.
 //
@@ -192,6 +205,7 @@ static volatile int32_t outTrimQ12 = GAIN_UNITY_Q12;
 
 static const char *PREF_NAMESPACE = "sonoloco";
 static const char *PREF_CLIENT_ONLY = "clientonly";
+static const char *PREF_FRONT_END = "frontend";
 static const char *PREF_MONO_OUT = "monoout";
 static const char *PREF_TRIM_DB = "trimdb";
 static const char *PREF_MESH_ID = "meshid";
@@ -210,6 +224,25 @@ static const char *PREF_WIFI_PASS = "wifipass";
  */
 static inline bool btAllowed() {
     return !benchMode && !clientOnly;
+}
+
+/** A phone reaches this node through this chip's own Bluetooth. */
+static inline bool ownBt() {
+#ifdef ENABLE_BLUETOOTH
+    return btAllowed() && !frontEnd;
+#else
+    return false;
+#endif
+}
+
+/**
+ * A phone reaches this node through a front end on the link instead (D18). Not
+ * beside its own Bluetooth -- a classic node takes a front end only in
+ * client-only mode, or a phone would see two speakers -- and not in bench
+ * mode, where SERVER is the node's own tone.
+ */
+static inline bool linkSourceAllowed() {
+    return !benchMode && !frontEnd && !ownBt();
 }
 
 // ============================================================================
@@ -1417,18 +1450,104 @@ static void setupESPNow() {
 }
 
 // ============================================================================
-// Bluetooth A2DP — SERVER mode, BT Classic nodes only
+// The link — a two-chip server's halves (D18)
 // ============================================================================
+//
+// A front end runs Bluetooth and nothing else, and hands the phone's audio and
+// its state to a node over a UART; the node plays it and forwards it as a
+// server. Frames in lib/link, the wiring in config.h. The same code on both
+// ends, which end it is decided by frontEnd.
 
-#ifdef ENABLE_BLUETOOTH
+static_assert(LINK_AUDIO_CHUNK * CLIENT_FRAME_BYTES <= LINK_MAX_PAYLOAD,
+              "an audio chunk must fit in one link frame");
+static_assert(LINK_TONE_PACKET_FRAMES % LINK_AUDIO_CHUNK == 0,
+              "the link tone sends whole chunks");
+static_assert(MESH_REPLY_CAPTURE <= LINK_MAX_PAYLOAD,
+              "a command's answer must fit in one link frame");
 
-BluetoothA2DPSink a2dpSink;
-volatile bool btConnected       = false;
+// The link's buffers come from the heap in linkBegin(), on the boards that
+// start it: as static arrays they took 3.7 KB of internal DRAM on every
+// classic board, a WROVER server's included, which never uses them and has
+// least of it to spare (D3, D15).
+static bool              linkUp       = false;
+static SemaphoreHandle_t linkTxLock   = nullptr;   // one frame, one sequence number, at a time
+static uint8_t           linkTxSeq    = 0;
+static uint8_t          *linkTxBuf    = nullptr;   // LINK_FRAME_MAX
+static volatile uint32_t linkTxFrames = 0;
+// Audio the front end could not send: the UART's buffer full, or the lock
+// held too long. Dropped rather than waited for, because the A2DP callback is
+// the Bluetooth stack's own task.
+static volatile uint32_t linkTxDrops  = 0;
+static LinkDecoder      *linkDec      = nullptr;   // the receive task's; `a` reads its counters
+static volatile uint32_t linkRxBytes  = 0;
+
+// The node's view of its front end: a state heard within LINK_LOST_MS, and
+// whether it carried a sample rate this mesh cannot play (TODO.md, 44.1 kHz).
+static volatile bool          linkFe      = false;
+static volatile unsigned long linkFeMs    = 0;
+static volatile bool          linkRateBad = false;
+static volatile uint32_t      linkBadState = 0;
+
+// A command line one way, its answer the other: one slot each, filled by the
+// receive task and emptied by loop().
+static portMUX_TYPE    linkMsgMux     = portMUX_INITIALIZER_UNLOCKED;
+static char            linkCmd[MESH_COMMAND_MAX + 1];   // front end: from the node
+static volatile bool   linkCmdReady   = false;
+static char           *linkReply      = nullptr;   // node: from the front end, LINK_MAX_PAYLOAD + 1
+static volatile size_t linkReplyLen   = 0;
+static volatile bool   linkReplyReady = false;
+
+// The front end: its state has changed, send it now rather than at the next
+// interval.
+static volatile bool linkStateDirty = false;
+
+/**
+ * One frame onto the link. `mayDrop`: audio, which is sent only if the UART's
+ * buffer has room for all of it now; anything else waits for room.
+ */
+static bool linkSend(uint8_t type, const uint8_t *payload, size_t len, bool mayDrop) {
+    if (!linkUp) return false;
+    if (xSemaphoreTake(linkTxLock, mayDrop ? 0 : pdMS_TO_TICKS(50)) != pdTRUE) {
+        if (mayDrop) linkTxDrops++;
+        return false;
+    }
+    bool         ok = false;
+    const size_t n  = linkEncode(linkTxBuf, LINK_FRAME_MAX, type, linkTxSeq, payload, len);
+    size_t       room = 0;
+    if (n > 0 && (!mayDrop || (uart_get_tx_buffer_free_size(LINK_UART_NUM, &room) == ESP_OK &&
+                               room >= n))) {
+        uart_write_bytes(LINK_UART_NUM, (const char *)linkTxBuf, n);
+        linkTxSeq++;
+        linkTxFrames++;
+        ok = true;
+    } else if (mayDrop) {
+        linkTxDrops++;
+    }
+    xSemaphoreGive(linkTxLock);
+    return ok;
+}
+
+/** The front end's half of an A2DP packet: whole frames, in chunks a frame holds. */
+static void linkSendAudio(const uint8_t *data, uint32_t length) {
+    const uint32_t chunk = LINK_AUDIO_CHUNK * CLIENT_FRAME_BYTES;
+    length &= ~(uint32_t)(CLIENT_FRAME_BYTES - 1);
+    for (uint32_t off = 0; off < length; off += chunk) {
+        const uint32_t n = length - off < chunk ? length - off : chunk;
+        linkSend(LINK_AUDIO, data + off, n, true);
+    }
+}
+
+// ============================================================================
+// The server's source — a phone, by this chip's Bluetooth or a front end's
+// ============================================================================
+//
+// What follows serves either: a phone on this chip's own A2DP sink, or on a
+// front end's, whose packets and state arrive over the link (D18). Either way
+// the packets go through a2dpDataCallback into this node's ring and the mesh.
+
+volatile bool btConnected       = false;   // a phone is connected, whichever chip has it
 volatile bool doConnectSound    = false;
 volatile bool doDisconnectSound = false;
-// Not `btStarted` — Arduino's esp32-hal-bt.h already declares `bool btStarted()`
-// at global scope, and the collision is a hard compile error.
-static bool   btSinkStarted     = false;
 
 
 // Off with `f` over serial: the server keeps playing locally and stops handing
@@ -1517,6 +1636,13 @@ static void a2dpDataCallback(const uint8_t *data, uint32_t length) {
     }
     a2dpLastUs = t0;
 
+    if (frontEnd) {   // the node plays and forwards it (D18)
+        linkSendAudio(data, length);
+        const uint32_t cb = micros() - t0;
+        if (cb > a2dpCbMaxUs) a2dpCbMaxUs = cb;
+        return;
+    }
+
     const uint32_t first = ringPushed;
     if (loopbackOn) {
         const int bytes = (int)(length & ~(uint32_t)(CLIENT_FRAME_BYTES - 1));
@@ -1545,7 +1671,15 @@ static void a2dpForwardPacket(const uint8_t *data, uint32_t length, uint32_t fir
     for (int i = 0; i < frames; i++) meshTxFrame(in[2 * i], in[2 * i + 1], first + i);
 }
 
+#ifdef ENABLE_BLUETOOTH
+
+BluetoothA2DPSink a2dpSink;
+// Not `btStarted` — Arduino's esp32-hal-bt.h already declares `bool btStarted()`
+// at global scope, and the collision is a hard compile error.
+static bool   btSinkStarted     = false;
+
 static void btConnectionChanged(esp_a2d_connection_state_t state, void *) {
+    linkStateDirty = true;   // a front end tells its node at once
     if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
         LOG_INFO("BT connected");
         btConnected    = true;
@@ -1558,6 +1692,7 @@ static void btConnectionChanged(esp_a2d_connection_state_t state, void *) {
 }
 
 static void btAudioChanged(esp_a2d_audio_state_t state, void *) {
+    linkStateDirty = true;
     if (state == ESP_A2D_AUDIO_STATE_STARTED) {
         txReady      = true;
         audioStartMs = millis();
@@ -1628,26 +1763,6 @@ static void startBluetooth() {
              String(ESP.getMaxAllocHeap()));
 }
 
-/**
- * Play a connect/disconnect jingle on a server's speaker.
- *
- * From loop(), into the output driver that loop() also feeds from the ring, so
- * the two cannot interleave: while the jingle plays the ring is simply not
- * read, and the stream carries on into it (and to the mesh, which never
- * notices). Afterwards the ring re-arms from the prefill, as at any start, and
- * the clients follow the new schedule.
- *
- * Before the server played from its own ring, the library wrote each packet
- * into the same driver from the Bluetooth task, and a jingle during a stream
- * came out chopped and stretched: "the 3 tones were very laggy" (2026-09-28).
- */
-static void playJingle(void (*jingle)()) {
-    schedInvalidate();
-    jingle();
-    jReady    = false;
-    outSynced = false;
-}
-
 static void stopBluetooth() {
     if (!btSinkStarted) return;
     // end(false) keeps the BT controller in memory so start() works again.
@@ -1674,6 +1789,156 @@ static void stopBluetooth() {
 }
 
 #endif  // ENABLE_BLUETOOTH
+
+/**
+ * Play a connect/disconnect jingle on a server's speaker.
+ *
+ * From loop(), into the output driver that loop() also feeds from the ring, so
+ * the two cannot interleave: while the jingle plays the ring is simply not
+ * read, and the stream carries on into it (and to the mesh, which never
+ * notices). Afterwards the ring re-arms from the prefill, as at any start, and
+ * the clients follow the new schedule.
+ *
+ * Before the server played from its own ring, the library wrote each packet
+ * into the same driver from the Bluetooth task, and a jingle during a stream
+ * came out chopped and stretched: "the 3 tones were very laggy" (2026-09-28).
+ */
+static void playJingle(void (*jingle)()) {
+    schedInvalidate();
+    jingle();
+    jReady    = false;
+    outSynced = false;
+}
+
+// ----------------------------------------------------------------------------
+// The link's receiving end, both roles
+// ----------------------------------------------------------------------------
+
+/**
+ * A front end's state, on the node: the same transitions the A2DP library's
+ * callbacks make on a node with its own Bluetooth.
+ */
+static void linkOnState(const uint8_t *payload, size_t len) {
+    LinkState s;
+    if (!linkUnpackState(payload, len, &s)) {
+        linkBadState++;   // another protocol version: a front end on other firmware
+        return;
+    }
+    linkFeMs = millis();
+    linkFe   = true;
+    if (!linkSourceAllowed()) return;   // its own Bluetooth is this node's way in
+
+    // 44.1 kHz is assumed from the codec to the schedule (TODO.md). A stream
+    // at another rate would play at the wrong pitch in every room: refuse it.
+    linkRateBad = s.streaming && s.sampleRate != CLIENT_SAMPLE_RATE;
+    const bool streaming = s.streaming && !linkRateBad;
+
+    if (s.connected != btConnected) {
+        btConnected = s.connected;
+        if (s.connected) doConnectSound = true;
+        else             doDisconnectSound = true;
+        LOG_INFO(s.connected ? "Front end: phone connected" : "Front end: phone disconnected");
+    }
+    if (streaming != txReady) {
+        if (streaming) {
+            txReady      = true;
+            audioStartMs = millis();
+            a2dpLastUs   = 0;
+            meshTxReset();
+        } else {
+            txReady      = false;
+            audioStartMs = 0;
+        }
+        LOG_INFO(streaming ? "Front end: audio started" : "Front end: audio stopped");
+    }
+}
+
+static void linkOnFrame(const LinkFrame &f) {
+    switch (f.type) {
+        case LINK_AUDIO:
+            if (!frontEnd && currentMode == MODE_SERVER && linkSourceAllowed()) {
+                a2dpDataCallback(f.payload, f.len);
+            }
+            break;
+        case LINK_STATE:
+            if (!frontEnd) linkOnState(f.payload, f.len);
+            break;
+        case LINK_CMD:
+            if (frontEnd && f.len > 0 && f.len <= MESH_COMMAND_MAX) {
+                portENTER_CRITICAL(&linkMsgMux);
+                memcpy(linkCmd, f.payload, f.len);
+                linkCmd[f.len] = '\0';
+                linkCmdReady   = true;
+                portEXIT_CRITICAL(&linkMsgMux);
+            }
+            break;
+        case LINK_REPLY:
+            if (!frontEnd) {
+                portENTER_CRITICAL(&linkMsgMux);
+                memcpy(linkReply, f.payload, f.len);
+                linkReply[f.len] = '\0';
+                linkReplyLen     = f.len;
+                linkReplyReady   = true;
+                portEXIT_CRITICAL(&linkMsgMux);
+            }
+            break;
+        default: break;   // a type from newer firmware: its CRC held, it is just not ours
+    }
+}
+
+static void linkRxTask(void *) {
+    uint8_t buf[512];
+    while (true) {
+        const int n = uart_read_bytes(LINK_UART_NUM, buf, sizeof(buf), pdMS_TO_TICKS(5));
+        if (n <= 0) continue;
+        linkRxBytes += n;
+        const uint8_t *p    = buf;
+        size_t         left = (size_t)n;
+        while (true) {
+            LinkFrame    f;
+            bool         got;
+            const size_t used = linkDec->push(p, left, &f, &got);
+            p    += used;
+            left -= used;
+            if (got) linkOnFrame(f);
+            else if (left == 0) break;
+        }
+    }
+}
+
+/** The UART and its receive task, on a front end and on every node that may have one. */
+static void linkBegin() {
+    uart_config_t cfg = {};
+    cfg.baud_rate  = LINK_BAUD;
+    cfg.data_bits  = UART_DATA_8_BITS;
+    cfg.parity     = UART_PARITY_DISABLE;
+    cfg.stop_bits  = UART_STOP_BITS_1;
+    cfg.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
+    cfg.source_clk = UART_SCLK_APB;
+    esp_err_t err = uart_driver_install(LINK_UART_NUM, LINK_RX_BUFFER, LINK_TX_BUFFER, 0, nullptr, 0);
+    if (err == ESP_OK) err = uart_param_config(LINK_UART_NUM, &cfg);
+    if (err == ESP_OK) {
+        err = uart_set_pin(LINK_UART_NUM, LINK_TX_PIN, LINK_RX_PIN, UART_PIN_NO_CHANGE,
+                           UART_PIN_NO_CHANGE);
+    }
+    linkTxLock = xSemaphoreCreateMutex();
+    linkTxBuf  = (uint8_t *)malloc(LINK_FRAME_MAX);
+    linkReply  = (char *)malloc(LINK_MAX_PAYLOAD + 1);
+    linkDec    = new LinkDecoder();
+    if (err != ESP_OK || linkTxLock == nullptr || linkTxBuf == nullptr || linkReply == nullptr ||
+        linkDec == nullptr) {
+        LOG_ERROR("Link UART failed: " + String(esp_err_to_name(err)));
+        return;
+    }
+    // Nothing wired is a node without a front end, the usual case: its RX pin
+    // reads idle rather than floating into noise.
+    gpio_pullup_en((gpio_num_t)LINK_RX_PIN);
+    xTaskCreatePinnedToCore(linkRxTask, "link_rx", LINK_TASK_STACK, nullptr, LINK_TASK_PRIO,
+                            nullptr, 0);
+    linkUp = true;
+    LOG_INFO("Link UART up: RX " + String(LINK_RX_PIN) + ", TX " + String(LINK_TX_PIN) + " at " +
+             String(LINK_BAUD) + " baud" + (frontEnd ? " (front end)" : ""));
+}
 
 // ============================================================================
 // I2S output from the ring — every node that plays the stream
@@ -2056,14 +2321,13 @@ static void enterDiscovery() {
     txReady  = false;
     meshTxReset();
 
-#ifdef ENABLE_BLUETOOTH
     // A server's own ring stops taking the stream before anything resets it;
-    // the Bluetooth task may be inside a push, and a push takes microseconds.
+    // the Bluetooth task, or the link's (D18), may be inside a push, and a
+    // push takes microseconds.
     if (loopbackOn) {
         loopbackOn = false;
         delay(5);
     }
-#endif
     deinitI2SOutput();   // a client's, or a Bluetooth server's own
 
     // Reset on *every* entry to DISCOVERY, not just when leaving CLIENT.
@@ -2091,18 +2355,17 @@ static void enterServer() {
     // BT is already running (started in setup). The data callback will start
     // forwarding once BT audio state goes STARTED.
     meshTxReset();
-#ifdef ENABLE_BLUETOOTH
     // Its own speaker plays from its own ring, like a client's, so that the
     // packets it sends can say when it plays them (loopbackOn, D14). Ring
-    // first, then the driver, then the producer.
-    if (btAllowed()) {
+    // first, then the driver, then the producer -- the A2DP callback, here or
+    // on a front end (D18).
+    if (ownBt() || linkSourceAllowed()) {
         resetPlayState();
         rxOverflow = rxUnderrun = 0;
         initI2SOutput();
         loopbackOn = outI2SActive;
         if (!outI2SActive) LOG_ERROR("SERVER I2S unavailable — mesh only, no local playback");
     }
-#endif
     currentMode = MODE_SERVER;
 }
 
@@ -2306,6 +2569,10 @@ static void meshServicePairing() {
 /** Bluetooth on for BT_WINDOW_MS. The short press, and `B`. */
 static void btOpenWindow() {
 #ifdef ENABLE_BLUETOOTH
+    if (frontEnd) {
+        DEBUG_SERIAL.println("[BT] on for good (a front end, D18)");
+        return;
+    }
     if (!btAllowed()) {
         DEBUG_SERIAL.println("[BT] error reason=no_bt (client-only, or bench mode)");
         return;
@@ -3002,7 +3269,7 @@ static void benchIdentify() {
     DEBUG_SERIAL.printf(
         "[BENCH] id fw=%s chip=%s psram=%lu mac=%02X:%02X:%02X:%02X:%02X:%02X "
         "bench=%d bt=%d espnow=%d drift=%d conly=%d mono=%d mute=%d trim=%d mesh=%04X meshname=%s "
-        "name=%s\n",
+        "name=%s link=%d\n",
         FW_VERSION,
         ESP.getChipModel(),
         (unsigned long)ESP.getPsramSize(),
@@ -3021,7 +3288,9 @@ static void benchIdentify() {
         outTrimDb,
         meshId,
         meshNameForLog(),
-        ROOM_NAME);
+        ROOM_NAME,
+        // D18: 2 a front end, 1 a node hearing one, 0 neither.
+        frontEnd ? 2 : (linkFe ? 1 : 0));
 }
 
 /**
@@ -3040,18 +3309,18 @@ static void benchNode() {
     if (benchSource) {
         strcpy(src, "bench");
     } else if (currentMode == MODE_SERVER) {
-        strcpy(src, "phone");
+        strcpy(src, linkSourceAllowed() ? "link" : "phone");   // a front end's phone (D18)
     } else if (currentMode == MODE_CLIENT && senderLocked) {
         snprintf(src, sizeof(src), "%02X:%02X:%02X:%02X:%02X:%02X", lockedSender[0],
                  lockedSender[1], lockedSender[2], lockedSender[3], lockedSender[4],
                  lockedSender[5]);
     }
     // bt: whether a phone could find this node now -- since D17 a node that
-    // has been a client has Bluetooth off until its button is pressed.
+    // has been a client has Bluetooth off until its button is pressed. A
+    // front end's is always on (D18).
+    int btOn = (linkSourceAllowed() && linkFe) ? 1 : 0;
 #ifdef ENABLE_BLUETOOTH
-    const int btOn = btSinkStarted ? 1 : 0;
-#else
-    const int btOn = 0;
+    if (btSinkStarted) btOn = 1;
 #endif
     DEBUG_SERIAL.printf("[NODE] name=%s mac=%s fw=%s mode=%s src=%s rx=%lu lost=%lu und=%lu "
                         "up=%lus trim=%d mute=%d bt=%d\n",
@@ -3264,6 +3533,171 @@ static void meshServiceControl() {
     }
 }
 
+// ============================================================================
+// The link, from loop() (D18)
+// ============================================================================
+
+/** The front end's answer, a line at a time as `[FE] <line>`, if one is waiting. */
+static void linkPrintReply() {
+    if (!linkReplyReady) return;
+    char   text[LINK_MAX_PAYLOAD + 1];
+    size_t len;
+    portENTER_CRITICAL(&linkMsgMux);
+    len = linkReplyLen;
+    memcpy(text, linkReply, len + 1);
+    linkReplyReady = false;
+    portEXIT_CRITICAL(&linkMsgMux);
+    for (size_t i = 0; i < len;) {
+        size_t end = i;
+        while (end < len && text[end] != '\n') end++;
+        const size_t next = end + 1;
+        if (end > i && text[end - 1] == '\r') end--;
+        if (end > i) DEBUG_SERIAL.printf("[FE] %.*s\n", (int)(end - i), text + i);
+        i = next;
+    }
+}
+
+/**
+ * `><command>`: run a command on this node's front end, and print its answer.
+ *
+ * It waits for the answer, so that the answer is part of this command's output
+ * -- which is what carries it back over the mesh to whoever asked (D16) -- and
+ * while it waits it keeps this node's speaker fed, as loop() would.
+ */
+static void linkAsk(const char *line) {
+    if (frontEnd || !linkUp) {
+        DEBUG_SERIAL.println("[LINK] error reason=no_link");
+        return;
+    }
+    if (!linkFe) {
+        DEBUG_SERIAL.println("[LINK] error reason=no_front_end (nothing heard on the link)");
+        return;
+    }
+    // The mesh's rules, for the same reasons: `W` would put the password on
+    // the wire, and a front end does not relay.
+    if (line[0] == '>' || !meshCommandAllowedRemote(line[0])) {
+        DEBUG_SERIAL.println("[LINK] error reason=local_only");
+        return;
+    }
+    portENTER_CRITICAL(&linkMsgMux);
+    linkReplyReady = false;
+    portEXIT_CRITICAL(&linkMsgMux);
+    if (!linkSend(LINK_CMD, (const uint8_t *)line, strnlen(line, MESH_COMMAND_MAX), false)) {
+        DEBUG_SERIAL.println("[LINK] error reason=send");
+        return;
+    }
+    const unsigned long t0 = millis();
+    while (!linkReplyReady && (long)(millis() - t0) < (long)LINK_REPLY_WAIT_MS) {
+        if (outI2SActive && currentMode != MODE_DISCOVERY) driveRingI2S();
+        else delay(1);
+    }
+    if (!linkReplyReady) {
+        DEBUG_SERIAL.println("[LINK] error reason=no_answer");
+        return;
+    }
+    linkPrintReply();
+}
+
+/** The node's side, every pass: a front end that went quiet, and late answers. */
+static void linkServiceNode() {
+    if (!linkUp || frontEnd) return;
+    linkPrintReply();
+    if (!linkFe || (long)(millis() - linkFeMs) < (long)LINK_LOST_MS) return;
+    linkFe = false;
+    DEBUG_SERIAL.println("[LINK] front end silent: lost");
+    if (linkSourceAllowed() && btConnected) {
+        btConnected       = false;
+        txReady           = false;
+        doDisconnectSound = true;
+    }
+}
+
+// The front end's test signal (`s`): the bench tone, paced as A2DP from
+// Windows arrives -- a packet of LINK_TONE_PACKET_FRAMES at a time.
+static bool     linkTone      = false;
+static int64_t  linkToneStart = 0;
+static uint32_t linkTonePkt   = 0;
+
+static void linkToneSet(bool on) {
+    if (on && !benchToneReady) benchBuildTone();
+    linkTone       = on;
+    linkToneStart  = esp_timer_get_time();
+    linkTonePkt    = 0;
+    benchTonePhase = 0;
+    linkStateDirty = true;
+    DEBUG_SERIAL.printf("[LINK] tone=%d\n", on ? 1 : 0);
+}
+
+static void linkServiceTone() {
+    if (!linkTone) return;
+    const int64_t now = esp_timer_get_time();
+    for (int burst = 0; burst < BENCH_MAX_CATCHUP_PKTS; burst++) {
+        const int64_t due = linkToneStart + (int64_t)linkTonePkt * 1000000LL *
+                                                LINK_TONE_PACKET_FRAMES / CLIENT_SAMPLE_RATE;
+        if (now < due) return;
+        int16_t pcm[2 * LINK_AUDIO_CHUNK];
+        for (int done = 0; done < LINK_TONE_PACKET_FRAMES; done += LINK_AUDIO_CHUNK) {
+            for (int i = 0; i < LINK_AUDIO_CHUNK; i++) {
+                const int16_t s = benchTone[benchTonePhase];
+                if (++benchTonePhase >= BENCH_TONE_LEN) benchTonePhase = 0;
+                pcm[2 * i] = pcm[2 * i + 1] = s;
+            }
+            linkSend(LINK_AUDIO, (const uint8_t *)pcm, sizeof(pcm), true);
+        }
+        linkTonePkt++;
+    }
+}
+
+/** The front end's loop(): commands from its node, the tone, and its state. */
+static void linkServiceFrontEnd() {
+    if (linkCmdReady) {
+        char text[MESH_COMMAND_MAX + 1];
+        portENTER_CRITICAL(&linkMsgMux);
+        memcpy(text, linkCmd, sizeof(text));
+        linkCmdReady = false;
+        portEXIT_CRITICAL(&linkMsgMux);
+        char         out[MESH_REPLY_CAPTURE];
+        const size_t n = commandCapture(text, true, false, out, sizeof(out));
+        linkSend(LINK_REPLY, (const uint8_t *)out, n, false);
+    }
+
+    linkServiceTone();
+
+#ifdef ENABLE_BLUETOOTH
+    LinkState s;
+    s.connected  = btConnected || linkTone;
+    s.streaming  = txReady || linkTone;
+    s.sampleRate = linkTone ? CLIENT_SAMPLE_RATE : a2dpSink.sample_rate();
+    s.volume     = (uint8_t)a2dpSink.get_volume();
+    static LinkState     sent;
+    static unsigned long sentMs = 0;
+    const bool changed = s.connected != sent.connected || s.streaming != sent.streaming ||
+                         s.sampleRate != sent.sampleRate || s.volume != sent.volume;
+    if (changed || linkStateDirty || sentMs == 0 ||
+        (long)(millis() - sentMs) >= (long)LINK_STATE_INTERVAL_MS) {
+        uint8_t      b[LINK_STATE_BYTES];
+        const size_t n = linkPackState(s, b, sizeof(b));
+        if (linkSend(LINK_STATE, b, n, false)) {
+            sent           = s;
+            sentMs         = millis();
+            linkStateDirty = false;
+        }
+    }
+#endif
+
+#if DEBUG_LEVEL >= 3
+    static unsigned long lastStatus = 0;
+    if (millis() - lastStatus > STATUS_INTERVAL_MS) {
+        lastStatus = millis();
+        LOG_INFO(String("Status: mode=FRONTEND heap=") + String(ESP.getFreeHeap()) +
+                 " phone=" + String(btConnected ? 1 : 0) + " audio=" + String(txReady ? 1 : 0) +
+                 " tone=" + String(linkTone ? 1 : 0) + " tx=" + String(linkTxFrames) +
+                 " drops=" + String(linkTxDrops) + " rx=" + String(linkDec->frames) +
+                 " crc=" + String(linkDec->crcErrors));
+    }
+#endif
+}
+
 /**
  * The loss trace accumulated since the last call, once a second while `L1`:
  * `[LT] t=<ms> s=<seq> n=<count> drop=<total> <hex>`, a bit per packet from
@@ -3358,6 +3792,11 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   W  `W<ssid>` then the password on the next line: the home network update
  *      mode joins (persists). Bare `W` prints the SSID, never the password.
  *      This node's port only: over the mesh the password would be broadcast
+ *   F  toggle front-end mode and reboot (persists): Bluetooth only, handed to
+ *      a node over the link (D18). Classic boards only
+ *   >  `><command>` runs the command on this node's front end and prints its
+ *      answer as `[FE] <line>`. On a front end, `s` and `x` start and stop the
+ *      bench tone over the link instead of over the mesh
  *
  * Bluetooth server diagnostics, for telling the A2DP side from the mesh side:
  *   k  `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, as a headset would
@@ -3375,7 +3814,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  * quarter second (benchReadLine), and bench-mesh.ps1 sends `?` mid-stream.
  */
 static bool commandTakesArg(char c) {
-    return c != '\0' && strchr("gzLtDXPRvUVek@", c) != nullptr;
+    return c != '\0' && strchr("gzLtDXPRvUVek@>", c) != nullptr;
 }
 
 /**
@@ -3452,8 +3891,9 @@ static void commandRun(char c, const char *arg, bool remote) {
             srvCtl.reset(millis());
             DEBUG_SERIAL.printf("[BENCH] drift=%d\n", driftEnabled ? 1 : 0);
             break;
-        case 's': benchStartSource(); break;
-        case 'x': benchStopSource();  break;
+        // On a front end, the tone goes over the link to its node (D18).
+        case 's': if (frontEnd) linkToneSet(true);  else benchStartSource(); break;
+        case 'x': if (frontEnd) linkToneSet(false); else benchStopSource();  break;
         case 'c': {
             // Persisted, then restarted: whether Bluetooth starts is decided
             // in setup(), so like bench mode this only takes effect on the
@@ -3593,23 +4033,55 @@ static void commandRun(char c, const char *arg, bool remote) {
             }
             break;
         case '@': commandAsk(arg); break;
+        case '>': linkAsk(arg);    break;
+        case 'F':
+            // Front-end mode (D18): like client-only mode, persisted and
+            // decided in setup(), so it takes a reboot.
 #ifdef ENABLE_BLUETOOTH
-        case 'a': a2dpStatsPrint(); a2dpStatsReset(); break;
+            prefs.begin(PREF_NAMESPACE, false);
+            prefs.putBool(PREF_FRONT_END, !frontEnd);
+            prefs.end();
+            DEBUG_SERIAL.printf("[LINK] frontend=%d rebooting\n", frontEnd ? 0 : 1);
+            DEBUG_SERIAL.flush();
+            delay(50);
+            ESP.restart();
+#else
+            DEBUG_SERIAL.println("[LINK] error reason=no_bt (a front end needs Bluetooth Classic)");
+#endif
+            break;
+        case 'a':
+            // The A2DP window: this node's own Bluetooth, a front end's as it
+            // reaches the node over the link, or on a front end the phone's.
+            a2dpStatsPrint();
+            a2dpStatsReset();
+            if (linkUp) {
+                DEBUG_SERIAL.printf(
+                    "[LINK] role=%s fe=%d rxB=%lu rx=%lu crc=%lu len=%lu skip=%lu gaps=%lu "
+                    "badstate=%lu tx=%lu drops=%lu rate=%s\n",
+                    frontEnd ? "frontend" : "node", linkFe ? 1 : 0, (unsigned long)linkRxBytes,
+                    (unsigned long)linkDec->frames, (unsigned long)linkDec->crcErrors,
+                    (unsigned long)linkDec->badLength, (unsigned long)linkDec->skipped,
+                    (unsigned long)linkDec->seqGaps, (unsigned long)linkBadState,
+                    (unsigned long)linkTxFrames, (unsigned long)linkTxDrops,
+                    linkRateBad ? "refused" : "ok");
+            }
+            break;
         case 'f':
             a2dpForward = !a2dpForward;
             DEBUG_SERIAL.printf("[A2DP] fwd=%d\n", a2dpForward ? 1 : 0);
             break;
+        case 'j':
+            if (currentMode != MODE_SERVER || !outI2SActive) break;
+            DEBUG_SERIAL.printf("[A2DP] jingle streaming=%d\n", txReady ? 1 : 0);
+            playJingle(playConnectedSound);
+            break;
+#ifdef ENABLE_BLUETOOTH
         case 'w':
             // One way only: bringing ESP-NOW back after esp_wifi_stop()
             // means redoing channel and PHY rate, and a reboot does that.
             a2dpForward  = false;
             espnowActive = false;
             DEBUG_SERIAL.printf("[A2DP] wifi stop -> %s\n", esp_err_to_name(esp_wifi_stop()));
-            break;
-        case 'j':
-            if (currentMode != MODE_SERVER || !outI2SActive) break;
-            DEBUG_SERIAL.printf("[A2DP] jingle streaming=%d\n", txReady ? 1 : 0);
-            playJingle(playConnectedSound);
             break;
         case 'V': {
             // `V<0..127>`: the A2DP volume, as a phone's slider would set
@@ -3691,6 +4163,9 @@ void setup() {
     // Read-only handle — the only writer is the 'c' command.
     prefs.begin(PREF_NAMESPACE, true);
     clientOnly = prefs.getBool(PREF_CLIENT_ONLY, false);
+#ifdef ENABLE_BLUETOOTH
+    frontEnd   = prefs.getBool(PREF_FRONT_END, false);   // undone below in bench mode
+#endif
     clientMonoOut = prefs.getBool(PREF_MONO_OUT, false);
     outTrimDb     = prefs.getChar(PREF_TRIM_DB, 0);
     if (outTrimDb < OUT_TRIM_MIN_DB || outTrimDb > OUT_TRIM_MAX_DB) outTrimDb = 0;
@@ -3713,7 +4188,9 @@ void setup() {
     DEBUG_SERIAL.println("  SonoLoco — Multi-Room Audio");
     DEBUG_SERIAL.println("  Firmware: " FW_VERSION);
 #ifdef ENABLE_BLUETOOTH
-    if (clientOnly) {
+    if (frontEnd) {
+        DEBUG_SERIAL.println("  Mode: FRONT END (Bluetooth for a node over the link, D18)");
+    } else if (clientOnly) {
         DEBUG_SERIAL.println("  Mode: CLIENT only (configured — BT never starts)");
     } else {
         DEBUG_SERIAL.println("  Mode: SERVER capable (BT + ESP-NOW)");
@@ -3746,6 +4223,7 @@ void setup() {
     benchMode = (benchMagic == BENCH_MAGIC);
     if (benchMode) {
         DEBUG_SERIAL.println("[BENCH] boot bench=1 (Bluetooth disabled this boot)");
+        frontEnd = false;   // a bench boot is an ordinary node, front end or not
     }
 
 
@@ -3766,7 +4244,8 @@ void setup() {
     // coming and going -- twice per update, on a node that may be playing into
     // a stereo across the house (D15) -- or `c`, `n`, or the panic before a
     // rollback.
-    if (!benchMode && esp_reset_reason() == ESP_RST_POWERON) {
+    // Nor on a front end, which has no speaker (D18).
+    if (!benchMode && !frontEnd && esp_reset_reason() == ESP_RST_POWERON) {
         initI2SForTones();
         playStartupSound();
         deinitI2SForTones();
@@ -3813,12 +4292,27 @@ void setup() {
     txEncoder.begin(MESH_BLOCK_FRAMES);
     rxStore.init(rxStoreBuf, MESH_BLOCK_BYTES);
 
+    if (frontEnd) {
+        // Bluetooth and the link, and no WiFi at all -- which is why a WROOM,
+        // with no PSRAM, can be one (D18). Bluetooth stays on for good: it is
+        // this board's whole job, and its radio is not the mesh's.
+        linkBegin();
+#ifdef ENABLE_BLUETOOTH
+        startBluetooth();
+#endif
+        LOG_INFO("Front end ready.");
+        return;
+    }
+
     // ESP-NOW must be up before BT to ensure coexistence layer is ready
     setupESPNow();
 
 #ifdef ENABLE_BLUETOOTH
     if (btAllowed()) startBluetooth();
 #endif
+    // Every node that may take a front end listens for one (D18): wiring one is
+    // all it takes.
+    if (linkSourceAllowed()) linkBegin();
 
     LOG_INFO("Setup complete. Entering DISCOVERY...");
     if (benchMode) benchIdentify();
@@ -3829,6 +4323,16 @@ void setup() {
 // ============================================================================
 
 void loop() {
+    if (frontEnd) {
+        // Bluetooth and the link, nothing else (D18): no mesh, no button, no
+        // speaker. Commands from its own port and from its node.
+        benchServiceSerial();
+        linkServiceFrontEnd();
+        otaServiceConfirm();
+        vTaskDelay(1);
+        return;
+    }
+
     // Always listening for host commands, in every mode — this is how a node is
     // put into bench mode in the first place.
     benchServiceSerial();
@@ -3840,16 +4344,15 @@ void loop() {
     meshServiceControl();
     otaServiceConfirm();
     btServiceWindow();
+    linkServiceNode();
 
     switch (currentMode) {
 
         case MODE_DISCOVERY:
-#ifdef ENABLE_BLUETOOTH
-            if (btConnected) {
+            if (btConnected) {   // this chip's phone, or a front end's (D18)
                 enterServer();
                 break;
             }
-#endif
             // Not while a short press holds Bluetooth open for a phone (D17):
             // joining would switch it straight off again.
             if (rxActive && espnowActive && !btWindow &&
@@ -3859,12 +4362,10 @@ void loop() {
             break;
 
         case MODE_SERVER:
-#ifdef ENABLE_BLUETOOTH
-            // In bench mode SERVER means "sourcing the synthetic stream" and
-            // there is no BT connection to lose, so none of this applies —
-            // without the guard the node would leave SERVER on the first pass.
-            // A client-only node never gets here at all.
-            if (btAllowed()) {
+            // A bench source's SERVER is its own tone, with no phone to lose,
+            // so none of this applies -- without the guard it would leave
+            // SERVER on the first pass.
+            if (!benchSource) {
                 if (doConnectSound) {
                     doConnectSound = false;
                     playJingle(playConnectedSound);
@@ -3878,7 +4379,6 @@ void loop() {
                     break;
                 }
             }
-#endif
             driveRingI2S();   // a Bluetooth server's own speaker; nothing on a bench source
             break;
 
