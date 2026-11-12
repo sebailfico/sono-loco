@@ -22,6 +22,10 @@ The alternative — a compile-time server build and a client build — is simple
 write and much worse to live with: you have to remember which board is which,
 re-flash to rearrange rooms, and the server becomes a single point of failure.
 
+**Amended 2026-10-09 (D17):** a node that has played as a client keeps
+Bluetooth off until its button is pressed, so a phone finds it only after a
+short press. Any node can still become the server.
+
 **What would change this:** nothing short of the runtime negotiation proving
 unworkable on hardware. It is the point of the project rather than an
 implementation detail.
@@ -907,7 +911,7 @@ and the receive handler with commands, which also fixed the update request
 being queued as a 248-byte packet into a queue of 252-byte items.
 
 **What a command may not do.** Sent to `*`, nothing that reboots a node or
-takes it off the mesh — `U b n c g p o w`: each would silence the house from
+takes it off the mesh — `U b n c g p o w`, and since D17 `B`: each would silence the house from
 one keystroke, and only a node named by the person who meant it should do that.
 `W` never travels, to anyone: the password would be broadcast in the clear. `@`
 does not travel either; a node does not relay for another. And `U` sent over
@@ -940,3 +944,53 @@ per-node acknowledgement and retry would replace. A second person on the mesh
 who should not be able to change settings — then a shared secret, as D15 would
 need for the same reason. Or a core on IDF 5, which would put the RSSI of the
 server's packets into `N`.
+
+---
+
+## D17 — A node that has played as a client keeps Bluetooth off until its button is pressed
+
+**Decided:** 2026-10-09. **Status:** built for every environment; not yet run
+on a board.
+
+A node that can be a server starts Bluetooth at boot, as before, and keeps it
+on until it first plays as a client. From then on it stays off — through
+streams, pauses and idle time — until somebody presses its button. A short press
+(or `B`) turns it on for 60 s (`BT_WINDOW_MS`), and while that minute runs the
+node stays out of CLIENT, or the mesh's stream would switch Bluetooth straight
+off again. A phone that connects makes the node a server as always. If none
+does, Bluetooth goes off and the node rejoins whatever the mesh is playing.
+Leaving SERVER never stopped Bluetooth, and still does not, so a phone that
+disconnects can come back. The long press still pairs (D12).
+
+**Why.** Leaving CLIENT used to start Bluetooth again, so a phone could always
+find the node. Every stream after a pause longer than the 5 s silence timeout
+then found it with Bluetooth to stop first. Logged on one PC clock over eight
+starts (2026-10-06, `logs/join-20261006-223002.log`), WROVER2 came in
+0.77–0.88 s after the S3 and the C3 every time, which lined up in the same
+millisecond. A notification, shorter than that plus the server's own 1 s
+`TX_WARMUP_MS`, never reached its room at all. And Bluetooth left on is not
+free while playing either: a WROVER client whose Bluetooth kept scanning lost
+4.7% of the stream beside an S3 losing 2.0% (2026-09-30). That is why CLIENT
+switches it off in the first place.
+
+**What it costs.** A phone can no longer find a node that has been a client
+without somebody at it: D1 still holds, any node can become the server, but this
+one needs a press first. A press while the node plays stops it in that room
+until a phone connects or the minute is up, as pairing does, and the music
+stopping is half of what says the press registered. A phone connecting to it
+while another node is serving makes two servers. A server ignores mesh audio,
+and each client stays with the one it locked onto (D6) until that one goes
+quiet.
+
+**Considered.** Starting a client's output first and stopping Bluetooth after
+it: the late start goes, but every client stays visible to every phone in the
+house, and still has Bluetooth scanning through the start of each stream.
+Bluetooth kept on with a slower scan (`esp_bt_gap_set_scan_mode`, a long
+page-scan interval): unmeasured. With the XOR redundancy (D13) it may now cost
+little, and it would also let a phone take over a node while it plays. The
+press was chosen over measuring that first.
+
+**What would change this:** a soak showing a client with Bluetooth scanning
+slowly loses no more of the stream than one without. Then Bluetooth could stay
+on, and the press would only be needed by a node that is playing. Or a server
+whose Bluetooth is on a chip of its own (the two-chip server in `TODO.md`).

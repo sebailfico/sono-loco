@@ -37,6 +37,25 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **A node that has played as a client keeps Bluetooth off, and a short press
+  opens it for a minute** (2026-10-09, D17). **Built for every environment, and
+  not yet run on a board.** Leaving CLIENT no longer starts Bluetooth again, so
+  a WROVER joins every stream at once instead of 0.77–0.88 s after the other
+  rooms. That delay was logged on one PC clock at eight starts on 2026-10-06
+  (`logs/join-20261006-223002.log`). Joining no longer waits 200 ms for a
+  Bluetooth stop when there is nothing to stop.
+  - A short press of the BOOT button, or `B`, turns Bluetooth on for 60 s
+    (`BT_WINDOW_MS`). It stops the node playing as a client first, and keeps
+    it out of CLIENT until a phone connects or the minute is up. It plays two
+    drops when it opens, and three falling drops if nobody connected and
+    nothing is playing. The long press still pairs, and a press shorter than
+    50 ms is ignored as a bounce.
+  - `B` works over the mesh to one node, never to `*`. Its drops play after
+    its answer has gone, so the answer arrives in time. `k` with Bluetooth off
+    now answers `error reason=bt_off`, instead of calling into a stopped
+    stack. `N` gains `bt=`, whether a phone could find the node now.
+  - `test_mesh`: `B` is among the commands refused for `*`. It compiles, and
+    has not been run.
 - **The scripts ask through a WROVER** (2026-10-06). `mesh.ps1` and `ota.ps1`
   used to take the first board on USB, sorted as text, and that was the C3
   on COM10. Through the C3 or the S3 the stereo never answered while a stream

@@ -148,11 +148,12 @@
 #define MESH_NAME "sonoloco"
 #endif
 
-// Long-press-to-pair button. The devkit BOOT button on every board here, since
-// it is the only one that exists; set to -1 to disable the button entirely and
-// pair over serial only.
+// The node's one button: a short press opens Bluetooth for BT_WINDOW_MS on a
+// node that can be a server (D17), a long press pairs. The devkit BOOT button
+// on every board here, since it is the only one that exists; set to -1 to
+// disable the button entirely and do both over serial (`B`, `o`, `p`).
 //
-// It is a long press *while running*, never "hold it down at boot": BOOT is a
+// It is a press *while running*, never "hold it down at boot": BOOT is a
 // strapping pin, and holding it through a reset puts the chip into the ROM
 // download mode instead of into anything this firmware could react to.
 // Guarded, so -DMESH_PAIR_BUTTON_PIN=… in platformio.ini overrides it cleanly
@@ -169,6 +170,16 @@
 // How long the button must be held to start pairing. Long enough that it cannot
 // be confused with the reset-adjacent fumbling that BOOT normally sees.
 #define MESH_PAIR_HOLD_MS     3000
+
+// A short press: released before MESH_PAIR_HOLD_MS, and down at least this
+// long -- anything shorter is the contact bouncing, not a finger.
+#define BUTTON_PRESS_MIN_MS   50
+
+// How long a short press keeps Bluetooth on, so a phone can connect. A node
+// that has played as a client keeps it off otherwise (D17). A phone that
+// connects in time makes the node a server as always; if none does, Bluetooth
+// goes off again and the node rejoins whatever the mesh is playing.
+#define BT_WINDOW_MS          60000
 
 // How long a press stays live, at both ends.
 //

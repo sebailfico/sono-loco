@@ -23,7 +23,7 @@ DIY multi-room audio with ESP32 boards. No WiFi router, no central server, no co
                                             └──────────┘
 ```
 
-Next time, connect to Node B. Node B becomes the server. Node A and C become clients. Same hardware, same firmware, different runtime role.
+Next time, press Node B's button once and connect to it. Node B becomes the server. Node A and C become clients. Same hardware, same firmware, different runtime role. (The press is needed because Node B has played as a client: from then on it keeps Bluetooth off, which is what lets it join every stream the moment it starts. A short press turns Bluetooth on for 60 s. See D17.)
 
 ## State Machine
 
@@ -32,7 +32,7 @@ Every node runs the same three-state machine:
 ```
         ┌─────────────┐
         │  DISCOVERY  │  ← default on boot / after disconnect
-        │  BT visible │
+        │  BT visible*│
         │  ESP-NOW RX │
         └──────┬──────┘
                │
@@ -52,6 +52,12 @@ Every node runs the same three-state machine:
         │  DISCOVERY  │
         └─────────────┘
 ```
+
+\* On a node that can be a server: from boot, and after a phone disconnects.
+After 5 s of silence as a client it stays invisible, so it joins the next
+stream at once instead of 0.8 s late. A short press of its button makes it
+visible for 60 s (`B` on the console), and while that minute runs it stays out
+of CLIENT. A long press pairs, below. See D17.
 
 ## Audio Path
 
@@ -237,8 +243,11 @@ the 16-bit id it hashes to, and a client ignores every packet that is not its
 own — which is what keeps your neighbour's three speakers out of your stream.
 Name it with `g Casa Rossi` on the first node.
 
-Moving a node into a mesh afterwards needs no console and no typing — it is a
-**three-second hold of the BOOT button at each end**:
+The BOOT button does two things. A **short press** on a node that can be a
+server turns its Bluetooth on for 60 s, so a phone can connect (D17): two drops
+when it opens, the connect jingle when a phone does, and three falling drops if
+none did (or, if the mesh is playing, simply the music coming back). Moving a node into a mesh needs no console and no typing either — it
+is a **three-second hold of the BOOT button at each end**:
 
 1. Hold BOOT on the server whose mesh you are joining. It plays two drops and
    *offers* its mesh for 60 s.
@@ -387,7 +396,7 @@ anything (`m`, `M`, `c` are toggles).
 | Key | Effect |
 |-----|--------|
 | `?` | identify — firmware version, chip, PSRAM, MAC, mesh, mute, trim, whether BT and ESP-NOW are up |
-| `N` | where this node sits in the mesh: its mode, its source (`phone`, `bench`, or the MAC of the server it is locked to), and `rx`/`lost`/`und` in this stream. One line, so `@* N` lists the mesh |
+| `N` | where this node sits in the mesh: its mode, its source (`phone`, `bench`, or the MAC of the server it is locked to), `rx`/`lost`/`und` in this stream, and `bt=1` if a phone could find it now. One line, so `@* N` lists the mesh |
 | `@` | `@<name\|mac\|*> <command>`: run the command on that node, or on every node of this mesh, and print the answers. See above |
 | `v` | `v<dB>` this node's own volume trim, −40…+12; bare `v` reports. Applied at this node's output, after the mesh has its copy, so the phone's slider still moves every room and the trim sets where this room sits among them. Kept in NVS |
 | `m` | mute this node's speaker until reboot, its jingles and beeps included — the mesh and every timing are untouched. A toggle |
@@ -395,6 +404,7 @@ anything (`m`, `M`, `c` are toggles).
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once |
 | `p` | listen for 60 s and join the mesh that offers itself — the node half of pairing |
 | `o` | offer this mesh for 60 s — the server half |
+| `B` | Bluetooth on for 60 s, so a phone can connect: the short press of the button, on a node that can be a server (D17). Stops it playing as a client until a phone connects or the minute is up. Over the mesh to one node, never to `*` |
 | `c` | toggle client-only mode and reboot: the node never starts Bluetooth, which is what lets a WROOM be a mesh client. Kept in NVS |
 | `U` | bare: reboot into update mode. `U<name>` asks that node over the mesh — what `ota.ps1` sends |
 | `W` | `W<ssid>`, then the password on the next line: the home WiFi update mode joins. Bare `W` prints the SSID and whether a password is stored, never the password. This node's port only |
@@ -426,7 +436,7 @@ anything (`m`, `M`, `c` are toggles).
 | `f` | toggle forwarding to the mesh; local playback carries on |
 | `w` | stop WiFi until the next reboot — the WROOM case, on a WROVER |
 | `j` | play the connect jingle now, as a connection does, into the server's own output |
-| `k` | `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, as a headset reconnects to a phone; the PC's address is in `boards.local.md` |
+| `k` | `k<aa:bb:cc:dd:ee:ff>` dials a bonded A2DP source, as a headset reconnects to a phone; the PC's address is in `boards.local.md`. Needs Bluetooth on: `B` first on a node that has been a client |
 | `V` | `V<0..127>` the A2DP volume, as a phone's slider would set it: it moves every room |
 | `e` | `e<n>` coexistence preference, 0 WiFi, 1 Bluetooth, 2 balance (default). Made no measurable difference |
 

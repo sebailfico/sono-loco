@@ -248,6 +248,13 @@ static volatile bool     pairCandidateReady = false;
 // what makes pairing require a person at each end.
 static bool          offering        = false;
 static unsigned long offeringUntilMs = 0;
+
+// A short press opened Bluetooth on a node that keeps it off (D17), until
+// btWindowUntilMs or until a phone connects. While it is open the node stays
+// out of CLIENT, or the mesh's stream would switch Bluetooth straight off.
+static bool          btWindow        = false;
+static unsigned long btWindowUntilMs = 0;
+static bool          btWindowTone    = false;   // the two drops, on the next loop pass
 static unsigned long lastBeaconMs    = 0;
 
 // Packets dropped because they belong to somebody else's mesh. Worth counting
@@ -2049,7 +2056,6 @@ static void enterDiscovery() {
     txReady  = false;
     meshTxReset();
 
-    const bool wasClient = (currentMode == MODE_CLIENT);
 #ifdef ENABLE_BLUETOOTH
     // A server's own ring stops taking the stream before anything resets it;
     // the Bluetooth task may be inside a push, and a push takes microseconds.
@@ -2068,14 +2074,13 @@ static void enterDiscovery() {
     // that had stopped minutes earlier.
     resetRxState();
 
-    if (wasClient) {
-#ifdef ENABLE_BLUETOOTH
-        if (btAllowed()) {
-            delay(100);
-            startBluetooth();
-        }
-#endif
-    }
+    // Leaving CLIENT does not start Bluetooth again (D17). It used to, so a
+    // phone could find the node, and every stream after a pause of more than
+    // ESPNOW_SILENCE_TIMEOUT_MS then found it with Bluetooth to stop first: a
+    // WROVER came in 0.77-0.88 s after the other rooms, at every start
+    // (2026-10-06). A short press opens Bluetooth for a phone (btOpenWindow).
+    // Leaving SERVER never stopped it, so a phone that disconnects can still
+    // come back.
 
     currentMode = MODE_DISCOVERY;
     LOG_INFO("Free heap: " + String(ESP.getFreeHeap()) + " bytes");
@@ -2105,7 +2110,10 @@ static void enterClient() {
     LOG_INFO("=== CLIENT — ESP-NOW → I2S ===");
 
 #ifdef ENABLE_BLUETOOTH
-    if (btAllowed()) {
+    // Only when it is running: since D17 a node that has been a client before
+    // has it off already, and the 200 ms would make this room late for nothing.
+    const bool hadBt = btSinkStarted;
+    if (btAllowed() && hadBt) {
         LOG_INFO("Stopping BT to release I2S...");
         stopBluetooth();
         delay(200);
@@ -2119,7 +2127,7 @@ static void enterClient() {
     if (!outI2SActive) {
         LOG_ERROR("CLIENT I2S unavailable — returning to DISCOVERY");
 #ifdef ENABLE_BLUETOOTH
-        if (btAllowed()) startBluetooth();
+        if (btAllowed() && hadBt) startBluetooth();
 #endif
         // Back off before retrying. The server keeps broadcasting, so rxActive
         // is set again within milliseconds; without this the node would retry
@@ -2286,15 +2294,82 @@ static void meshServicePairing() {
     }
 }
 
+// ============================================================================
+// Bluetooth on demand — the short press (D17)
+// ============================================================================
+//
+// A node that can be a server starts Bluetooth at boot and keeps it on until
+// it first plays as a client. From then on it stays off: the node joins every
+// stream at once, and its radio is the mesh's alone. A short press, or `B`,
+// turns it on for BT_WINDOW_MS so a phone can connect.
+
+/** Bluetooth on for BT_WINDOW_MS. The short press, and `B`. */
+static void btOpenWindow() {
+#ifdef ENABLE_BLUETOOTH
+    if (!btAllowed()) {
+        DEBUG_SERIAL.println("[BT] error reason=no_bt (client-only, or bench mode)");
+        return;
+    }
+    if (currentMode == MODE_SERVER) {
+        DEBUG_SERIAL.println("[BT] error reason=serving (a phone is connected already)");
+        return;
+    }
+    // Stop playing first, as pairing does. The music stopping and then the two
+    // drops are what tell somebody with no console that the press registered,
+    // and a node that went on playing could not take the phone's stream: it is
+    // kept out of CLIENT until the window closes.
+    if (currentMode == MODE_CLIENT) enterDiscovery();
+    startBluetooth();   // does nothing if it is already running
+    btWindow        = true;
+    btWindowUntilMs = millis() + BT_WINDOW_MS;
+    DEBUG_SERIAL.printf("[BT] window open %lus: discoverable as %s\n",
+                        (unsigned long)(BT_WINDOW_MS / 1000), BT_DEVICE_NAME);
+    // Not here: `B` over the mesh answers with what this printed, and 1.2 s
+    // of drops inside the command would make the answer late for its asker.
+    btWindowTone = true;
+#else
+    DEBUG_SERIAL.println("[BT] error reason=no_bt (this chip has no Bluetooth Classic)");
+#endif
+}
+
 /**
- * The long press.
+ * Close the window: a phone connected, or none did in time. From loop(), in
+ * every mode, before the mode switch acts on btConnected.
+ */
+static void btServiceWindow() {
+#ifdef ENABLE_BLUETOOTH
+    if (!btWindow) return;
+    if (btWindowTone) {
+        btWindowTone = false;
+        meshPlayFeedback(MESH_FB_OPEN);   // two drops, as pairing's window opening
+    }
+    if (btConnected) {
+        btWindow = false;
+        DEBUG_SERIAL.println("[BT] window closed: connected");
+        return;
+    }
+    if ((long)(millis() - btWindowUntilMs) < 0) return;
+    btWindow = false;
+    stopBluetooth();
+    DEBUG_SERIAL.println("[BT] window closed: nobody connected, Bluetooth off");
+    // The three falling drops, unless the mesh is playing: then the music
+    // coming back says the same, and the 1.6 s tone would only make this room
+    // late joining it.
+    if (!rxActive) meshPlayFeedback(MESH_FB_CLOSED);
+#endif
+}
+
+/**
+ * The button: a short press opens Bluetooth (btOpenWindow), a long one pairs.
  *
  * A press *while running*, never a press held through a reset: the BOOT button
  * these boards use is a strapping pin, and holding it across a reset puts the
  * chip into the ROM download mode, where no firmware runs at all.
  *
- * No debounce beyond the hold itself. A bounce is milliseconds and interrupts
- * the press, which restarts a timer that has to reach three seconds.
+ * A short press acts on release, because only then is it known not to be the
+ * start of a long one; under BUTTON_PRESS_MIN_MS it is a bounce and does
+ * nothing. A long press acts as it reaches MESH_PAIR_HOLD_MS, and its release
+ * does nothing. A bounce in the middle of a long press restarts the timer.
  */
 static void meshServiceButton() {
 #if MESH_PAIR_BUTTON_PIN >= 0
@@ -2305,6 +2380,10 @@ static void meshServiceButton() {
     const bool down = (digitalRead(MESH_PAIR_BUTTON_PIN) == LOW);
 
     if (!down) {
+        if (held && !firedThisPress &&
+            (long)(millis() - heldSinceMs) >= (long)BUTTON_PRESS_MIN_MS) {
+            btOpenWindow();
+        }
         held           = false;
         firedThisPress = false;
         return;
@@ -2967,11 +3046,18 @@ static void benchNode() {
                  lockedSender[1], lockedSender[2], lockedSender[3], lockedSender[4],
                  lockedSender[5]);
     }
+    // bt: whether a phone could find this node now -- since D17 a node that
+    // has been a client has Bluetooth off until its button is pressed.
+#ifdef ENABLE_BLUETOOTH
+    const int btOn = btSinkStarted ? 1 : 0;
+#else
+    const int btOn = 0;
+#endif
     DEBUG_SERIAL.printf("[NODE] name=%s mac=%s fw=%s mode=%s src=%s rx=%lu lost=%lu und=%lu "
-                        "up=%lus trim=%d mute=%d\n",
+                        "up=%lus trim=%d mute=%d bt=%d\n",
                         ROOM_NAME, ownMac, FW_VERSION, modeStr, src, (unsigned long)rxCount,
                         (unsigned long)seqTracker.lost, (unsigned long)rxUnderrun,
-                        (unsigned long)(millis() / 1000), outTrimDb, outputMuted ? 1 : 0);
+                        (unsigned long)(millis() / 1000), outTrimDb, outputMuted ? 1 : 0, btOn);
 }
 
 // ============================================================================
@@ -3255,6 +3341,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *   g  print the mesh identity; `g<name>` sets it (persists, no reboot)
  *   p  listen for an offer and join that mesh (the speaker half of pairing)
  *   o  offer this mesh to a node that is listening (the server half)
+ *   B  Bluetooth on for BT_WINDOW_MS so a phone can connect: the short press (D17)
  *   m  mute this node's speaker until reboot (the mesh is untouched)
  *   M  toggle mixing a client's stereo to mono, for one speaker (persists)
  *   v  `v<dB>` this node's volume trim, applied at its own output (persists)
@@ -3492,6 +3579,7 @@ static void commandRun(char c, const char *arg, bool remote) {
         }
         case 'p': meshStartPairing();  break;
         case 'o': meshStartOffering(); break;
+        case 'B': btOpenWindow();      break;
         case 'U':
             if (arg[0] != '\0') {
                 otaStartRequest(arg);
@@ -3545,9 +3633,12 @@ static void commandRun(char c, const char *arg, bool remote) {
             // `k<aa:bb:cc:dd:ee:ff>`: dial an A2DP source that is already
             // bonded, the way a headset reconnects to a phone. What lets a
             // bench reflash a server without a person clicking Connect.
+            // With Bluetooth off (D17) there is nothing to dial with: `B` first.
             unsigned b[6];
-            if (sscanf(arg, "%x:%x:%x:%x:%x:%x",
-                       &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+            if (!btSinkStarted) {
+                DEBUG_SERIAL.println("[A2DP] error reason=bt_off (B opens Bluetooth first)");
+            } else if (sscanf(arg, "%x:%x:%x:%x:%x:%x",
+                              &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
                 esp_bd_addr_t addr;
                 for (int i = 0; i < 6; i++) addr[i] = (uint8_t)b[i];
                 DEBUG_SERIAL.printf("[A2DP] connect %s -> %d\n", arg,
@@ -3748,6 +3839,7 @@ void loop() {
     meshServiceOffer();
     meshServiceControl();
     otaServiceConfirm();
+    btServiceWindow();
 
     switch (currentMode) {
 
@@ -3758,7 +3850,9 @@ void loop() {
                 break;
             }
 #endif
-            if (rxActive && espnowActive &&
+            // Not while a short press holds Bluetooth open for a phone (D17):
+            // joining would switch it straight off again.
+            if (rxActive && espnowActive && !btWindow &&
                 (long)(millis() - clientRetryAfterMs) >= 0) {
                 enterClient();
             }

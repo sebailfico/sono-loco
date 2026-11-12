@@ -148,7 +148,11 @@ V40
 " 8
 ```
 
-If the dial times out, check that the PC's Bluetooth is switched on.
+If the dial times out, check that the PC's Bluetooth is switched on. If it
+answers `error reason=bt_off`, the board has played as a client since it booted
+and keeps Bluetooth off until asked (D17): send `B` first, which opens it for
+60 s, then `k`. A reboot (`n`) does the same with no window to run out, since a
+node starts with Bluetooth on. And `N` says which it is: `bt=1` or `bt=0`.
 
 **What the mute does not stop.** Windows makes the board its default output
 as it connects, so everything the PC plays — a video in a browser tab — goes

@@ -42,17 +42,27 @@ WROVERs' ports move with every replug: check the MAC (`?`) against
       with redundancy off (`D0`, so holes are frequent), one client unmuted
       at volume, `listen.py --client` alternating `z0` and `z1`, the clicks
       and dips counted. If it holds, `MESH_CONCEAL` 1.
-- [ ] **A node playing as a client cannot be connected to.** Its Bluetooth
-      is stopped in CLIENT, so a phone trying to take it over fails ("Couldn't
-      connect", 2026-09-28) until the current server stops and the node has
-      sat 5 s in silence. Keeping it connectable is measured, and costly:
-      a WROVER client whose Bluetooth kept page- and inquiry-scanning lost
-      4.7% of a streaming server's packets beside an S3 losing 2.0%
-      (2026-09-30), which is why CLIENT switches the controller off. A
-      slower scan (`esp_bt_gap_set_scan_mode` plus a long page-scan interval)
-      might be affordable; otherwise document the two-step. Separately,
-      Windows then also failed on the freshly rebooted node with nothing at
-      all reaching it, and later connected fine; not understood.
+- [ ] **The Bluetooth button (D17): run it on a WROVER.** Built for every
+      environment on 2026-10-09 and never pressed. A node that has played as
+      a client keeps Bluetooth off, and a short press opens it for 60 s. That
+      is now also how a phone takes over a node that is playing, which used to
+      fail ("Couldn't connect", 2026-09-28). On WROVER2, behind WROVER1
+      streaming, with the join logger of 2026-10-06 on the clients:
+      - After a stream and 5 s of silence, `N` says `bt=0`, and the next
+        stream starts on WROVER2 in the same millisecond as on the S3 and C3.
+      - A short press while it plays: the music stops, two drops, `bt=1`, and
+        the phone finds it. Connecting plays the jingle and makes it SERVER,
+        and the other clients stay with WROVER1 until it goes quiet.
+      - A short press and no phone: after 60 s Bluetooth goes off (`bt=0`) and
+        it rejoins the stream, with no falling drops. With nothing playing,
+        the falling drops.
+      - A long press still offers the mesh, and its release opens nothing.
+      - `@SonoLoco-WROVER2 B` answers in time, with the drops coming after the
+        answer, and `@* B` is refused. A bounce under 50 ms does nothing.
+      Still open from before: a slower Bluetooth scan might let a client stay
+      connectable while it plays, unmeasured (D17). And Windows once failed to
+      connect to a freshly rebooted node with nothing reaching it, then
+      connected fine later; not understood.
 
 ---
 
