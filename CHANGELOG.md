@@ -37,6 +37,9 @@ hash until it is reflashed.
 
 ## Unreleased
 
+- **The host suites run on the dev machine** (2026-11-12). MSYS2's gcc is on
+  `PATH`, and `pio test -e native` passes all six suites, 139 cases, D17's
+  `test_mesh` change included. Until now they ran only on a board.
 - **A node that has played as a client keeps Bluetooth off, and a short press
   opens it for a minute** (2026-10-09, D17). **Built for every environment, and
   not yet run on a board.** Leaving CLIENT no longer starts Bluetooth again, so
@@ -54,8 +57,8 @@ hash until it is reflashed.
     its answer has gone, so the answer arrives in time. `k` with Bluetooth off
     now answers `error reason=bt_off`, instead of calling into a stopped
     stack. `N` gains `bt=`, whether a phone could find the node now.
-  - `test_mesh`: `B` is among the commands refused for `*`. It compiles, and
-    has not been run.
+  - `test_mesh`: `B` is among the commands refused for `*`, and passes on the
+    host (2026-11-12).
 - **The scripts ask through a WROVER** (2026-10-06). `mesh.ps1` and `ota.ps1`
   used to take the first board on USB, sorted as text, and that was the C3
   on COM10. Through the C3 or the S3 the stereo never answered while a stream

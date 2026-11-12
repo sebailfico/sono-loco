@@ -303,17 +303,19 @@ not reproduce. See D10.
 
 ### Tests
 
-The pure logic in `lib/` — five suites, `test_jitter`, `test_adpcm`,
-`test_mesh`, `test_drift` and `test_sync` — runs on the host, no board needed:
+The pure logic in `lib/` — six suites, `test_jitter`, `test_adpcm`,
+`test_mesh`, `test_drift`, `test_sync` and `test_tones` — runs on the host, no
+board needed:
 
 ```bash
 pio test -e native
 ```
 
-That needs a host compiler, which is *not* installed on the dev machine yet
-(`TODO.md`). Until it is, the same tests run on any board that is plugged in:
-`pio test -e esp32wrover2 -f test_jitter`. The board is left running the test
-image, so reflash it afterwards.
+That needs a host compiler on `PATH`. On Windows: `winget install -e --id
+MSYS2.MSYS2`, then `pacman -S mingw-w64-ucrt-x86_64-gcc` in an MSYS2 shell,
+then `C:\msys64\ucrt64\bin` on `PATH`. The same tests also run on any board
+that is plugged in, `pio test -e esp32wrover2 -f test_jitter`, which leaves the
+board running the test image, so reflash it afterwards.
 
 To test the **mesh** — real boards, real radio, silent:
 

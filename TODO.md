@@ -238,11 +238,6 @@ polish.
 
 ### Housekeeping
 
-- [ ] **Install a host compiler** so `pio test -e native` can run — there is no
-      gcc/clang/MSVC on this machine, only the PlatformIO cross-toolchains.
-      `winget install -e --id MSYS2.MSYS2` then `pacman -S
-      mingw-w64-ucrt-x86_64-gcc`, and put `C:\msys64\ucrt64\bin` on PATH.
-      Low priority: the tests run on a board.
 - [ ] **Set `board_build.arduino.memory_type = qio_opi` for the S3** so its 8 MB
       embedded PSRAM is actually usable. `esptool` reports the PSRAM, the
       firmware reports `psram=0`. Nothing needs it yet, so this is only about the

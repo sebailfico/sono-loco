@@ -38,8 +38,8 @@ twice.
 ## Working on the firmware
 
 - Pure logic belongs in `esp32-code/lib/`, where it is tested on the host
-  (`pio test -e native`, or on a board, e.g. `pio test -e esp32wrover2 -f
-  test_jitter` — there is no host compiler on this machine yet). Code that
+  (`pio test -e native`, with MSYS2's gcc on `PATH`; or on a board, e.g.
+  `pio test -e esp32wrover2 -f test_jitter`). Code that
   touches I2S, the radio or A2DP stays
   in `main.cpp`. Don't widen that split into a general refactor.
 - New tuneable constants go in `include/config.h`, never inline. Per-node values
