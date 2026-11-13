@@ -61,7 +61,10 @@ function nodeCard(n){
  const sw=document.createElement('div');sw.className='row';
  const mute=document.createElement('input');mute.type='checkbox';mute.checked=n.mute==='1';
  const mono=document.createElement('input');mono.type='checkbox';mono.checked=n.mono==='1';
- const l1=document.createElement('label');l1.append(mute,'Mute');const l2=document.createElement('label');l2.append(mono,'Mono (one speaker)');sw.append(l1,l2);
+ const l1=document.createElement('label');l1.append(mute,'Mute');const l2=document.createElement('label');l2.append(mono,'Mono (one speaker)');
+ // Which box is this: two ding-dongs from that speaker, over its music and through a mute.
+ const ring=document.createElement('button');ring.className='q';ring.textContent='Ring';ring.style.marginLeft='auto';
+ sw.append(l1,l2,ring);
  const st=document.createElement('div');st.className='st';
  d.append(head,info,trimRow,sw,st);
  // A control shows what the node said: put back as it was when nobody answered, or the node refused.
@@ -72,6 +75,7 @@ function nodeCard(n){
  mute.onchange=()=>set('m'+(mute.checked?1:0),f=>{if(f.mute)n.mute=f.mute;mute.checked=n.mute==='1'},()=>{mute.checked=n.mute==='1'});
  mono.onchange=()=>set('M'+(mono.checked?1:0),f=>{if(f.mono)n.mono=f.mono;mono.checked=n.mono==='1'},()=>{mono.checked=n.mono==='1'});
  save.onclick=()=>set('I'+nm.value.trim(),f=>{if(f.name)n.name=f.name;nm.value=n.name},()=>{nm.value=n.name});
+ ring.onclick=()=>set('h',()=>{},()=>{});
  return d}
 async function refresh(){$('meshSt').className='st';$('meshSt').textContent='Asking the mesh…';
  try{const t=await post('/api/cmd','@* N');const list=answers(t).map(a=>a.line).filter(l=>l.startsWith('[NODE]')).map(fields);

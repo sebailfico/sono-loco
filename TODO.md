@@ -248,7 +248,11 @@ polish.
         DNS); if one does not, 192.168.1.1 by hand. The phone gets an
         address in 192.168.1.x from the node.
       - The page lists every node (`@* N`); trim, mute, mono and rename on a
-        client each answer, and the room hears it. A node switched off shows
+        client each answer, and the room hears it.
+      - Ring (`h`): two ding-dongs on that node only — over its music while it
+        plays (mixed in after trim and mute), on its own in DISCOVERY, and
+        through a mute. Its `und`/`dry` unchanged by it, and the bench
+        regression unchanged with no ring asked: the mix is in the output path. A node switched off shows
         "no answer, after retries" and its control goes back.
       - **The mesh while a phone is on it**: a 600 s bench run with the S3 as a
         client and a phone joined to its network, against the latest bench

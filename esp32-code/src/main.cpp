@@ -467,11 +467,11 @@ static const DropSound::Timbre DROP_TIMBRE = {
  * Before, a muted server played its connect jingle as the PC dialled in,
  * during a run meant to be silent (2026-10-03).
  */
-static void playDrops(const DropSound::Note *notes, int count) {
+static void playDrops(const DropSound::Note *notes, int count, bool throughMute = false) {
     DropSound     sound;
     int16_t       mono[256];
     int16_t       stereo[256 * 2];
-    const int32_t amp = outputMuted ? 0 : TONE_AMPLITUDE;
+    const int32_t amp = (outputMuted && !throughMute) ? 0 : TONE_AMPLITUDE;
     int           n;
 
     sound.begin(notes, count, DROP_TIMBRE, BT_SAMPLE_RATE);
@@ -511,6 +511,22 @@ void playDisconnectedSound() {    // nothing heard: three falling
     };
     playDrops(notes, sizeof(notes) / sizeof(notes[0]));
 }
+
+// "Which box is this?" (`h`, D19): two ding-dongs, unlike anything else a
+// node says, so it cannot be taken for a window opening or a stream joining.
+static const DropSound::Note RING_NOTES[] = {
+    {0,                   DROP_NOTE_HIGH, 0.9, 1.0},
+    {1.5 * DROP_GAP_MS,   DROP_NOTE_MID,  0.9, 1.4},
+    {4.0 * DROP_GAP_MS,   DROP_NOTE_HIGH, 0.9, 1.0},
+    {5.5 * DROP_GAP_MS,   DROP_NOTE_MID,  0.9, 1.8},
+};
+static const int RING_NOTE_COUNT = sizeof(RING_NOTES) / sizeof(RING_NOTES[0]);
+
+// Mixed into the output while the node plays (driveRingI2S), so the room keeps
+// its music and the ring rides on top; played on its own in DISCOVERY.
+static DropSound     ringSound;
+static volatile bool ringAsked   = false;   // `h` ran; loop() starts it
+static bool          ringPlaying = false;   // being mixed into the output
 
 void playTickSound() {            // a held button has reached the next range: one drop
     static const DropSound::Note notes[] = {
@@ -2281,6 +2297,19 @@ static void driveRingI2S() {
         }
     }
     if (!outputMuted) applyGainQ12(stereo, CLIENT_BATCH * 2, outTrimQ12);
+    if (ringPlaying) {
+        // The ring (`h`), on top of whatever plays, after the mute and the
+        // trim: it is asked for to be heard, on a muted node or a quiet one.
+        int16_t   ring[CLIENT_BATCH];
+        const int n = ringSound.render(ring, CLIENT_BATCH, TONE_AMPLITUDE);
+        for (int i = 0; i < n; i++) {
+            for (int c = 0; c < 2; c++) {
+                const int32_t v = (int32_t)stereo[2 * i + c] + ring[i];
+                stereo[2 * i + c] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+            }
+        }
+        if (n < CLIENT_BATCH) ringPlaying = false;
+    }
 
     // Blocking with a short timeout paces this loop to the I2S sample clock.
     const size_t bw = outWrite(stereo, BATCH_BYTES);
@@ -4193,6 +4222,24 @@ static void configClose(const char *why) {
     meshPlayFeedback(MESH_FB_CLOSED);
 }
 
+/**
+ * The ring asked for by `h`. Started here, not in the command, so an answer
+ * over the mesh is not late by the length of the sound. Mixed into the output
+ * of a node that is playing; on its own in DISCOVERY.
+ */
+static void ringService() {
+    if (!ringAsked) return;
+    ringAsked = false;
+    if (outI2SActive) {
+        ringSound.begin(RING_NOTES, RING_NOTE_COUNT, DROP_TIMBRE, CLIENT_SAMPLE_RATE);
+        ringPlaying = true;
+    } else if (currentMode == MODE_DISCOVERY) {
+        initI2SForTones();
+        playDrops(RING_NOTES, RING_NOTE_COUNT, true);
+        deinitI2SForTones();
+    }
+}
+
 /** From loop(): the page's commands, its password restart, and the window's end. */
 static void configService() {
     // The page's command: start it, and finish it once no question it asked
@@ -4324,6 +4371,7 @@ static size_t benchReadLine(char *out, size_t outSize) {
  *      This node's port only: over the mesh the password would be broadcast
  *   F  toggle front-end mode and reboot (persists): Bluetooth only, handed to
  *      a node over the link (D18). Classic boards only
+ *   h  ring: two ding-dongs from this node's speaker, through a mute (D19)
  *   I  `I<name>` this node's name, the Bluetooth one too (persists); bare reports
  *   C  open the setup network for CONFIG_WINDOW_MS, `C0` closes it (D19)
  *   m, M  also `m1`/`m0` and `M1`/`M0`, which set rather than toggle
@@ -4576,6 +4624,17 @@ static void commandRun(char c, const char *arg, bool remote) {
             if (arg[0] == '0') configClose("C0");
             else               configOpen(CONFIG_WINDOW_MS);
             if (!cfgOpen) DEBUG_SERIAL.println("[CONFIG] closed");
+            break;
+        case 'h':
+            // "Which box is this?" (D19): two ding-dongs from this node's
+            // speaker, over its music and through a mute. Not from a bench
+            // source, which has no speaker and a tone to keep in time.
+            if (frontEnd || (currentMode == MODE_SERVER && !outI2SActive)) {
+                DEBUG_SERIAL.println("[OUT] error reason=no_speaker");
+                break;
+            }
+            ringAsked = true;
+            DEBUG_SERIAL.println("[OUT] ring=1");
             break;
         case 'I':
             // `I<name>`: this node's name, kept in NVS (D19). Bare reports.
@@ -4929,6 +4988,7 @@ void loop() {
     btServiceWindow();
     linkServiceNode();
     configService();
+    ringService();
 
     switch (currentMode) {
 

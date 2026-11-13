@@ -1124,6 +1124,14 @@ control whose node did not answer goes back to what it was. So the page grows
 with the commands, and an app could later be a nicer face on the same
 `/api/cmd`.
 
+**Which box is which.** A list of names is no use until you know which name is
+the speaker in front of you, so the page has a Ring button by each one: `h`
+plays two ding-dongs, a pattern no other sound uses. While a node plays they
+are mixed into its output, after the trim and the mute, rather than stopping
+the music the way the other sounds would hold `loop()`: a ring is asked for to
+be heard, and the room should not lose its stream for it. When idle it plays on
+its own. It is the one sound a muted node makes.
+
 **Why the answer is the read-back.** D16 had no acknowledgement. Now a
 question to one node is asked again when no answer comes, if asking twice
 means the same (D16's amendment), and every setter prints the value it left

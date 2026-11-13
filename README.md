@@ -286,7 +286,8 @@ exactly like being out of range — `mesh=` on the identify line and `fgn=`
 
 Every node can open a WiFi network of its own, `<room name>-setup`, with a
 page that lists the mesh and sets each speaker's name, trim, mute and mono
-(D19). A **10-15 s hold** opens it for ten minutes (`C` on the console, `C0`
+(D19). **Ring** next to a speaker makes that one play two ding-dongs, so you
+know which box is which before you name it. A **10-15 s hold** opens it for ten minutes (`C` on the console, `C0`
 closes it), and a node nobody has set up opens it by itself for five minutes
 when it is plugged in — unless its own chip runs Bluetooth, a WROVER: there the
 hold opens it, and Bluetooth is paused while it is open. A node serving a phone
@@ -448,6 +449,7 @@ anything (bare `m`, `M` and `c` are toggles; `m1`, `M0` and the like set).
 | `v` | `v<dB>` this node's own volume trim, −40…+12; bare `v` reports. Applied at this node's output, after the mesh has its copy, so the phone's slider still moves every room and the trim sets where this room sits among them. Kept in NVS |
 | `m` | mute this node's speaker until reboot, its jingles and beeps included — the mesh and every timing are untouched. `m1` mutes, `m0` unmutes, bare `m` toggles |
 | `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS. `M1`/`M0` set, bare `M` toggles |
+| `h` | ring: two ding-dongs from this node's speaker, to find which box it is — over its music while it plays, on its own when idle, and through a mute or a low trim (D19). The setup page's Ring button |
 | `I` | `I<name>` this node's name — what `@`, the setup page and (from its next start) Bluetooth know it by; bare `I` reports. Kept in NVS; the build's `ROOM_NAME` until then. 1-31 characters, no spaces |
 | `C` | open the setup network for 10 minutes, or keep it open; `C0` closes it (D19). Over the mesh to one node, never to `*` |
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once |

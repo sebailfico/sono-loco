@@ -53,6 +53,10 @@ hash until it is reflashed.
     10 s in DISCOVERY. **Pairing now acts on release**, not as the hold reaches
     3 s. An S3 or C3 without a front end now listens when paired rather than
     offering.
+  - The network is at 192.168.1.1 (`CONFIG_AP_IP`), not the driver's 4.1.
+  - `h` rings a node — two ding-dongs, mixed over its music after trim and
+    mute, or on their own when idle — and the page has a Ring button by each
+    speaker, to tell the boxes apart before naming them.
   - `I<name>`: the room name in NVS, the Bluetooth name from its next start
     (D8 amended). `m1`/`m0` and `M1`/`M0` set rather than toggle. `N` gains
     `mono=`, `?` gains `cfg=`.
