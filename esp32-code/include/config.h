@@ -344,6 +344,11 @@
 #define CONFIG_IDLE_MS          300000   // ...and at least this long after the last request
 #define CONFIG_FIRST_WINDOW_MS  300000   // the first power-on: 5 minutes
 #define CONFIG_MAX_CLIENTS      2
+// The node's address on its own network, where a phone finds the page if it
+// does not open by itself. A /24 around it is handed out to phones. Should the
+// node ever join a home network on 192.168.1.x as well (TODO.md), the two
+// would overlap and this has to move.
+#define CONFIG_AP_IP            "192.168.1.1"
 #define CONFIG_AP_PASS_MIN      8        // WPA2's own limits
 #define CONFIG_AP_PASS_MAX      63
 // What a page's command may print back: `@* N` on a mesh of a dozen nodes.

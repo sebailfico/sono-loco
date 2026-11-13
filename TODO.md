@@ -245,7 +245,8 @@ polish.
       - The S3, freshly flashed with no password: `[CONFIG] open ... auth=open`
         at boot, two drops, and `SonoLoco-S3-setup` in a phone's list. Joining
         it opens the page by itself on Android and on an iPhone (the captive
-        DNS); if one does not, 192.168.4.1 by hand.
+        DNS); if one does not, 192.168.1.1 by hand. The phone gets an
+        address in 192.168.1.x from the node.
       - The page lists every node (`@* N`); trim, mute, mono and rename on a
         client each answer, and the room hears it. A node switched off shows
         "no answer, after retries" and its control goes back.

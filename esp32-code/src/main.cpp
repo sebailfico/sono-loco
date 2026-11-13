@@ -4106,7 +4106,20 @@ static void configOpen(uint32_t windowMs) {
     }
 #endif
     if (cfgCmdOut == nullptr) cfgCmdOut = (char *)malloc(CONFIG_REPLY_MAX);
-    if (cfgApNetif == nullptr) cfgApNetif = esp_netif_create_default_wifi_ap();
+    if (cfgApNetif == nullptr) {
+        cfgApNetif = esp_netif_create_default_wifi_ap();
+        // CONFIG_AP_IP rather than the driver's 192.168.4.1. The DHCP server
+        // has to be stopped to move it, and hands out the addresses after it.
+        if (cfgApNetif != nullptr) {
+            esp_netif_ip_info_t ip = {};
+            ip.ip.addr      = esp_ip4addr_aton(CONFIG_AP_IP);
+            ip.gw.addr      = ip.ip.addr;
+            ip.netmask.addr = esp_ip4addr_aton("255.255.255.0");
+            esp_netif_dhcps_stop(cfgApNetif);
+            esp_netif_set_ip_info(cfgApNetif, &ip);
+            esp_netif_dhcps_start(cfgApNetif);
+        }
+    }
     if (cfgCmdOut == nullptr || cfgApNetif == nullptr) {
         DEBUG_SERIAL.println("[CONFIG] error reason=no_memory");
         return;

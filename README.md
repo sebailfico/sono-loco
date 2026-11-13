@@ -292,7 +292,7 @@ when it is plugged in — unless its own chip runs Bluetooth, a WROVER: there th
 hold opens it, and Bluetooth is paused while it is open. A node serving a phone
 with its own Bluetooth refuses; a two-chip server (D18) does not.
 
-Join the network and the page opens by itself (or browse to 192.168.4.1). It is
+Join the network and the page opens by itself (or browse to 192.168.1.1). It is
 open until you set a password on the page; it restarts with WPA2 then, and the
 home WiFi for update mode (D15) can be stored from it only after that. It is on
 the mesh's own channel, so the node goes on playing and asking the mesh while a
