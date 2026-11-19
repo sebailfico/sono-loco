@@ -162,6 +162,12 @@
 #define TONE_AMPLITUDE   500
 #endif
 
+// DMA buffers of 256 frames for a sound played on its own (initI2SForTones):
+// 4 KB in all, 23 ms ahead of the speaker, plenty for drops rendered as they
+// play. It was 8, and 8 KB of DMA-capable RAM was more than a WROVER with the
+// setup network open had left: a ring there rebooted it (2026-11-17).
+#define TONE_DMA_BUF_COUNT  4
+
 // Each sound is a few water drops through an echo (lib/tones): a sine that
 // glides up into its note with a glassy shimmer on the attack, then repeats,
 // quieter, DROP_ECHO_MS later. Chosen by ear on 2026-10-06 in a browser
@@ -344,6 +350,9 @@
 #define CONFIG_IDLE_MS          300000   // ...and at least this long after the last request
 #define CONFIG_FIRST_WINDOW_MS  300000   // the first power-on: 5 minutes
 #define CONFIG_MAX_CLIENTS      2
+// How long after a password is set the network restarts with it: long enough
+// for the page to say what to join next before the phone is dropped.
+#define CONFIG_REOPEN_DELAY_MS  3000
 // The node's address on its own network, where a phone finds the page if it
 // does not open by itself. A /24 around it is handed out to phones. Should the
 // node ever join a home network on 192.168.1.x as well (TODO.md), the two

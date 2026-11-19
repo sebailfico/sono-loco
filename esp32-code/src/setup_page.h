@@ -27,15 +27,15 @@ button.q{background:none;color:var(--acc)}.st{font-size:12px;color:var(--dim);mi
 input{accent-color:var(--acc)}label{display:flex;gap:6px;align-items:center}.name{font-weight:600}.mono{font:12px ui-monospace,monospace;color:var(--dim)}
 </style></head><body><main>
 <h1 id="title">SonoLoco</h1><div class="sub" id="who"></div>
-<div class="card" id="lock" hidden><h2>Protect this setup network</h2>
-<div class="sub">Anyone nearby can join it until it has a password. Set one (8 to 63 characters): the network restarts with it, and you join again with the password.</div>
-<div class="row"><input id="appass" type="password" autocomplete="new-password" placeholder="New password"><button id="appassGo">Set</button></div><div class="st" id="appassSt"></div></div>
-<div class="card"><div class="row" style="justify-content:space-between"><h2>Speakers</h2><button class="q" id="refresh">Refresh</button></div>
+<div class="card" id="lock" hidden><h2>First, a password for this network</h2>
+<div class="sub">Anyone nearby can join it until it has one, so nothing else is here until then. 8 to 63 characters. The network then restarts with it, and you join it again with the password.</div>
+<div class="row"><input id="appass" type="password" autocomplete="new-password" placeholder="New password"><button class="q" id="appassShow" type="button">Show</button><button id="appassGo">Set</button></div><div class="st" id="appassSt"></div></div>
+<div class="card" id="meshCard" hidden><div class="row" style="justify-content:space-between"><h2>Speakers</h2><button class="q" id="refresh">Refresh</button></div>
 <div class="st" id="meshSt">Asking the mesh&hellip;</div><div id="nodes"></div></div>
 <div class="card" id="wifiCard" hidden><h2>Home WiFi, for updates</h2>
 <div class="sub">This node uses it only to take new firmware (update mode). Stored here, on this node.</div>
 <div class="row"><input id="ssid" type="text" placeholder="Network name"></div>
-<div class="row"><input id="wpass" type="password" placeholder="Password"><button id="wifiGo">Save</button></div><div class="st" id="wifiSt"></div></div>
+<div class="row"><input id="wpass" type="password" placeholder="Password"><button class="q" id="wpassShow" type="button">Show</button><button id="wifiGo">Save</button></div><div class="st" id="wifiSt"></div></div>
 <div class="row"><button class="q" id="close">Close the setup network</button></div>
 </main><script>
 const $=id=>document.getElementById(id);
@@ -82,15 +82,37 @@ async function refresh(){$('meshSt').className='st';$('meshSt').textContent='Ask
   const box=$('nodes');box.replaceChildren(...list.map(nodeCard));
   $('meshSt').textContent=list.length?list.length+' answered. A speaker that is off, out of range or in another mesh does not.':'Nobody answered.'}
  catch(e){$('meshSt').className='st err';$('meshSt').textContent=String(e.message||e)}}
-async function info(){try{const r=await fetch('/api/info');const i=await r.json();$('title').textContent=i.name;
- $('who').textContent='Mesh '+i.meshname+' ('+i.mesh+'), firmware '+i.fw;$('lock').hidden=i.protected;$('wifiCard').hidden=!i.protected;
- if(i.wifi)$('ssid').value=i.wifi}catch(e){}}
+let ssid='this setup network';
+// Open: the password and nothing else, and the node refuses the rest too. Protected: everything.
+async function info(){try{const r=await fetch('/api/info');const i=await r.json();$('title').textContent=i.name;ssid=i.name+'-setup';
+ $('who').textContent='Mesh '+i.meshname+' ('+i.mesh+'), firmware '+i.fw;
+ $('lock').hidden=i.protected;$('meshCard').hidden=!i.protected;$('wifiCard').hidden=!i.protected;
+ if(i.wifi)$('ssid').value=i.wifi;if(i.protected)refresh()}catch(e){}}
+function reveal(input,btn){btn.onclick=()=>{const hid=$(input).type==='password';$(input).type=hid?'text':'password';btn.textContent=hid?'Hide':'Show'}}
+reveal('appass',$('appassShow'));reveal('wpass',$('wpassShow'));
 async function form(id,url,body,done){const s=$(id);s.className='st';s.textContent='…';
  try{s.textContent=(await post(url,body)).trim();if(done)done()}catch(e){s.className='st err';s.textContent=String(e.message||e)}}
-$('appassGo').onclick=()=>form('appassSt','/api/appass',$('appass').value,()=>$('appass').value='');
-$('wifiGo').onclick=()=>form('wifiSt','/api/wifi',$('ssid').value+'\n'+$('wpass').value,()=>$('wpass').value='');
+// After Set: the network restarts with the password and drops the phone. Count down to that, then
+// ask the node every 2 s until it answers -- the phone back on, with the password -- and reload.
+// A blind reload would land on the browser's own error page while the phone is off the network.
+function el(tag,cls,text){return Object.assign(document.createElement(tag),{className:cls,textContent:text})}
+async function backOn(){try{const c=new AbortController();setTimeout(()=>c.abort(),1500);
+ const r=await fetch('/api/info',{cache:'no-store',signal:c.signal});return r.ok&&(await r.json()).protected}catch(e){return false}}
+function afterPassword(ms){const now=el('div','st','');
+ $('lock').replaceChildren(el('h2','','Password set'),
+  el('div','sub','When '+ssid+' restarts, your phone is dropped from it and may go back to its usual WiFi. Open the WiFi settings and join '+ssid+' again, with the password.'),now);
+ const end=Date.now()+ms;
+ const tick=setInterval(()=>{const left=Math.ceil((end-Date.now())/1000);
+  if(left>0){now.textContent='Restarting in '+left+' s…';return}
+  clearInterval(tick);now.textContent='Restarted. Waiting for you to join it again — this page reloads by itself.';
+  const poll=setInterval(async()=>{if(await backOn()){clearInterval(poll);now.textContent='Back on. Reloading…';location.reload()}},2000)},250)}
+$('appassGo').onclick=async()=>{const s=$('appassSt');s.className='st';s.textContent='…';
+ try{const t=await post('/api/appass',$('appass').value);$('appass').value='';
+  const m=t.match(/restart_ms=(\d+)/);afterPassword(m?+m[1]:3000)}
+ catch(e){s.className='st err';s.textContent=String(e.message||e)}};
+$('wifiGo').onclick=()=>form('wifiSt','/api/wifi',$('ssid').value+'\n'+$('wpass').value,()=>{$('wpass').value='';$('wpass').type='password';$('wpassShow').textContent='Show'});
 $('close').onclick=async()=>{try{await post('/api/close','')}catch(e){}document.body.textContent='The setup network is closing. You can leave this page.'};
-$('refresh').onclick=refresh;info();refresh();
+$('refresh').onclick=refresh;info();
 </script></body></html>
 )PAGE";
 

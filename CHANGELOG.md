@@ -67,6 +67,17 @@ hash until it is reflashed.
   - The page's script was run in a browser against a fake node: every control,
     a refused rename, a node that never answers, the password and WiFi forms.
   - The classic image is 15 KB larger, with 360 bytes more static RAM.
+  - First run on boards, 2026-11-17 (WROVER1, the stereo WROOM): the commands
+    over the mesh behaved as designed. **Ring rebooted the WROVER**: with the
+    network open its tone driver could not get 8 KB of DMA, and the sound was
+    written into a driver that was never installed. A tone now plays only if
+    its driver installed, takes 4 KB (`TONE_DMA_BUF_COUNT`), and the page's
+    reply buffer is in PSRAM; the WROVER then rang with the network open.
+  - On an open network the page shows the password form and nothing else, and
+    the node refuses every command until a password is set. Both password
+    fields have Show/Hide. After Set the page counts down to the restart
+    (`restart_ms=` from the node, `CONFIG_REOPEN_DELAY_MS` 3 s), then asks the
+    node every 2 s and reloads once the phone is back on with the password.
 - **A two-chip server: Bluetooth on a WROOM, the mesh on any node** (2026-11-12,
   D18). **Built for every environment, and not yet run on a board**; on the
   `two-chip-server` branch. A classic board in front-end mode (`F`, NVS) runs

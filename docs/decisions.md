@@ -1153,7 +1153,9 @@ a phone could then not find for five minutes. A window stays open ten minutes,
 and five after the page's last request.
 
 **Security.** Open until somebody sets a password on the page; WPA2 from then
-on. First come, first served: whoever is on the open network first sets it,
+on. While it is open, the page shows the password form and nothing else, and
+the node refuses every other request: anybody in range could be the one on
+it. First come, first served: whoever is on the open network first sets it,
 which needs somebody within WiFi range in the five minutes after a fresh node
 is plugged in. The home WiFi's password is accepted only once the network has
 a password, so it never crosses the air in the clear. Mesh commands themselves

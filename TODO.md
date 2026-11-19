@@ -241,7 +241,12 @@ polish.
       on 2026-11-12, on top of `two-chip-server`; never on a board. The page's
       script was run in a browser against a fake node (every control, a refused
       rename, a node that never answers, the password and WiFi forms), the
-      firmware not at all. On a board, in order:
+      firmware not at all. First run, 2026-11-17, WROVER1 and the stereo
+      WROOM: every command over the mesh as designed (read-back, `m1` twice,
+      rename, retries, `*` refusals, one-node answers in 0.33 s); the page
+      listed both nodes; Ring rebooted the WROVER (`docs/gotchas.md`), fixed.
+      Still to see on a phone: the password flow end to end, and Ring. On a
+      board, in order:
       - The S3, freshly flashed with no password: `[CONFIG] open ... auth=open`
         at boot, two drops, and `SonoLoco-S3-setup` in a phone's list. Joining
         it opens the page by itself on Android and on an iPhone (the captive

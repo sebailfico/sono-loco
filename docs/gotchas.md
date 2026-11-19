@@ -124,6 +124,13 @@ carrying it out.
   `(long)(millis() - then) > TIMEOUT` — as `clientRetryAfterMs` already does.
   Comparisons against `loop()`'s own bookkeeping are safe, because only one task
   writes them.
+- **A tone into an I2S driver that failed to install is a panic.** The sound
+  code installed its driver, ignored the result and wrote to it; on a WROVER
+  with the setup network open and Bluetooth's memory kept, the 8 KB of DMA it
+  asked for was not there (`ESP_ERR_NO_MEM`), and the next write rebooted the
+  node, taking the network down with it (2026-11-17). `initI2SForTones()`
+  returns whether it worked and nothing plays without it; tones take 4 KB of
+  DMA now (`TONE_DMA_BUF_COUNT`).
 - **Bench mode's flag must be `RTC_NOINIT_ATTR`, not `RTC_DATA_ATTR`.**
   `.rtc.data` is re-initialised from the image on every boot that runs the
   bootloader, so the flag reads back as zero and the node reboots into normal

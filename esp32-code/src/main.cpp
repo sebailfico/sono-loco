@@ -535,7 +535,19 @@ void playTickSound() {            // a held button has reached the next range: o
     playDrops(notes, sizeof(notes) / sizeof(notes[0]));
 }
 
-void initI2SForTones() {
+/**
+ * The output driver for a sound played on its own, outside a stream.
+ *
+ * Returns false when it could not be installed -- and then nothing may be
+ * written to it: a write, or the zeroing in deinitI2SForTones(), into a driver
+ * that does not exist is a LoadProhibited panic. A WROVER with the setup
+ * network open and its Bluetooth's memory kept has about 20 KB of internal RAM
+ * left, and a ring there rebooted the node, taking the network with it
+ * (2026-11-17).
+ */
+static bool tonesI2S = false;
+
+bool initI2SForTones() {
     i2s_config_t cfg = {
         .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate          = BT_SAMPLE_RATE,
@@ -543,7 +555,7 @@ void initI2SForTones() {
         .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count        = 8,
+        .dma_buf_count        = TONE_DMA_BUF_COUNT,
         .dma_buf_len          = 256,
         .use_apll             = false,
         .tx_desc_auto_clear   = true
@@ -557,16 +569,22 @@ void initI2SForTones() {
     };
     esp_err_t err = i2s_driver_install(I2S_NUM_0, &cfg, 0, nullptr);
     if (err != ESP_OK) {
-        LOG_ERROR("I2S install (tones) failed: " + String(esp_err_to_name(err)));
-        return;
+        LOG_ERROR("I2S install (tones) failed: " + String(esp_err_to_name(err)) + ", DMA-capable free " +
+                  String(heap_caps_get_free_size(MALLOC_CAP_DMA)) + ", largest " +
+                  String(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)));
+        return false;
     }
     i2s_set_pin(I2S_NUM_0, &pins);
     i2s_zero_dma_buffer(I2S_NUM_0);
+    tonesI2S = true;
+    return true;
 }
 
 void deinitI2SForTones() {
+    if (!tonesI2S) return;
     i2s_zero_dma_buffer(I2S_NUM_0);
     i2s_driver_uninstall(I2S_NUM_0);
+    tonesI2S = false;
 }
 
 // ============================================================================
@@ -2527,7 +2545,7 @@ static void meshPlayFeedback(MeshFeedback what) {
     // installed only in CLIENT and SERVER. The check stays, because installing
     // a second driver over a first fails and the tone would be lost.
     const bool someoneElseOwnsI2S = outI2SActive;
-    if (!someoneElseOwnsI2S) initI2SForTones();
+    if (!someoneElseOwnsI2S && !initI2SForTones()) return;   // no driver, no sound
 
     switch (what) {
         case MESH_FB_OPEN:   playStartupSound();      break;   // two beeps: I am listening
@@ -4001,6 +4019,9 @@ static esp_err_t cfgHttpInfo(httpd_req_t *req) {
 
 static esp_err_t cfgHttpCmd(httpd_req_t *req) {
     cfgTouch();
+    // An open network is for setting its password and nothing else: until it
+    // has one, anybody in range could be the one on the page.
+    if (!cfgSecured) return cfgSend(req, "403 Forbidden", "set a password for this network first\n");
     char line[sizeof(cfgCmdLine)];
     if (!cfgBody(req, line, sizeof(line))) return cfgSend(req, "400 Bad Request", "too long\n");
     // Only questions to the mesh: `@<target> <command>`, whose rules (`W`
@@ -4051,9 +4072,13 @@ static esp_err_t cfgHttpApPass(httpd_req_t *req) {
     nvs.end();
     strlcpy(cfgApPass, pass, sizeof(cfgApPass));
     memset(pass, 0, sizeof(pass));
-    cfgReopenAtMs = millis() + 1500;   // after this answer has gone
+    cfgReopenAtMs = millis() + CONFIG_REOPEN_DELAY_MS;   // after the page has shown its answer
     DEBUG_SERIAL.println("[CONFIG] password set: restarting the network with it");
-    return cfgSend(req, "200 OK", "Saved. The network restarts in a moment: join it again with the new password.\n");
+    // The page counts down to the restart and then waits to be back: it needs
+    // to know when, from here, so the two cannot disagree.
+    char reply[40];
+    snprintf(reply, sizeof(reply), "saved restart_ms=%d\n", CONFIG_REOPEN_DELAY_MS);
+    return cfgSend(req, "200 OK", reply);
 }
 
 static esp_err_t cfgHttpWifi(httpd_req_t *req) {
@@ -4134,6 +4159,9 @@ static void configOpen(uint32_t windowMs) {
         cfgPausedBt = true;
     }
 #endif
+    // PSRAM where there is some: on a WROVER internal RAM is what the network,
+    // the web server and a tone's DMA all have to come out of.
+    if (cfgCmdOut == nullptr && psramFound()) cfgCmdOut = (char *)ps_malloc(CONFIG_REPLY_MAX);
     if (cfgCmdOut == nullptr) cfgCmdOut = (char *)malloc(CONFIG_REPLY_MAX);
     if (cfgApNetif == nullptr) {
         cfgApNetif = esp_netif_create_default_wifi_ap();
@@ -4185,9 +4213,12 @@ static void configOpen(uint32_t windowMs) {
     cfgReopenAtMs = 0;
     esp_netif_ip_info_t ip = {};
     esp_netif_get_ip_info(cfgApNetif, &ip);
-    DEBUG_SERIAL.printf("[CONFIG] open ssid=%s-setup auth=%s ip=" IPSTR " for=%lus bt_paused=%d\n",
+    DEBUG_SERIAL.printf("[CONFIG] open ssid=%s-setup auth=%s ip=" IPSTR " for=%lus bt_paused=%d "
+                        "dma=%u dmamax=%u\n",
                         roomName, cfgSecured ? "wpa2" : "open", IP2STR(&ip.ip),
-                        (unsigned long)(windowMs / 1000), cfgPausedBt ? 1 : 0);
+                        (unsigned long)(windowMs / 1000), cfgPausedBt ? 1 : 0,
+                        (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
     meshPlayFeedback(MESH_FB_OPEN);   // two drops, as every window opening
 }
 
@@ -4234,7 +4265,10 @@ static void ringService() {
         ringSound.begin(RING_NOTES, RING_NOTE_COUNT, DROP_TIMBRE, CLIENT_SAMPLE_RATE);
         ringPlaying = true;
     } else if (currentMode == MODE_DISCOVERY) {
-        initI2SForTones();
+        if (!initI2SForTones()) {
+            DEBUG_SERIAL.println("[OUT] error reason=no_memory (ring)");
+            return;
+        }
         playDrops(RING_NOTES, RING_NOTE_COUNT, true);
         deinitI2SForTones();
     }
@@ -4880,9 +4914,10 @@ void setup() {
     // rollback.
     // Nor on a front end, which has no speaker (D18).
     if (!benchMode && !frontEnd && esp_reset_reason() == ESP_RST_POWERON) {
-        initI2SForTones();
-        playStartupSound();
-        deinitI2SForTones();
+        if (initI2SForTones()) {
+            playStartupSound();
+            deinitI2SForTones();
+        }
     }
 
     DriftController::Config dcfg;
