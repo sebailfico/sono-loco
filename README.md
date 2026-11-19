@@ -451,7 +451,7 @@ anything (bare `m`, `M` and `c` are toggles; `m1`, `M0` and the like set).
 | `M` | client: mix stereo to mono on both channels, for a node with one speaker (a MAX98357A plays one channel). Kept in NVS. `M1`/`M0` set, bare `M` toggles |
 | `h` | ring: two ding-dongs from this node's speaker, to find which box it is — over its music while it plays, on its own when idle, and through a mute or a low trim (D19). The setup page's Ring button |
 | `I` | `I<name>` this node's name — what `@`, the setup page and (from its next start) Bluetooth know it by; bare `I` reports. Kept in NVS; the build's `ROOM_NAME` until then. 1-31 characters, no spaces |
-| `C` | open the setup network for 10 minutes, or keep it open; `C0` closes it (D19). Over the mesh to one node, never to `*` |
+| `C` | open the setup network for 10 minutes, or keep it open; `C0` closes it (D19). Over the mesh to one node, never to `*`. `CX` forgets its password, on this node's port only |
 | `g` | print the mesh identity; `g<name>` sets it. Kept in NVS, takes effect at once |
 | `p` | listen for 60 s and join the mesh that offers itself — the node half of pairing |
 | `o` | offer this mesh for 60 s — the server half |

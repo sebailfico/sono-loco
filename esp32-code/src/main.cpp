@@ -3872,7 +3872,8 @@ static esp_netif_t   *cfgApNetif    = nullptr;
 static httpd_handle_t cfgHttp       = nullptr;
 static volatile bool  cfgDnsRun     = false;
 static volatile bool  cfgDnsAlive   = false;   // its task has not ended yet
-static volatile unsigned long cfgReopenAtMs = 0;   // the password changed: restart the AP with it
+static volatile unsigned long cfgReopenAtMs = 0;   // the password changed: take the AP down...
+static unsigned long          cfgUpAtMs     = 0;   // ...and bring it back with the new one
 static volatile unsigned long cfgCloseAtMs  = 0;   // the page said close
 static char           cfgApPass[CONFIG_AP_PASS_MAX + 1] = "";
 
@@ -4077,7 +4078,7 @@ static esp_err_t cfgHttpApPass(httpd_req_t *req) {
     // The page counts down to the restart and then waits to be back: it needs
     // to know when, from here, so the two cannot disagree.
     char reply[40];
-    snprintf(reply, sizeof(reply), "saved restart_ms=%d\n", CONFIG_REOPEN_DELAY_MS);
+    snprintf(reply, sizeof(reply), "saved restart_ms=%d\n", CONFIG_REOPEN_DELAY_MS + CONFIG_REOPEN_GAP_MS);
     return cfgSend(req, "200 OK", reply);
 }
 
@@ -4211,6 +4212,7 @@ static void configOpen(uint32_t windowMs) {
     cfgLastReqMs  = millis();
     cfgCloseAtMs  = 0;
     cfgReopenAtMs = 0;
+    cfgUpAtMs     = 0;
     esp_netif_ip_info_t ip = {};
     esp_netif_get_ip_info(cfgApNetif, &ip);
     DEBUG_SERIAL.printf("[CONFIG] open ssid=%s-setup auth=%s ip=" IPSTR " for=%lus bt_paused=%d "
@@ -4293,8 +4295,20 @@ static void configService() {
     }
 
     if (!cfgOpen) return;
+    // A new password: the network goes away for CONFIG_REOPEN_GAP_MS, then comes
+    // back with it. Changed in place, a phone kept its association with an open
+    // network that no longer existed, and reached nothing until its WiFi was
+    // turned off and on (2026-11-19).
     if (cfgReopenAtMs != 0 && (long)(millis() - cfgReopenAtMs) >= 0) {
         cfgReopenAtMs = 0;
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+        cfgUpAtMs = millis() + CONFIG_REOPEN_GAP_MS;
+        if (cfgUpAtMs == 0) cfgUpAtMs = 1;
+        DEBUG_SERIAL.println("[CONFIG] network down, for the new password");
+    }
+    if (cfgUpAtMs != 0 && (long)(millis() - cfgUpAtMs) >= 0) {
+        cfgUpAtMs = 0;
         cfgApStart();
         DEBUG_SERIAL.printf("[CONFIG] network restarted auth=%s\n", cfgSecured ? "wpa2" : "open");
     }
@@ -4654,7 +4668,22 @@ static void commandRun(char c, const char *arg, bool remote) {
         case '>': linkAsk(arg);    break;
         case 'C':
             // The setup network (D19): `C` opens it for CONFIG_WINDOW_MS, or
-            // keeps it open that long; `C0` closes it.
+            // keeps it open that long; `C0` closes it. `CX` forgets its
+            // password -- typed on this node's port only, never over the mesh,
+            // or anybody on the mesh could open somebody's network to all.
+            if (arg[0] == 'X') {
+                if (remote) {
+                    DEBUG_SERIAL.println("[CONFIG] error reason=local_only (CX is for this node's port)");
+                    break;
+                }
+                prefs.begin(PREF_NAMESPACE, false);
+                prefs.remove(PREF_AP_PASS);
+                prefs.end();
+                cfgApPass[0] = '\0';
+                if (cfgOpen) cfgReopenAtMs = millis();   // and the open network is open now
+                DEBUG_SERIAL.println("[CONFIG] password forgotten: the network is open");
+                break;
+            }
             if (arg[0] == '0') configClose("C0");
             else               configOpen(CONFIG_WINDOW_MS);
             if (!cfgOpen) DEBUG_SERIAL.println("[CONFIG] closed");

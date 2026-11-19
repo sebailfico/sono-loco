@@ -353,6 +353,11 @@
 // How long after a password is set the network restarts with it: long enough
 // for the page to say what to join next before the phone is dropped.
 #define CONFIG_REOPEN_DELAY_MS  3000
+// ...and how long it is gone before it comes back with the password, so a phone
+// sees the open network go and a protected one arrive rather than one that
+// changed under it -- which left a phone reaching nothing until its WiFi was
+// turned off and on (2026-11-19).
+#define CONFIG_REOPEN_GAP_MS    2000
 // The node's address on its own network, where a phone finds the page if it
 // does not open by itself. A /24 around it is handed out to phones. Should the
 // node ever join a home network on 192.168.1.x as well (TODO.md), the two

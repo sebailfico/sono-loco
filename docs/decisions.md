@@ -1160,7 +1160,8 @@ which needs somebody within WiFi range in the five minutes after a fresh node
 is plugged in. The home WiFi's password is accepted only once the network has
 a password, so it never crosses the air in the clear. Mesh commands themselves
 are still unauthenticated (D16): the network protects the page, not the mesh.
-A forgotten password is cleared over USB.
+A forgotten password is cleared with `CX`, typed on the node's own port and
+refused over the mesh.
 
 **The button.** It had a short press and a long one; it has three ranges now,
 read on release — under 1 s, 3 to 9 s, 10 to 15 s — with dead zones between

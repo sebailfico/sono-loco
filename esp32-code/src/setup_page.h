@@ -88,7 +88,12 @@ async function info(){try{const r=await fetch('/api/info');const i=await r.json(
  $('who').textContent='Mesh '+i.meshname+' ('+i.mesh+'), firmware '+i.fw;
  $('lock').hidden=i.protected;$('meshCard').hidden=!i.protected;$('wifiCard').hidden=!i.protected;
  if(i.wifi)$('ssid').value=i.wifi;if(i.protected)refresh()}catch(e){}}
-function reveal(input,btn){btn.onclick=()=>{const hid=$(input).type==='password';$(input).type=hid?'text':'password';btn.textContent=hid?'Hide':'Show'}}
+// Show/Hide without closing the phone's keyboard: the button never takes the focus (a tap focuses
+// on its pointerdown/mousedown, which is cancelled), and the field keeps it and its caret.
+function reveal(input,btn){const keep=e=>e.preventDefault();btn.addEventListener('pointerdown',keep);btn.addEventListener('mousedown',keep);
+ btn.onclick=()=>{const f=$(input),had=document.activeElement===f,a=f.selectionStart,b=f.selectionEnd,hid=f.type==='password';
+  f.type=hid?'text':'password';btn.textContent=hid?'Hide':'Show';
+  if(had){f.focus({preventScroll:true});try{f.setSelectionRange(a,b)}catch(e){}}}}
 reveal('appass',$('appassShow'));reveal('wpass',$('wpassShow'));
 async function form(id,url,body,done){const s=$(id);s.className='st';s.textContent='…';
  try{s.textContent=(await post(url,body)).trim();if(done)done()}catch(e){s.className='st err';s.textContent=String(e.message||e)}}
@@ -100,7 +105,8 @@ async function backOn(){try{const c=new AbortController();setTimeout(()=>c.abort
  const r=await fetch('/api/info',{cache:'no-store',signal:c.signal});return r.ok&&(await r.json()).protected}catch(e){return false}}
 function afterPassword(ms){const now=el('div','st','');
  $('lock').replaceChildren(el('h2','','Password set'),
-  el('div','sub','When '+ssid+' restarts, your phone is dropped from it and may go back to its usual WiFi. Open the WiFi settings and join '+ssid+' again, with the password.'),now);
+  el('div','sub','When '+ssid+' restarts, your phone is dropped from it and may go back to its usual WiFi. Open the WiFi settings and join '+ssid+' again, with the password.'),now,
+  el('div','sub','Joined, and the page does not come back? Turn the phone’s WiFi off and on, join again, and open 192.168.1.1. A phone can keep sending everything over mobile data to a network with no internet.'));
  const end=Date.now()+ms;
  const tick=setInterval(()=>{const left=Math.ceil((end-Date.now())/1000);
   if(left>0){now.textContent='Restarting in '+left+' s…';return}

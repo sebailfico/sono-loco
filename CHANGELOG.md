@@ -78,6 +78,14 @@ hash until it is reflashed.
     fields have Show/Hide. After Set the page counts down to the restart
     (`restart_ms=` from the node, `CONFIG_REOPEN_DELAY_MS` 3 s), then asks the
     node every 2 s and reloads once the phone is back on with the password.
+  - Second run, 2026-11-19: the whole flow from the button, password, Ring
+    on both nodes, trim, mute and the home WiFi worked from a phone. After
+    the password restart the phone reached nothing until its WiFi was
+    turned off and on, so the network now goes away for 2 s
+    (`CONFIG_REOPEN_GAP_MS`) and comes back protected, rather than changing
+    under the phone, and the page says what to do if it still does not come
+    back. Show/Hide no longer closes a phone's keyboard. `CX` forgets the
+    password, on the node's own port only.
 - **A two-chip server: Bluetooth on a WROOM, the mesh on any node** (2026-11-12,
   D18). **Built for every environment, and not yet run on a board**; on the
   `two-chip-server` branch. A classic board in front-end mode (`F`, NVS) runs

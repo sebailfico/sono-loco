@@ -245,7 +245,10 @@ polish.
       WROOM: every command over the mesh as designed (read-back, `m1` twice,
       rename, retries, `*` refusals, one-node answers in 0.33 s); the page
       listed both nodes; Ring rebooted the WROVER (`docs/gotchas.md`), fixed.
-      Still to see on a phone: the password flow end to end, and Ring. On a
+      Second run, 2026-11-19: the password flow end to end and Ring on both
+      nodes worked, but after the restart a phone reached nothing until its
+      WiFi was turned off and on; the network now goes away for 2 s first.
+      Still to see: whether that is enough. On a
       board, in order:
       - The S3, freshly flashed with no password: `[CONFIG] open ... auth=open`
         at boot, two drops, and `SonoLoco-S3-setup` in a phone's list. Joining
