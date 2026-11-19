@@ -4029,6 +4029,17 @@ static esp_err_t cfgHttpCmd(httpd_req_t *req) {
     // never travels, nothing that silences the house goes to `*`) commandAsk
     // already enforces.
     if (line[0] != '@') return cfgSend(req, "400 Bad Request", "@<target> <command> only\n");
+    // But a question this node addresses to itself runs as if typed on its
+    // port, and `CX` is for its port alone: from the page it would forget the
+    // password of the very network the page is on (2026-11-19).
+    {
+        const char *target, *text;
+        size_t      tlen, clen;
+        if (meshSplitCommandLine(line + 1, &target, &tlen, &text, &clen) && clen >= 2 &&
+            text[0] == 'C' && text[1] == 'X') {
+            return cfgSend(req, "403 Forbidden", "CX is for the node's own port\n");
+        }
+    }
 
     portENTER_CRITICAL(&cfgMux);
     const bool free = cfgCmdState == CFG_IDLE;
